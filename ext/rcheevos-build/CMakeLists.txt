@@ -1,7 +1,8 @@
 cmake_minimum_required (VERSION 3.10.0)
 project (RCheevos)
 
-set(SRC_DIR ../rcheevos/src)
+set(RCHEEVOS_ROOT ../../rcheevos)
+set(SRC_DIR ${RCHEEVOS_ROOT}/src)
 
 # format
 set(ALL_SOURCE_FILES
@@ -35,12 +36,21 @@ set(ALL_SOURCE_FILES
 	${SRC_DIR}/rcheevos/runtime_progress.c
 	${SRC_DIR}/rcheevos/trigger.c
 	${SRC_DIR}/rcheevos/value.c
-	# rhash (still need just md5, hash)
+	# rhash
+	${SRC_DIR}/rhash/aes.c
+	${SRC_DIR}/rhash/aes.h
+	${SRC_DIR}/rhash/cdreader.c
+	${SRC_DIR}/rhash/hash.c
+	${SRC_DIR}/rhash/hash_disc.c
+	${SRC_DIR}/rhash/hash_encrypted.c
+	${SRC_DIR}/rhash/hash_rom.c
+	${SRC_DIR}/rhash/hash_zip.c
 	${SRC_DIR}/rhash/md5.c
 	${SRC_DIR}/rhash/md5.h
+	${SRC_DIR}/rhash/rc_hash_internal.h
 	)
 
 add_library(rcheevos STATIC ${ALL_SOURCE_FILES})
 
-target_compile_definitions(rcheevos PUBLIC RC_DISABLE_LUA)
-target_include_directories(rcheevos PUBLIC ../rcheevos/include ../rcheevos/src/rapi)
+target_compile_definitions(rcheevos PUBLIC RC_DISABLE_LUA RC_CLIENT_SUPPORTS_HASH)
+target_include_directories(rcheevos PUBLIC ${RCHEEVOS_ROOT}/include ${SRC_DIR}/rapi)

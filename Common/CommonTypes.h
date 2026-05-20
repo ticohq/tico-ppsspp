@@ -46,10 +46,16 @@ typedef signed __int64 s64;
 #define Framebuffer _Framebuffer
 #define Waitable _Waitable
 #define ThreadContext _ThreadContext
+#define BreakReason _BreakReason
 #include <switch.h>
 // Cleanup
-#undef KeyInputFlags::UP
-#undef KeyInputFlags::DOWN
+#undef UP
+#undef DOWN
+#undef BIT
+#undef BreakReason
+// Conflicting types with libnx
+#undef u64
+#undef s64
 #undef Event
 #undef Framebuffer
 #undef Waitable

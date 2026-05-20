@@ -1,8 +1,10 @@
+#include "Core/LuaContext.h"
+
+#ifndef RC_DISABLE_LUA
 #include <string>
 
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
-#include "Core/LuaContext.h"
 #include "Core/MemMap.h"
 
 // Sol is expensive to include so we only do it here.
@@ -139,3 +141,23 @@ void LuaContext::ExecuteConsoleCommand(std::string_view cmd) {
 		lines_.push_back(LuaLogLine{ LogLineType::Error, std::string(e.what()) });
 	}
 }
+#else
+
+LuaContext g_lua;
+
+void LuaContext::Init() {
+}
+
+void LuaContext::Shutdown() {
+}
+
+void LuaContext::Print(LogLineType type, std::string_view text) {
+	lines_.push_back(LuaLogLine{ type, std::string(text), 0 });
+}
+
+void LuaContext::ExecuteConsoleCommand(std::string_view cmd) {
+	(void)cmd;
+	Print(LogLineType::Error, "Lua support is disabled in this build.");
+}
+
+#endif

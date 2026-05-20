@@ -151,3 +151,9 @@ RAPrefs_PPSSPP.cfg
 cmake-build-*/
 
 /.vscode/
+
+libnx
+tico-ppsspp
+
+build_switch_tico
+build_switch_minimal

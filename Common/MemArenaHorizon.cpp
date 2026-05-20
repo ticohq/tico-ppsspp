@@ -1,4 +1,4 @@
-// Copyright (C) 2023 M4xw
+// Copyright (C) 2003 m4xw, Dan (ticoverse.com).
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -26,58 +26,66 @@ static uintptr_t memoryCodeBase = 0;
 static uintptr_t memorySrcBase = 0;
 
 size_t MemArena::roundup(size_t x) {
-	return x;
+  return x;
 }
 
 bool MemArena::NeedsProbing() {
-	return false;
+  return false;
 }
 
 bool MemArena::GrabMemSpace(size_t size) {
-	return true;
+  return true;
 }
 
 void MemArena::ReleaseSpace() {
-	if (R_FAILED(svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, 0x10000000)))
-		printf("Failed to release view space...\n");
+  if (R_FAILED(svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, 0x10000000)))
+    printf("Failed to release view space...\n");
 
-	free((void *)memorySrcBase);
-	memorySrcBase = 0;
+  free((void *)memorySrcBase);
+  memorySrcBase = 0;
+  memoryBase = 0;
+  memoryCodeBase = 0;
 }
 
 void *MemArena::CreateView(s64 offset, size_t size, void *base) {
-	Result rc = svcMapProcessMemory(base, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size);
-	if (R_FAILED(rc)) {
-		printf("Fatal error creating the view... base: %p offset: %p size: %p src: %p err: %d\n",
-			   (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
-	} else {
-		printf("Created the view... base: %p offset: %p size: %p src: %p err: %d\n",
-			   (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
-	}
+  Result rc = svcMapProcessMemory(base, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size);
+  if (R_FAILED(rc)) {
+    printf("Fatal error creating the view... base: %p offset: %p size: %p src: %p err: %d\n",
+      (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
+  } else {
+    printf("Created the view... base: %p offset: %p size: %p src: %p err: %d\n",
+      (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
+  }
 
-	return base;
+  return base;
 }
 
 void MemArena::ReleaseView(s64 offset, void *view, size_t size) {
-	if (R_FAILED(svcUnmapProcessMemory(view, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size)))
-		printf("Failed to unmap view...\n");
+  if (R_FAILED(svcUnmapProcessMemory(view, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size)))
+    printf("Failed to unmap view...\n");
 }
 
 u8 *MemArena::Find4GBBase() {
-	memorySrcBase = (uintptr_t)memalign(0x1000, 0x10000000);
+  memorySrcBase = (uintptr_t)memalign(0x1000, 0x10000000);
 
-	if (!memoryBase)
-		memoryBase = (uintptr_t)virtmemReserve(0x10000000);
+  if (!memoryBase) {
+    virtmemLock();
+    memoryBase = (uintptr_t)virtmemFindAslr(0x10000000, 0);
+    virtmemUnlock();
+  }
 
-	if (!memoryCodeBase)
-		memoryCodeBase = (uintptr_t)virtmemReserve(0x10000000);
+  if (!memoryCodeBase) {
+    virtmemLock();
+    memoryCodeBase = (uintptr_t)virtmemFindCodeMemory(0x10000000, 0);
+    virtmemUnlock();
+  }
 
-	if (R_FAILED(svcMapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, 0x10000000)))
-		printf("Failed to map memory...\n");
-	if (R_FAILED(svcSetProcessMemoryPermission(envGetOwnProcessHandle(), memoryCodeBase, 0x10000000, Perm_Rx)))
-		printf("Failed to set perms...\n");
+  if (R_FAILED(svcMapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, 0x10000000)))
+    printf("Failed to map memory...\n");
+  if (R_FAILED(svcSetProcessMemoryPermission(envGetOwnProcessHandle(), memoryCodeBase, 0x10000000, Perm_Rx)))
+    printf("Failed to set perms...\n");
 
-	return (u8 *)memoryBase;
+  return (u8 *)memoryBase;
 }
 
 #endif // PPSSPP_PLATFORM(SWITCH)

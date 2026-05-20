@@ -155,7 +155,7 @@ private:
 			if (handler.IsValid()) {
 				return handler.Open(basePath.ToString(), fileName, access);
 			} else {
-				return hFile.Open(basePath, fileName, access, err);
+				return hFile.Open(basePath, Path(), fileName, access, err);
 			}
 		}
 		size_t Read(u8 *data, s64 size) {

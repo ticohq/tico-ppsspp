@@ -3,8 +3,11 @@
 #include <string_view>
 #include <string>
 #include <memory>
+#include <vector>
 
+#ifndef RC_DISABLE_LUA
 #include "ext/sol/forward.hpp"
+#endif
 
 struct lua_State;
 
@@ -44,7 +47,9 @@ public:
 	void ExecuteConsoleCommand(std::string_view cmd);
 
 private:
+#ifndef RC_DISABLE_LUA
 	std::unique_ptr<sol::state> lua_;
+#endif
 	std::vector<LuaLogLine> lines_;
 };
 

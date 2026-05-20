@@ -1,0 +1,52 @@
+diff --git a/.gitignore b/.gitignore
+index 5c4a445..54f8eb3 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -85,3 +85,4 @@ conflog.txt
+ /tools/trasher
+ /tools/seek_print
+ .vscode/ipch/*
++switch_build
+\ No newline at end of file
+diff --git a/ffmpeg.patch b/ffmpeg.patch
+new file mode 100644
+index 0000000..1a95d15
+--- /dev/null
++++ b/ffmpeg.patch
+@@ -0,0 +1,23 @@
++diff --git a/.gitignore b/.gitignore
++index 5c4a445..54f8eb3 100644
++--- a/.gitignore
+++++ b/.gitignore
++@@ -85,3 +85,4 @@ conflog.txt
++ /tools/trasher
++ /tools/seek_print
++ .vscode/ipch/*
+++switch_build
++\ No newline at end of file
++diff --git a/switch.sh b/switch.sh
++index ee9b9a8..51848c5 100755
++--- a/switch.sh
+++++ b/switch.sh
++@@ -72,7 +72,7 @@ PARSERS="\
++ source /opt/devkitpro/switchvars.sh
++ 
++ ./configure \
++---prefix=$PORTLIBS_PREFIX \
+++--prefix=$(pwd)/switch_build \
++ ${GENERAL} \
++ --extra-cflags='-g -D__SWITCH__ -D_GNU_SOURCE -O3 -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -pie -ffunction-sections -fdata-sections -ftls-model=local-exec' \
++ --extra-cxxflags='-g -D__SWITCH__ -D_GNU_SOURCE -O3 -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -pie -ffunction-sections -fdata-sections -ftls-model=local-exec' \
+diff --git a/switch.sh b/switch.sh
+index ee9b9a8..51848c5 100755
+--- a/switch.sh
++++ b/switch.sh
+@@ -72,7 +72,7 @@ PARSERS="\
+ source /opt/devkitpro/switchvars.sh
+ 
+ ./configure \
+---prefix=$PORTLIBS_PREFIX \
++--prefix=$(pwd)/switch_build \
+ ${GENERAL} \
+ --extra-cflags='-g -D__SWITCH__ -D_GNU_SOURCE -O3 -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -pie -ffunction-sections -fdata-sections -ftls-model=local-exec' \
+ --extra-cxxflags='-g -D__SWITCH__ -D_GNU_SOURCE -O3 -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIE -pie -ffunction-sections -fdata-sections -ftls-model=local-exec' \

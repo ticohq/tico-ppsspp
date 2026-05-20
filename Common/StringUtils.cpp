@@ -25,7 +25,26 @@
 
 #if PPSSPP_PLATFORM(SWITCH)
 #define _GNU_SOURCE
+#include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+
+// vasprintf polyfill for libnx
+static int vasprintf(char **strp, const char *fmt, va_list ap) {
+  va_list ap_copy;
+  va_copy(ap_copy, ap);
+  int len = vsnprintf(NULL, 0, fmt, ap_copy);
+  va_end(ap_copy);
+
+  if (len < 0)
+    return -1;
+
+  *strp = (char *)malloc(len + 1);
+  if (!*strp)
+    return -1;
+
+  return vsnprintf(*strp, len + 1, fmt, ap);
+}
 #endif
 
 #include <cstdarg>

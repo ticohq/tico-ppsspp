@@ -60,6 +60,9 @@ Path GetSysDirectory(PSPDirectories directoryType) {
 	case DIRECTORY_GAME:
 		return pspDirectory / "GAME";
 	case DIRECTORY_SAVEDATA:
+		if (!g_Config.memStickSavedataDirectory.empty()) {
+			return g_Config.memStickSavedataDirectory;
+		}
 		return pspDirectory / "SAVEDATA";
 	case DIRECTORY_SCREENSHOT:
 		return pspDirectory / "SCREENSHOT";
@@ -72,6 +75,9 @@ Path GetSysDirectory(PSPDirectories directoryType) {
 	case DIRECTORY_DUMP:
 		return pspDirectory / "SYSTEM/DUMP";
 	case DIRECTORY_SAVESTATE:
+		if (!g_Config.saveStateDirectory.empty()) {
+			return g_Config.saveStateDirectory;
+		}
 		return pspDirectory / "PPSSPP_STATE";
 	case DIRECTORY_CACHE:
 		return pspDirectory / "SYSTEM/CACHE";

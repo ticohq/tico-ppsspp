@@ -21,6 +21,8 @@
 
 #if PPSSPP_PLATFORM(ANDROID)
 #define VK_USE_PLATFORM_ANDROID_KHR
+#elif PPSSPP_PLATFORM(SWITCH)
+#define VK_USE_PLATFORM_VI_NN
 #elif defined(_WIN32)
 #define VK_USE_PLATFORM_WIN32_KHR
 #define WIN32_LEAN_AND_MEAN
@@ -193,6 +195,8 @@ extern PFN_vkCmdExecuteCommands vkCmdExecuteCommands;
 
 #ifdef __ANDROID__
 extern PFN_vkCreateAndroidSurfaceKHR vkCreateAndroidSurfaceKHR;
+#elif defined(VK_USE_PLATFORM_VI_NN)
+extern PFN_vkCreateViSurfaceNN vkCreateViSurfaceNN;
 #elif defined(_WIN32)
 extern PFN_vkCreateWin32SurfaceKHR vkCreateWin32SurfaceKHR;
 #elif defined(VK_USE_PLATFORM_METAL_EXT)

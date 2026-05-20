@@ -51,8 +51,8 @@ struct DirectoryFileHandle {
 	DirectoryFileHandle(Flags flags, FileSystemFlags fileSystemFlags)
 		: replay_(flags != SKIP_REPLAY), fileSystemFlags_(fileSystemFlags) {}
 
-	Path GetLocalPath(const Path &basePath, std::string_view localPath) const;
-	bool Open(const Path &basePath, std::string &fileName, FileAccess access, u32 &err);
+	Path GetLocalPath(const Path &basePath, const Path &savedataRedirectPath, std::string_view localPath) const;
+	bool Open(const Path &basePath, const Path &savedataRedirectPath, std::string &fileName, FileAccess access, u32 &err);
 	size_t Read(u8* pointer, s64 size);
 	size_t Write(const u8* pointer, s64 size);
 	size_t Seek(s32 position, FileMove type);
@@ -61,7 +61,7 @@ struct DirectoryFileHandle {
 
 class DirectoryFileSystem : public IFileSystem {
 public:
-	DirectoryFileSystem(IHandleAllocator *_hAlloc, const Path &_basePath, FileSystemFlags _flags = FileSystemFlags::NONE);
+	DirectoryFileSystem(IHandleAllocator *_hAlloc, const Path &_basePath, FileSystemFlags _flags = FileSystemFlags::NONE, const Path &_savedataRedirectPath = Path());
 	~DirectoryFileSystem();
 
 	void CloseAll();
@@ -101,6 +101,7 @@ private:
 	typedef std::map<u32, OpenFileEntry> EntryMap;
 	EntryMap entries;
 	Path basePath;
+	Path savedataRedirectPath;
 	IHandleAllocator *hAlloc;
 	FileSystemFlags flags;
 

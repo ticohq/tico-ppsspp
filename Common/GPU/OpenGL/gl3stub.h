@@ -47,7 +47,25 @@ extern "C" {
  * otherwise. */
 GLboolean gl3stubInit();
 
-#if !PPSSPP_PLATFORM(IOS)
+#if defined(__SWITCH__)
+
+#include <GLES3/gl3.h>
+
+/* EXT_blend_func_extended */
+extern GL_APICALL void           (* GL_APIENTRY glBindFragDataLocationIndexedEXT) (GLuint program, GLuint colorNumber, GLuint index, const GLchar *name);
+extern GL_APICALL void           (* GL_APIENTRY glBindFragDataLocationEXT) (GLuint program, GLuint color, const GLchar *name);
+extern GL_APICALL GLint          (* GL_APIENTRY glGetProgramResourceLocationIndexEXT) (GLuint program, GLenum programInterface, const GLchar *name);
+extern GL_APICALL GLint          (* GL_APIENTRY glGetFragDataIndexEXT) (GLuint program, const GLchar *name);
+
+#ifdef GL_EXT_buffer_storage
+/* EXT_buffer_storage */
+extern GL_APICALL void           (* GL_APIENTRY glBufferStorageEXT) (GLenum target, GLsizeiptr size, const void *data, GLbitfield flags);
+#endif
+
+/* OES_copy_image, etc. */
+extern GL_APICALL void           (* GL_APIENTRY glCopyImageSubDataOES) (GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei width, GLsizei height, GLsizei depth);
+
+#elif !PPSSPP_PLATFORM(IOS)
     
 /*-------------------------------------------------------------------------
  * Data type definitions
@@ -514,11 +532,10 @@ extern GL_APICALL void           (* GL_APIENTRY glBufferStorageEXT) (GLenum targ
 /* OES_copy_image, etc. */
 extern GL_APICALL void           (* GL_APIENTRY glCopyImageSubDataOES) (GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei width, GLsizei height, GLsizei depth);
 
-#endif   // PPSSPP_PLATFORM(IOS)
+#endif   // __SWITCH__ / PPSSPP_PLATFORM(IOS)
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif   // USING_GLES2
-

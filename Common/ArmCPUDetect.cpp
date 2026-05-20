@@ -297,10 +297,32 @@ void CPUInfo::Detect()
 	SYSTEM_INFO sysInfo;
 	GetSystemInfo(&sysInfo);
 	num_cores = sysInfo.dwNumberOfProcessors;
-#else // !PPSSPP_PLATFORM(IOS) && !PPSSPP_PLATFORM(MAC) && !PPSSPP_PLATFORM(WINDOWS)
+#elif PPSSPP_PLATFORM(SWITCH)
+	strcpy(brand_string, "NVIDIA Tegra X1");
+	num_cores = 4; // 3 available to applications + 1 reserved for OS
+	logical_cpu_count = 1;
+
+	truncate_cpy(cpu_string, brand_string);
+	bSwp = true;
+	bHalf = true;
+	bThumb = false;
+	bFastMult = true;
+	bVFP = true;
+	bEDSP = true;
+	bThumbEE = true;
+	bNEON = true;
+	bVFPv3 = true;
+	bTLS = true;
+	bVFPv4 = true;
+	bIDIVa = true;
+	bIDIVt = true;
+	bFP = true;
+	bASIMD = true;
+#else // !PPSSPP_PLATFORM(IOS) && !PPSSPP_PLATFORM(MAC) && !PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(SWITCH)
 	strcpy(brand_string, "Unknown");
 	num_cores = 1;
 #endif
+#if !PPSSPP_PLATFORM(SWITCH)
 	truncate_cpy(cpu_string, brand_string);
 	// Hardcode this for now
 	bSwp = true;
@@ -318,6 +340,7 @@ void CPUInfo::Detect()
 	bIDIVt = isVFP4;
 	bFP = false;
 	bASIMD = false;
+#endif
 #else // PPSSPP_PLATFORM(LINUX)
 	truncate_cpy(cpu_string, GetCPUString());
 	truncate_cpy(brand_string, GetCPUBrandString());

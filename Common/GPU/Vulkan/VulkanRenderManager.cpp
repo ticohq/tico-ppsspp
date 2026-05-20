@@ -14,6 +14,10 @@
 #include "Common/LogReporting.h"
 #include "Common/Thread/ThreadUtil.h"
 
+#if PPSSPP_PLATFORM(SWITCH)
+#include <switch.h>
+#endif
+
 #if 0 // def _DEBUG
 #define VLOG(...) NOTICE_LOG(Log::G3D, __VA_ARGS__)
 #else
@@ -25,6 +29,13 @@
 #endif
 
 using namespace PPSSPP_VK;
+
+#if PPSSPP_PLATFORM(SWITCH)
+static inline void SetSwitchThreadCore(int core) {
+	svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, (1ULL << core));
+}
+#endif
+
 
 // renderPass is an example of the "compatibility class" or RenderPassType type.
 bool VKRGraphicsPipeline::Create(VulkanContext *vulkan, VkRenderPass compatibleRenderPass, RenderPassType rpType, VkSampleCountFlagBits sampleCount, double scheduleTime, int countToCompile) {
@@ -405,12 +416,23 @@ bool VulkanRenderManager::CreateSwapchainViewsAndDepth(VkCommandBuffer cmdInit, 
 		vulkan_->SetDebugName(sc_buffer.view, VK_OBJECT_TYPE_IMAGE_VIEW, "swapchain_view");
 		frameDataShared.swapchainImages_.push_back(sc_buffer);
 		_dbg_assert_(res == VK_SUCCESS);
+		if (res != VK_SUCCESS) {
+			ERROR_LOG(Log::G3D, "vkCreateImageView for swapchain image %u failed: %s", i, VulkanResultToString(res));
+			return false;
+		}
 	}
 	delete[] swapchainImages;
 
 	// Must be before InitBackbufferRenderPass.
-	if (queueRunner_.InitDepthStencilBuffer(cmdInit, barriers)) {
-		queueRunner_.InitBackbufferFramebuffers(vulkan_->GetBackbufferWidth(), vulkan_->GetBackbufferHeight(), frameDataShared);
+	if (!queueRunner_.InitDepthStencilBuffer(cmdInit, barriers)) {
+		ERROR_LOG(Log::G3D, "InitDepthStencilBuffer failed for backbuffer size %dx%d",
+			vulkan_->GetBackbufferWidth(), vulkan_->GetBackbufferHeight());
+		return false;
+	}
+	if (!queueRunner_.InitBackbufferFramebuffers(vulkan_->GetBackbufferWidth(), vulkan_->GetBackbufferHeight(), frameDataShared)) {
+		ERROR_LOG(Log::G3D, "InitBackbufferFramebuffers failed for %u swapchain images at %dx%d",
+			frameDataShared.swapchainImageCount_, vulkan_->GetBackbufferWidth(), vulkan_->GetBackbufferHeight());
+		return false;
 	}
 	return true;
 }
@@ -541,6 +563,9 @@ VulkanRenderManager::~VulkanRenderManager() {
 
 void VulkanRenderManager::CompileThreadFunc() {
 	SetCurrentThreadName("ShaderCompile");
+#if PPSSPP_PLATFORM(SWITCH)
+	SetSwitchThreadCore(1);
+#endif
 	while (true) {
 		bool exitAfterCompile = false;
 		std::vector<CompileQueueEntry> toCompile;
@@ -610,6 +635,9 @@ void VulkanRenderManager::CompileThreadFunc() {
 
 void VulkanRenderManager::RenderThreadFunc() {
 	SetCurrentThreadName("VulkanRenderMan");
+#if PPSSPP_PLATFORM(SWITCH)
+	SetSwitchThreadCore(2);
+#endif
 	while (true) {
 		_dbg_assert_(useRenderThread_);
 
@@ -645,6 +673,9 @@ void VulkanRenderManager::RenderThreadFunc() {
 
 void VulkanRenderManager::PresentWaitThreadFunc() {
 	SetCurrentThreadName("PresentWait");
+#if PPSSPP_PLATFORM(SWITCH)
+	SetSwitchThreadCore(2);
+#endif
 
 #if !PPSSPP_PLATFORM(IOS_APP_STORE)
 	_dbg_assert_(vkWaitForPresentKHR != nullptr);

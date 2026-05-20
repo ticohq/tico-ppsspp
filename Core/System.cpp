@@ -29,8 +29,6 @@
 
 #include <mutex>
 
-#include "ext/lua/lapi.h"
-
 #include "Common/System/System.h"
 #include "Common/System/Request.h"
 #include "Common/System/OSD.h"

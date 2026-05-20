@@ -1,0 +1,247 @@
+diff --git a/miniupnpc/src/minissdpc.c b/miniupnpc/src/minissdpc.c
+index 57cb999..cabddfc 100644
+--- a/miniupnpc/src/minissdpc.c
++++ b/miniupnpc/src/minissdpc.c
+@@ -56,9 +56,12 @@ struct sockaddr_un {
+ #include <strings.h>
+ #include <unistd.h>
+ #include <sys/socket.h>
++#include <sys/ioctl.h>
+ #include <sys/param.h>
+ #include <sys/time.h>
++#if !defined(__SWITCH__)
+ #include <sys/un.h>
++#endif
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ #include <netdb.h>
+@@ -68,6 +71,42 @@ struct sockaddr_un {
+ 
+ #include "miniupnpc_socketdef.h"
+ 
++#ifdef __SWITCH__
++static unsigned int ppsspp_switch_if_nametoindex(const char *ifname)
++{
++	char *endptr;
++	unsigned long ifindex;
++	int fd;
++	struct ifreq ifr;
++
++	if (ifname == NULL || ifname[0] == '\0')
++		return 0;
++
++	ifindex = strtoul(ifname, &endptr, 10);
++	if (endptr != ifname && *endptr == '\0') {
++		if ((unsigned int)ifindex == ifindex)
++			return (unsigned int)ifindex;
++		return 0;
++	}
++
++	fd = socket(AF_INET, SOCK_DGRAM, 0);
++	if (fd < 0)
++		return 0;
++
++	memset(&ifr, 0, sizeof(ifr));
++	strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
++	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
++	if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
++		close(fd);
++		return 0;
++	}
++
++	close(fd);
++	return (unsigned int)ifr.ifr_index;
++}
++#define if_nametoindex ppsspp_switch_if_nametoindex
++#endif
++
+ #if !defined(__DragonFly__) && !defined(__OpenBSD__) && !defined(__NetBSD__) && !defined(__APPLE__) && !defined(_WIN32) && !defined(__CYGWIN__) && !defined(__sun) && !defined(__GNU__) && !defined(__FreeBSD_kernel__) && !defined(__HAIKU__)
+ #define HAS_IP_MREQN
+ #endif
+@@ -99,7 +138,7 @@ struct ip_mreqn
+ #include "miniupnpc.h"
+ #include "receivedata.h"
+ 
+-#if !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__))
++#if !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__) || defined(__SWITCH__))
+ 
+ #include "codelength.h"
+ 
+@@ -381,7 +420,7 @@ free_tmp_and_return:
+ 	return devlist;
+ }
+ 
+-#endif /* !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__)) */
++#endif /* !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__) || defined(__SWITCH__)) */
+ 
+ /* parseMSEARCHReply()
+  * the last 4 arguments are filled during the parsing :
+diff --git a/miniupnpc/src/minissdpc.h b/miniupnpc/src/minissdpc.h
+index c99f929..48fc34c 100644
+--- a/miniupnpc/src/minissdpc.h
++++ b/miniupnpc/src/minissdpc.h
+@@ -23,7 +23,7 @@
+ extern "C" {
+ #endif
+ 
+-#if !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__))
++#if !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__) || defined(__SWITCH__))
+ 
+ MINIUPNP_LIBSPEC struct UPNPDev *
+ getDevicesFromMiniSSDPD(const char * devtype, const char * socketpath, int * error);
+@@ -40,7 +40,7 @@ requestDevicesFromMiniSSDPD(int s, const char * devtype);
+ MINIUPNP_LIBSPEC struct UPNPDev *
+ receiveDevicesFromMiniSSDPD(int s, int * error);
+ 
+-#endif /* !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__)) */
++#endif /* !(defined(_WIN32) || defined(__amigaos__) || defined(__amigaos4__) || defined(__SWITCH__)) */
+ 
+ MINIUPNP_LIBSPEC struct UPNPDev *
+ ssdpDiscoverDevices(const char * const deviceTypes[],
+@@ -55,4 +55,3 @@ ssdpDiscoverDevices(const char * const deviceTypes[],
+ #endif
+ 
+ #endif
+-
+diff --git a/miniupnpc/src/miniupnpc.c b/miniupnpc/src/miniupnpc.c
+index e9ec4c2..31f9ee0 100644
+--- a/miniupnpc/src/miniupnpc.c
++++ b/miniupnpc/src/miniupnpc.c
+@@ -274,13 +274,13 @@ upnpDiscoverDevices(const char * const deviceTypes[],
+ {
+ 	struct UPNPDev * tmp;
+ 	struct UPNPDev * devlist = 0;
+-#if !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__)
++#if !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) && !defined(__SWITCH__)
+ 	int deviceIndex;
+-#endif /* !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) */
++#endif /* !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) && !defined(__SWITCH__) */
+ 
+ 	if(error)
+ 		*error = UPNPDISCOVER_UNKNOWN_ERROR;
+-#if !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__)
++#if !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) && !defined(__SWITCH__)
+ 	/* first try to get infos from minissdpd ! */
+ 	if(!minissdpdsock)
+ 		minissdpdsock = "/var/run/minissdpd.sock";
+@@ -320,9 +320,9 @@ upnpDiscoverDevices(const char * const deviceTypes[],
+ 			return devlist;
+ 		}
+ 	}
+-#else	/* !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) */
++#else	/* !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) && !defined(__SWITCH__) */
+ 	(void)minissdpdsock; /* unused */
+-#endif	/* !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) */
++#endif	/* !defined(_WIN32) && !defined(__amigaos__) && !defined(__amigaos4__) && !defined(__SWITCH__) */
+ 
+ 	/* direct discovery if minissdpd responses are not sufficient */
+ 	{
+@@ -404,11 +404,11 @@ build_absolute_url(const char * baseurl, const char * descURL,
+ 	char * s;
+ 	const char * base;
+ 	char * p;
+-#if defined(IF_NAMESIZE) && !defined(_WIN32)
++#if defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__)
+ 	char ifname[IF_NAMESIZE];
+-#else /* defined(IF_NAMESIZE) && !defined(_WIN32) */
++#else /* defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__) */
+ 	char scope_str[8];
+-#endif	/* defined(IF_NAMESIZE) && !defined(_WIN32) */
++#endif	/* defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__) */
+ 
+ 	if(  (url[0] == 'h')
+ 	   &&(url[1] == 't')
+@@ -429,14 +429,14 @@ build_absolute_url(const char * baseurl, const char * descURL,
+ 	if(url[0] != '/')
+ 		l++;
+ 	if(scope_id != 0) {
+-#if defined(IF_NAMESIZE) && !defined(_WIN32)
++#if defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__)
+ 		if(if_indextoname(scope_id, ifname)) {
+ 			l += 3 + strlen(ifname);	/* 3 == strlen(%25) */
+ 		}
+-#else /* defined(IF_NAMESIZE) && !defined(_WIN32) */
++#else /* defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__) */
+ 		/* under windows, scope is numerical */
+ 		l += 3 + snprintf(scope_str, sizeof(scope_str), "%u", scope_id);
+-#endif /* defined(IF_NAMESIZE) && !defined(_WIN32) */
++#endif /* defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__) */
+ 	}
+ 	s = malloc(l);
+ 	if(s == NULL) return NULL;
+@@ -448,17 +448,17 @@ build_absolute_url(const char * baseurl, const char * descURL,
+ 			p = strchr(s, ']');
+ 			if(p) {
+ 				/* insert %25<scope> into URL */
+-#if defined(IF_NAMESIZE) && !defined(_WIN32)
++#if defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__)
+ 				memmove(p + 3 + strlen(ifname), p, strlen(p) + 1);
+ 				memcpy(p, "%25", 3);
+ 				memcpy(p + 3, ifname, strlen(ifname));
+ 				n += 3 + strlen(ifname);
+-#else /* defined(IF_NAMESIZE) && !defined(_WIN32) */
++#else /* defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__) */
+ 				memmove(p + 3 + strlen(scope_str), p, strlen(p) + 1);
+ 				memcpy(p, "%25", 3);
+ 				memcpy(p + 3, scope_str, strlen(scope_str));
+ 				n += 3 + strlen(scope_str);
+-#endif /* defined(IF_NAMESIZE) && !defined(_WIN32) */
++#endif /* defined(IF_NAMESIZE) && !defined(_WIN32) && !defined(__SWITCH__) */
+ 			}
+ 		}
+ 	}
+diff --git a/miniupnpc/src/miniwget.c b/miniupnpc/src/miniwget.c
+index e76a5e5..d218508 100644
+--- a/miniupnpc/src/miniwget.c
++++ b/miniupnpc/src/miniwget.c
+@@ -26,6 +26,7 @@
+ #endif /* #ifndef strncasecmp */
+ #else /* #ifdef _WIN32 */
+ #include <unistd.h>
++#include <sys/ioctl.h>
+ #include <sys/param.h>
+ #if defined(__amigaos__) && !defined(__amigaos4__)
+ #define socklen_t int
+@@ -44,6 +45,42 @@
+ #define MAXHOSTNAMELEN 64
+ #endif /* __GNU__ */
+ 
++#ifdef __SWITCH__
++static unsigned int ppsspp_switch_if_nametoindex(const char *ifname)
++{
++	char *endptr;
++	unsigned long ifindex;
++	int fd;
++	struct ifreq ifr;
++
++	if (ifname == NULL || ifname[0] == '\0')
++		return 0;
++
++	ifindex = strtoul(ifname, &endptr, 10);
++	if (endptr != ifname && *endptr == '\0') {
++		if ((unsigned int)ifindex == ifindex)
++			return (unsigned int)ifindex;
++		return 0;
++	}
++
++	fd = socket(AF_INET, SOCK_DGRAM, 0);
++	if (fd < 0)
++		return 0;
++
++	memset(&ifr, 0, sizeof(ifr));
++	strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
++	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
++	if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
++		close(fd);
++		return 0;
++	}
++
++	close(fd);
++	return (unsigned int)ifr.ifr_index;
++}
++#define if_nametoindex ppsspp_switch_if_nametoindex
++#endif
++
+ #ifndef MIN
+ #define MIN(x,y) (((x)<(y))?(x):(y))
+ #endif /* MIN */

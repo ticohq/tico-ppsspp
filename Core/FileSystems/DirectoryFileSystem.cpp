@@ -62,8 +62,42 @@
 #include <fcntl.h>
 #endif
 
-DirectoryFileSystem::DirectoryFileSystem(IHandleAllocator *_hAlloc, const Path & _basePath, FileSystemFlags _flags) : basePath(_basePath), flags(_flags) {
+static std::string_view NormalizeDirectoryLocalPath(std::string_view localPath, FileSystemFlags flags) {
+	if (!localPath.empty() && localPath[0] == '/')
+		localPath = localPath.substr(1);
+
+	if (flags & FileSystemFlags::STRIP_PSP) {
+		if (equalsNoCase(localPath, "PSP")) {
+			localPath = "";
+		} else if (startsWithNoCase(localPath, "PSP/")) {
+			localPath = localPath.substr(4);
+		}
+	}
+
+	return localPath;
+}
+
+static Path ResolveDirectoryLocalPath(const Path &basePath, const Path &savedataRedirectPath, std::string_view localPath) {
+	if (localPath.empty() || localPath == "/")
+		return basePath;
+
+	if (!savedataRedirectPath.empty()) {
+		if (equalsNoCase(localPath, "SAVEDATA")) {
+			return savedataRedirectPath;
+		}
+		if (startsWithNoCase(localPath, "SAVEDATA/")) {
+			return savedataRedirectPath / localPath.substr(9);
+		}
+	}
+
+	return basePath / localPath;
+}
+
+DirectoryFileSystem::DirectoryFileSystem(IHandleAllocator *_hAlloc, const Path & _basePath, FileSystemFlags _flags, const Path &_savedataRedirectPath) : basePath(_basePath), savedataRedirectPath(_savedataRedirectPath), flags(_flags) {
 	File::CreateFullPath(basePath);
+	if (!savedataRedirectPath.empty()) {
+		File::CreateFullPath(savedataRedirectPath);
+	}
 
 	static const std::string_view mixedCase = "wJpCzSBNnZfxSgoS";
 	static const std::string_view upperCase = "WJPCZSBNNZFXSGOS";
@@ -90,43 +124,17 @@ DirectoryFileSystem::~DirectoryFileSystem() {
 
 // TODO(scoped): Merge the two below functions somehow.
 
-Path DirectoryFileHandle::GetLocalPath(const Path &basePath, std::string_view localPath) const {
-	if (localPath.empty())
-		return basePath;
-
-	if (localPath[0] == '/')
-		localPath = localPath.substr(1);
-
-	if (fileSystemFlags_ & FileSystemFlags::STRIP_PSP) {
-		if (localPath == "PSP") {
-			localPath = "/";
-		} else if (startsWithNoCase(localPath, "PSP/")) {
-			localPath = localPath.substr(4);
-		}
-	}
-
-	return basePath / localPath;
+Path DirectoryFileHandle::GetLocalPath(const Path &basePath, const Path &savedataRedirectPath, std::string_view localPath) const {
+	localPath = NormalizeDirectoryLocalPath(localPath, fileSystemFlags_);
+	return ResolveDirectoryLocalPath(basePath, savedataRedirectPath, localPath);
 }
 
 Path DirectoryFileSystem::GetLocalPath(std::string_view internalPath) const {
-	if (internalPath.empty())
-		return basePath;
-
-	if (internalPath[0] == '/')
-		internalPath = internalPath.substr(1);
-
-	if (flags & FileSystemFlags::STRIP_PSP) {
-		if (internalPath == "PSP") {
-			internalPath = "/";
-		} else if (startsWithNoCase(internalPath, "PSP/")) {
-			internalPath = internalPath.substr(4);
-		}
-	}
-
-	return basePath / internalPath;
+	internalPath = NormalizeDirectoryLocalPath(internalPath, flags);
+	return ResolveDirectoryLocalPath(basePath, savedataRedirectPath, internalPath);
 }
 
-bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, FileAccess access, u32 &error) {
+bool DirectoryFileHandle::Open(const Path &basePath, const Path &savedataRedirectPath, std::string &fileName, FileAccess access, u32 &error) {
 	error = 0;
 
 	if (access == FILEACCESS_NONE) {
@@ -145,7 +153,7 @@ bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, File
 	}
 	// else we try fopen first (in case we're lucky) before simulating case insensitivity
 
-	Path fullName = GetLocalPath(basePath, fileName);
+	Path fullName = GetLocalPath(basePath, savedataRedirectPath, fileName);
 
 	// On the PSP, truncating doesn't lose data.  If you seek later, you'll recover it.
 	// This is abnormal, so we deviate from the PSP's behavior and truncate on write/close.
@@ -295,7 +303,7 @@ bool DirectoryFileHandle::Open(const Path &basePath, std::string &fileName, File
 				error = SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND;
 				return false;
 			}
-			fullName = GetLocalPath(basePath, fileName);
+			fullName = GetLocalPath(basePath, savedataRedirectPath, fileName);
 			DEBUG_LOG(Log::FileSystem, "Case may have been incorrect, second try opening %s (%s)", fullName.c_str(), fileName.c_str());
 
 			// And try again with the correct case this time
@@ -629,7 +637,7 @@ int DirectoryFileSystem::OpenFile(std::string filename, FileAccess access, const
 	OpenFileEntry entry;
 	entry.hFile.fileSystemFlags_ = flags;
 	u32 err = 0;
-	bool success = entry.hFile.Open(basePath, filename, (FileAccess)(access & FILEACCESS_PSP_FLAGS), err);
+	bool success = entry.hFile.Open(basePath, savedataRedirectPath, filename, (FileAccess)(access & FILEACCESS_PSP_FLAGS), err);
 	if (err == 0 && !success) {
 		err = SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND;
 	}
@@ -1012,7 +1020,7 @@ void DirectoryFileSystem::DoState(PointerWrap &p) {
 			Do(p, entry.access);
 			u32 err;
 			bool brokenFile = false;
-			if (!entry.hFile.Open(basePath,entry.guestFilename,entry.access, err)) {
+			if (!entry.hFile.Open(basePath, savedataRedirectPath, entry.guestFilename, entry.access, err)) {
 				ERROR_LOG(Log::FileSystem, "Failed to reopen file while loading state: %s", entry.guestFilename.c_str());
 				brokenFile = true;
 			}

@@ -19,7 +19,33 @@
 #include "Common/GPU/OpenGL/GLCommon.h"
 
 #if defined(USING_GLES2)
-#if !PPSSPP_PLATFORM(IOS)
+#if defined(__SWITCH__)
+#include "EGL/egl.h"
+
+GLboolean gl3stubInit() {
+	#define FIND_PROC(s) s = (void *)eglGetProcAddress(#s)
+	FIND_PROC(glBindFragDataLocationIndexedEXT);
+	FIND_PROC(glBindFragDataLocationEXT);
+	FIND_PROC(glGetProgramResourceLocationIndexEXT);
+	FIND_PROC(glGetFragDataIndexEXT);
+#ifdef GL_EXT_buffer_storage
+	FIND_PROC(glBufferStorageEXT);
+#endif
+	FIND_PROC(glCopyImageSubDataOES);
+	#undef FIND_PROC
+	return GL_TRUE;
+}
+
+GL_APICALL void           (* GL_APIENTRY glBindFragDataLocationIndexedEXT) (GLuint program, GLuint colorNumber, GLuint index, const GLchar *name);
+GL_APICALL void           (* GL_APIENTRY glBindFragDataLocationEXT) (GLuint program, GLuint color, const GLchar *name);
+GL_APICALL GLint          (* GL_APIENTRY glGetProgramResourceLocationIndexEXT) (GLuint program, GLenum programInterface, const GLchar *name);
+GL_APICALL GLint          (* GL_APIENTRY glGetFragDataIndexEXT) (GLuint program, const GLchar *name);
+#ifdef GL_EXT_buffer_storage
+GL_APICALL void           (* GL_APIENTRY glBufferStorageEXT) (GLenum target, GLsizeiptr size, const void *data, GLbitfield flags);
+#endif
+GL_APICALL void           (* GL_APIENTRY glCopyImageSubDataOES) (GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei width, GLsizei height, GLsizei depth);
+
+#elif !PPSSPP_PLATFORM(IOS)
 #include "EGL/egl.h"
 
 GLboolean gl3stubInit() {
@@ -382,7 +408,6 @@ GLboolean gl3stubInit() {
 	return GL_TRUE;
 }
 
-#endif // PPSPP_PLATFORM(IOS)
+#endif // __SWITCH__ / PPSPP_PLATFORM(IOS)
 
 #endif // GLES2
-

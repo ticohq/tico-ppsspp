@@ -40,6 +40,12 @@
 #include <adrenotools/driver.h>
 #endif
 
+#if PPSSPP_PLATFORM(SWITCH)
+extern "C" {
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL SwitchStaticVkGetInstanceProcAddr(VkInstance instance, const char *pName) __asm__("vkGetInstanceProcAddr");
+}
+#endif
+
 namespace PPSSPP_VK {
 #if !PPSSPP_PLATFORM(IOS_APP_STORE)
 PFN_vkCreateInstance vkCreateInstance;
@@ -196,6 +202,9 @@ PFN_vkCreateWin32SurfaceKHR vkCreateWin32SurfaceKHR;
 #endif
 #if defined(VK_USE_PLATFORM_METAL_EXT)
 PFN_vkCreateMetalSurfaceEXT vkCreateMetalSurfaceEXT;
+#endif
+#if defined(VK_USE_PLATFORM_VI_NN)
+PFN_vkCreateViSurfaceNN vkCreateViSurfaceNN;
 #endif
 #if defined(VK_USE_PLATFORM_XLIB_KHR)
 PFN_vkCreateXlibSurfaceKHR vkCreateXlibSurfaceKHR;
@@ -462,7 +471,25 @@ bool VulkanMayBeAvailable() {
 	INFO_LOG(Log::G3D, "VulkanMayBeAvailable: Device allowed ('%s')", hwDeviceName.c_str());
 
 	std::string errorStr;
-	VulkanLibraryHandle lib = VulkanLoadLibrary(&errorStr);
+	VulkanLibraryHandle lib = nullptr;
+	PFN_vkEnumerateInstanceExtensionProperties localEnumerateInstanceExtensionProperties = nullptr;
+	PFN_vkCreateInstance localCreateInstance = nullptr;
+	PFN_vkEnumeratePhysicalDevices localEnumerate = nullptr;
+	PFN_vkDestroyInstance localDestroyInstance = nullptr;
+	PFN_vkGetPhysicalDeviceProperties localGetPhysicalDeviceProperties = nullptr;
+
+#if PPSSPP_PLATFORM(SWITCH)
+	if (!VulkanLoad(&errorStr)) {
+		INFO_LOG(Log::G3D, "Vulkan loader: Library not available: %s", errorStr.c_str());
+		g_vulkanAvailabilityChecked = true;
+		g_vulkanMayBeAvailable = false;
+		return false;
+	}
+
+	localEnumerateInstanceExtensionProperties = vkEnumerateInstanceExtensionProperties;
+	localCreateInstance = vkCreateInstance;
+#else
+	lib = VulkanLoadLibrary(&errorStr);
 	if (!lib) {
 		INFO_LOG(Log::G3D, "Vulkan loader: Library not available: %s", errorStr.c_str());
 		g_vulkanAvailabilityChecked = true;
@@ -472,11 +499,12 @@ bool VulkanMayBeAvailable() {
 
 	// Do a hyper minimal initialization and teardown to figure out if there's any chance
 	// that any sort of Vulkan will be usable.
-	PFN_vkEnumerateInstanceExtensionProperties localEnumerateInstanceExtensionProperties = LOAD_GLOBAL_FUNC_LOCAL(lib, vkEnumerateInstanceExtensionProperties);
-	PFN_vkCreateInstance localCreateInstance = LOAD_GLOBAL_FUNC_LOCAL(lib, vkCreateInstance);
-	PFN_vkEnumeratePhysicalDevices localEnumerate = LOAD_GLOBAL_FUNC_LOCAL(lib, vkEnumeratePhysicalDevices);
-	PFN_vkDestroyInstance localDestroyInstance = LOAD_GLOBAL_FUNC_LOCAL(lib, vkDestroyInstance);
-	PFN_vkGetPhysicalDeviceProperties localGetPhysicalDeviceProperties = LOAD_GLOBAL_FUNC_LOCAL(lib, vkGetPhysicalDeviceProperties);
+	localEnumerateInstanceExtensionProperties = LOAD_GLOBAL_FUNC_LOCAL(lib, vkEnumerateInstanceExtensionProperties);
+	localCreateInstance = LOAD_GLOBAL_FUNC_LOCAL(lib, vkCreateInstance);
+	localEnumerate = LOAD_GLOBAL_FUNC_LOCAL(lib, vkEnumeratePhysicalDevices);
+	localDestroyInstance = LOAD_GLOBAL_FUNC_LOCAL(lib, vkDestroyInstance);
+	localGetPhysicalDeviceProperties = LOAD_GLOBAL_FUNC_LOCAL(lib, vkGetPhysicalDeviceProperties);
+#endif
 
 	// Need to predeclare all this because of the gotos...
 	VkInstanceCreateInfo ci{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
@@ -497,16 +525,25 @@ bool VulkanMayBeAvailable() {
 	const char * const platformSurfaceExtension = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
 #elif defined(__ANDROID__)
 	const char *platformSurfaceExtension = VK_KHR_ANDROID_SURFACE_EXTENSION_NAME;
+#elif defined(VK_USE_PLATFORM_VI_NN)
+	const char * const platformSurfaceExtension = VK_NN_VI_SURFACE_EXTENSION_NAME;
 #elif defined(VK_USE_PLATFORM_METAL_EXT)
 	const char * const platformSurfaceExtension = VK_EXT_METAL_SURFACE_EXTENSION_NAME;
 #else
 	const char *platformSurfaceExtension = nullptr;
 #endif
 
+#if PPSSPP_PLATFORM(SWITCH)
+	if (!localEnumerateInstanceExtensionProperties || !localCreateInstance || !vkGetInstanceProcAddr) {
+		WARN_LOG(Log::G3D, "VulkanMayBeAvailable: Switch base function pointer missing, bailing");
+		goto bail;
+	}
+#else
 	if (!localEnumerateInstanceExtensionProperties || !localCreateInstance || !localEnumerate || !localDestroyInstance || !localGetPhysicalDeviceProperties) {
 		WARN_LOG(Log::G3D, "VulkanMayBeAvailable: Function pointer missing, bailing");
 		goto bail;
 	}
+#endif
 
 	INFO_LOG(Log::G3D, "VulkanMayBeAvailable: Enumerating instance extensions");
 	res = localEnumerateInstanceExtensionProperties(nullptr, &instanceExtCount, nullptr);
@@ -532,7 +569,6 @@ bool VulkanMayBeAvailable() {
 			INFO_LOG(Log::G3D, "VulkanMayBeAvailable: Found platform surface extension '%s'", platformSurfaceExtension);
 			instanceExtensions[ci.enabledExtensionCount++] = platformSurfaceExtension;
 			platformSurfaceExtensionFound = true;
-			break;
 		} else if (!strcmp(iter.extensionName, VK_KHR_SURFACE_EXTENSION_NAME)) {
 			instanceExtensions[ci.enabledExtensionCount++] = VK_KHR_SURFACE_EXTENSION_NAME;
 			surfaceExtensionFound = true;
@@ -572,6 +608,15 @@ bool VulkanMayBeAvailable() {
 		ERROR_LOG(Log::G3D, "VulkanMayBeAvailable: Failed to create vulkan instance (%s)", VulkanResultToString(res));
 		goto bail;
 	}
+#if PPSSPP_PLATFORM(SWITCH)
+	localDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(vkGetInstanceProcAddr(instance, "vkDestroyInstance"));
+	localEnumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(vkGetInstanceProcAddr(instance, "vkEnumeratePhysicalDevices"));
+	localGetPhysicalDeviceProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties"));
+	if (!localDestroyInstance || !localEnumerate || !localGetPhysicalDeviceProperties) {
+		ERROR_LOG(Log::G3D, "VulkanMayBeAvailable: Failed to load Switch instance functions");
+		goto bail;
+	}
+#endif
 	INFO_LOG(Log::G3D, "VulkanMayBeAvailable: Vulkan test instance created successfully.");
 	res = localEnumerate(instance, &physicalDeviceCount, nullptr);
 	if (res != VK_SUCCESS) {
@@ -656,6 +701,38 @@ bool VulkanLoad(std::string *errorStr) {
 #if PPSSPP_PLATFORM(IOS_APP_STORE)
 	INFO_LOG(Log::G3D, "iOS: Vulkan doesn't need loading");
 	return true;
+#elif PPSSPP_PLATFORM(SWITCH)
+	if (vkCreateInstance && vkGetInstanceProcAddr && vkGetDeviceProcAddr &&
+		vkEnumerateInstanceExtensionProperties && vkEnumerateInstanceLayerProperties) {
+		return true;
+	}
+
+	vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(&SwitchStaticVkGetInstanceProcAddr);
+	if (!vkGetInstanceProcAddr) {
+		*errorStr = "Failed to load vkGetInstanceProcAddr";
+		return false;
+	}
+
+	vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+		vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkGetDeviceProcAddr"));
+	vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+		vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
+	vkEnumerateInstanceVersion = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+		vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+	vkEnumerateInstanceExtensionProperties = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+		vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties"));
+	vkEnumerateInstanceLayerProperties = reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
+		vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceLayerProperties"));
+
+	if (vkCreateInstance && vkGetInstanceProcAddr && vkGetDeviceProcAddr &&
+		vkEnumerateInstanceExtensionProperties && vkEnumerateInstanceLayerProperties) {
+		INFO_LOG(Log::G3D, "VulkanLoad: Base functions loaded.");
+		return true;
+	}
+
+	*errorStr = "Failed to load Vulkan base functions";
+	ERROR_LOG(Log::G3D, "VulkanLoad: %s", errorStr->c_str());
+	return false;
 #else
 
 	if (!vulkanLibrary) {
@@ -720,6 +797,8 @@ void VulkanLoadInstanceFunctions(VkInstance instance, const VulkanExtensions &en
 	LOAD_INSTANCE_FUNC(instance, vkCreateWin32SurfaceKHR);
 #elif defined(__ANDROID__)
 	LOAD_INSTANCE_FUNC(instance, vkCreateAndroidSurfaceKHR);
+#elif defined(VK_USE_PLATFORM_VI_NN)
+	LOAD_INSTANCE_FUNC(instance, vkCreateViSurfaceNN);
 #elif defined(VK_USE_PLATFORM_METAL_EXT)
 	LOAD_INSTANCE_FUNC(instance, vkCreateMetalSurfaceEXT);
 #endif

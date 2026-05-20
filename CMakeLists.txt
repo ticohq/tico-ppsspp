@@ -197,6 +197,11 @@ option(SIMULATOR "Set to ON when targeting an x86 simulator of an ARM platform" 
 option(LIBRETRO "Set to ON to generate the libretro target" OFF)
 # :: Options
 option(USE_LIBNX "Set to ON to build for Switch(libnx)" OFF)
+set(_switch_vulkan_only_default OFF)
+if(USE_LIBNX)
+	set(_switch_vulkan_only_default ON)
+endif()
+option(SWITCH_VULKAN_ONLY "Build Switch(libnx) targets against Vulkan only, without the legacy EGL host path" ${_switch_vulkan_only_default})
 option(USE_FFMPEG "Build with FFMPEG support" ON)
 option(USE_DISCORD "Build with Discord support" ON)
 option(USE_MINIUPNPC "Build with miniUPnPc support" ON)
@@ -213,6 +218,17 @@ option(USE_CCACHE "Use ccache if detected" ON)
 option(USE_NO_MMAP "Disable mmap usage" OFF)
 option(USE_IAP "IAP enabled" OFF)
 option(GOLD "Gold build" OFF)
+set(SWITCH_VULKAN_LIBRARY "" CACHE FILEPATH "Optional override for the Switch libvulkan.a archive")
+
+if(USE_LIBNX)
+	set(USING_EGL ON CACHE BOOL "Set to ON if target environment uses EGL" FORCE)
+	set(USING_GLES2 ON CACHE BOOL "Set to ON if target device uses OpenGL ES 2.0" FORCE)
+	set(USE_DISCORD OFF CACHE BOOL "Build with Discord support" FORCE)
+	set(USE_SYSTEM_LIBPNG OFF CACHE BOOL "Dynamically link against system libpng" FORCE)
+	if(SWITCH_VULKAN_ONLY)
+		add_compile_definitions(PPSSPP_SWITCH_VULKAN_ONLY=1)
+	endif()
+endif()
 
 if(USE_CCACHE)
 	include(ccache)
@@ -295,7 +311,34 @@ include_directories(ext/glslang)
 # Anyway, glew will be going away anyway.
 include_directories(ext/glew)
 
-if(OPENXR AND NOT ARMV7_DEVICE)
+if(USE_LIBNX)
+	find_library(GLESV2_LIBRARY GLESv2 REQUIRED)
+	find_library(GLAPI_LIBRARY glapi REQUIRED)
+	if(SWITCH_VULKAN_LIBRARY)
+		set(VULKAN_LIBRARY "${SWITCH_VULKAN_LIBRARY}")
+	else()
+		find_library(VULKAN_LIBRARY vulkan REQUIRED)
+	endif()
+	find_library(DRM_NOUVEAU_LIBRARY drm_nouveau REQUIRED)
+
+	if(SWITCH_VULKAN_ONLY)
+		set(OPENGL_LIBRARIES
+			${GLESV2_LIBRARY}
+			${GLAPI_LIBRARY}
+			${VULKAN_LIBRARY}
+			${DRM_NOUVEAU_LIBRARY}
+		)
+	else()
+		find_library(EGL_LIBRARY EGL REQUIRED)
+		set(OPENGL_LIBRARIES
+			${EGL_LIBRARY}
+			${GLESV2_LIBRARY}
+			${GLAPI_LIBRARY}
+			${VULKAN_LIBRARY}
+			${DRM_NOUVEAU_LIBRARY}
+		)
+	endif()
+elseif(OPENXR AND NOT ARMV7_DEVICE)
 	set(OPENGL_LIBRARIES GLESv3 EGL)
 elseif(NOT OPENGL_LIBRARIES AND USING_GLES2)
 	set(OPENGL_LIBRARIES GLESv2 EGL)
@@ -308,7 +351,7 @@ if(NOT OPENGL_LIBRARIES)
 	find_package(OpenGL REQUIRED)
 endif()
 
-if(USING_EGL)
+if(USING_EGL AND NOT USE_LIBNX)
 	if(NOT EGL_LIBRARIES)
 		set(EGL_LIBRARIES EGL)
 	endif()
@@ -1000,6 +1043,8 @@ if(USE_FFMPEG)
 				endif()
 			elseif(MACOSX)
 				set(PLATFORM_ARCH "macosx/universal")
+						elseif(USE_LIBNX)
+				set(PLATFORM_ARCH "switch_build")
 			elseif(LINUX)
 				if(ARMV7)
 					set(PLATFORM_ARCH "linux/armv7")
@@ -1304,7 +1349,7 @@ else()
 		${PNG_ARM_INCLUDES}
 	)
 	set(PNG_LIBRARIES png17)
-	include_directories(ext/libpng17)
+	include_directories(BEFORE ext/libpng17)
 endif()
 
 add_library(basis_universal STATIC
@@ -1467,34 +1512,38 @@ else()
 	else()
 		set(TargetBin PPSSPPSDL)
 	endif()
-	# Require SDL
-	add_compile_definitions(SDL)
-	list(APPEND nativeExtra
-		SDL/SDLJoystick.h
-		SDL/SDLJoystick.cpp
-		SDL/SDLMain.cpp
-		SDL/SDLGLGraphicsContext.cpp
-	)
-	if(NOT USE_LIBNX)
+	if(NOT (USE_LIBNX AND SWITCH_VULKAN_ONLY))
+		# Require SDL
+		add_compile_definitions(SDL)
 		list(APPEND nativeExtra
-			SDL/SDLVulkanGraphicsContext.cpp
+			SDL/SDLJoystick.h
+			SDL/SDLJoystick.cpp
+			SDL/SDLMain.cpp
+			SDL/SDLGLGraphicsContext.cpp
 		)
-	endif()
-	if(SDL2_ttf_FOUND OR
-		(SDL2_ttf_PKGCONFIG_FOUND AND
-			SDL2_ttf_PKGCONFIG_VERSION VERSION_GREATER_EQUAL "2.0.18"))
-		add_compile_definitions(USE_SDL2_TTF)
-		if(FONTCONFIG_FOUND)
-			add_compile_definitions(USE_SDL2_TTF_FONTCONFIG)
-			list(APPEND nativeExtraLibs Fontconfig::Fontconfig)
+		if(NOT USE_LIBNX)
+			list(APPEND nativeExtra
+				SDL/SDLVulkanGraphicsContext.cpp
+			)
 		endif()
-	elseif(SDL2_ttf_PKGCONFIG_FOUND)
-		message(WARNING "Found SDL2_ttf <2.0.18 - this is too old, falling back to atlas")
 	endif()
-	if(SDL2_ttf_FOUND)
-		list(APPEND nativeExtraLibs SDL2_ttf::SDL2_ttf)
-	elseif(SDL2_ttf_PKGCONFIG_FOUND)
-		list(APPEND nativeExtraLibs PkgConfig::SDL2_ttf_PKGCONFIG)
+	if(NOT USE_LIBNX)
+		if(SDL2_ttf_FOUND OR
+			(SDL2_ttf_PKGCONFIG_FOUND AND
+				SDL2_ttf_PKGCONFIG_VERSION VERSION_GREATER_EQUAL "2.0.18"))
+			add_compile_definitions(USE_SDL2_TTF)
+			if(FONTCONFIG_FOUND)
+				add_compile_definitions(USE_SDL2_TTF_FONTCONFIG)
+				list(APPEND nativeExtraLibs Fontconfig::Fontconfig)
+			endif()
+		elseif(SDL2_ttf_PKGCONFIG_FOUND)
+			message(WARNING "Found SDL2_ttf <2.0.18 - this is too old, falling back to atlas")
+		endif()
+		if(SDL2_ttf_FOUND)
+			list(APPEND nativeExtraLibs SDL2_ttf::SDL2_ttf)
+		elseif(SDL2_ttf_PKGCONFIG_FOUND)
+			list(APPEND nativeExtraLibs PkgConfig::SDL2_ttf_PKGCONFIG)
+		endif()
 	endif()
 	if(APPLE)
 		list(APPEND nativeExtra
@@ -1530,6 +1579,9 @@ else()
 		else()
 			list(APPEND nativeExtraLibs ${SDL2Fwk})
 		endif()
+	elseif(USE_LIBNX AND SWITCH_VULKAN_ONLY)
+		# Switch Vulkan-only builds keep the Tico host SDL-free to avoid SDL's EGL-linked archive deps.
+		set(nativeExtraLibs ${nativeExtraLibs} pthread)
 	elseif(USING_EGL)
 		list(APPEND nativeExtraLibs pthread SDL2::SDL2)
 	else()
@@ -1945,7 +1997,11 @@ set(GPU_D3D11
 )
 
 # We build Vulkan even on Apple to avoid annoying build differences.
+if(USE_LIBNX AND SWITCH_VULKAN_ONLY)
+	set(GPU_IMPLS ${GPU_VULKAN})
+else()
 set(GPU_IMPLS ${GPU_GLES} ${GPU_VULKAN})
+endif()
 if(WIN32)
 	list(APPEND GPU_IMPLS ${GPU_D3D11})
 endif()
@@ -2080,7 +2136,7 @@ if(WIN32)
 	)
 endif()
 
-if(LINUX OR ANDROID OR MACOSX OR IOS)
+if(LINUX OR ANDROID OR MACOSX OR IOS OR USE_LIBNX)
 	list(APPEND aemu_postoffice
 		ext/aemu_postoffice/client/sock_impl_linux.c
 	)
@@ -2556,7 +2612,11 @@ list(APPEND CoreExtraLibs armips)
 #	target_link_libraries(native X11-xcb X11)
 #endif()
 
-set(GlslangLibs glslang OGLCompiler OSDependent SPIRV spirv-cross-glsl)
+set(GlslangLibs glslang OGLCompiler SPIRV spirv-cross-glsl)
+
+if(TARGET OSDependent)
+	list(APPEND GlslangLibs OSDependent)
+endif()
 
 if (ENABLE_SPVREMAPPER)
 	list(APPEND GlslangLibs SPVRemapper)
@@ -2582,8 +2642,13 @@ endif()
 
 include_directories(ext/libchdr/include)
 
+set(PPSSPP_DL_LIBS ${CMAKE_DL_LIBS})
+if(USE_LIBNX)
+	set(PPSSPP_DL_LIBS)
+endif()
+
 target_link_libraries(${CoreLibName} Common native chdr kirk cityhash sfmt19937 xbrz xxhash rcheevos minimp3 at3_standalone lua ${GlslangLibs}
-	${CoreExtraLibs} ${OPENGL_LIBRARIES} ${X11_LIBRARIES} ${CMAKE_DL_LIBS})
+	${CoreExtraLibs} ${OPENGL_LIBRARIES} ${X11_LIBRARIES} ${PPSSPP_DL_LIBS})
 
 # Winsock
 if(WIN32)
@@ -2909,6 +2974,63 @@ if(HEADLESS)
 	add_executable(PPSSPPHeadless ${HeadlessSource})
 	target_link_libraries(PPSSPPHeadless ${COCOA_LIBRARY} ${QUARTZ_CORE_LIBRARY} ${IOKIT_LIBRARY} ${LinkCommon})
 	setup_target_project(PPSSPPHeadless headless)
+endif()
+
+if(USE_LIBNX)
+	add_executable(tico-ppsspp
+		tico/TicoGraphicsHost.cpp
+		tico/TicoGraphicsHost.h
+		tico/PpssppEntry.cpp
+		tico/PpssppRuntime.cpp
+		tico/PpssppRuntime.h
+		tico/PpssppTicoConfig.cpp
+		tico/PpssppTicoConfig.h
+		tico/TicoAssetInstaller.cpp
+		tico/TicoAssetInstaller.h
+		tico/TicoAudioSfx.cpp
+		tico/TicoAudioSfx.h
+		tico/TicoChainload.cpp
+		tico/TicoChainload.h
+		tico/TicoConfig.h
+		tico/TicoCoreConfig.cpp
+		tico/TicoCoreConfig.h
+		tico/TicoLogger.h
+		tico/TicoMain.cpp
+		tico/TicoMain.h
+		tico/TicoOverlay.cpp
+		tico/TicoOverlay.h
+		tico/TicoRetroAchievements.cpp
+		tico/TicoRetroAchievements.h
+		tico/TicoTranslationManager.cpp
+		tico/TicoTranslationManager.h
+		tico/TicoUtils.h
+	)
+	target_link_libraries(tico-ppsspp ${COCOA_LIBRARY} ${QUARTZ_CORE_LIBRARY} ${IOKIT_LIBRARY} ${LinkCommon} minimp3)
+	target_include_directories(tico-ppsspp PRIVATE "${CMAKE_SOURCE_DIR}/rcheevos/include")
+	target_compile_definitions(tico-ppsspp PRIVATE RC_CLIENT_SUPPORTS_HASH)
+	target_link_options(tico-ppsspp PRIVATE -Wl,--allow-multiple-definition $<$<CONFIG:Release>:-Wl,--gc-sections>)
+	if(CMAKE_STRIP AND CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel)$")
+		add_custom_command(TARGET tico-ppsspp POST_BUILD
+			COMMAND "${CMAKE_STRIP}" --strip-unneeded "$<TARGET_FILE:tico-ppsspp>"
+			COMMENT "Stripping PPSSPP Tico release symbols"
+			VERBATIM
+		)
+	endif()
+	setup_target_project(tico-ppsspp tico)
+
+	set(tico-ppsspp_ROMFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/switch_tico_romfs")
+	file(MAKE_DIRECTORY "${tico-ppsspp_ROMFS_DIR}")
+	file(COPY "${CMAKE_SOURCE_DIR}/assets" DESTINATION "${tico-ppsspp_ROMFS_DIR}")
+	file(COPY "${CMAKE_SOURCE_DIR}/tico/assets/" DESTINATION "${tico-ppsspp_ROMFS_DIR}/assets")
+	file(COPY "${CMAKE_SOURCE_DIR}/tico/fonts" DESTINATION "${tico-ppsspp_ROMFS_DIR}")
+	file(COPY "${CMAKE_SOURCE_DIR}/tico/lang" DESTINATION "${tico-ppsspp_ROMFS_DIR}")
+
+	nx_generate_nacp(tico-ppsspp.nacp
+		NAME "tico PPSSPP"
+		AUTHOR "ticoverse.com"
+		VERSION "2.0.0"
+	)
+	nx_create_nro(tico-ppsspp NACP tico-ppsspp.nacp ROMFS "${tico-ppsspp_ROMFS_DIR}")
 endif()
 
 if(UNITTEST)

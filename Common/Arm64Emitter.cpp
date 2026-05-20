@@ -23,6 +23,10 @@
 #include <libkern/OSCacheControl.h>
 #endif
 
+#if PPSSPP_PLATFORM(SWITCH)
+#include <switch.h>
+#endif
+
 namespace Arm64Gen
 {
 
@@ -336,6 +340,15 @@ void ARM64XEmitter::FlushIcacheSection(const u8 *start, const u8 *end)
 	sys_cache_control(kCacheFunctionPrepareForExecution, (void *)start, end - start);
 #elif PPSSPP_PLATFORM(WINDOWS)
 	FlushInstructionCache(GetCurrentProcess(), start, end - start);
+#elif PPSSPP_PLATFORM(SWITCH)
+	size_t size = end - start;
+	// Switch JIT memory has separate RW/RX aliases. Flush writes from RW,
+	// then invalidate the executable alias that the CPU will actually run.
+	ptrdiff_t offset = m_writable - m_code;
+	void *rw_start = (void *)(start + offset);
+
+	armDCacheFlush(rw_start, size);
+	armICacheInvalidate((void *)start, size);
 #elif PPSSPP_ARCH(ARM64)
 	// Code from Dolphin, contributed by the Mono project.
 

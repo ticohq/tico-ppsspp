@@ -75,6 +75,13 @@ public:
 		if(R_FAILED(rc)) {
 			printf("Failed to create Jitbuffer of size 0x%x err: 0x%x\n", size, rc);
 		}
+		rc = jitTransitionToWritable(&jitController);
+		if(R_FAILED(rc)) {
+			printf("Failed to transition Jitbuffer to writable err: 0x%x\n", rc);
+			jitClose(&jitController);
+			region_size = 0;
+			return;
+		}
 		printf("[NXJIT]: Initialized RX: %p RW: %p\n", jitController.rx_addr, jitController.rw_addr);
 
 		region = (u8 *)jitController.rx_addr;

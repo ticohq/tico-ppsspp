@@ -428,7 +428,7 @@ std::string ResolvePath(std::string_view path) {
 	delete [] buf;
 	return output;
 
-#elif PPSSPP_PLATFORM(IOS)
+#elif PPSSPP_PLATFORM(IOS) || defined(__SWITCH__)
 	// Resolving has wacky effects on documents paths.
 	return std::string(path);
 #else
@@ -1236,7 +1236,7 @@ int Fseek(FILE *file, int64_t offset, int whence) {
 	return filestream_seek(file, offset, whence) != 0 ? -1 : 0;
 #elif defined(_WIN32)
 	return _fseeki64(file, offset, whence);
-#elif (defined(__ANDROID__) && __ANDROID_API__ < 24) || (defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS < 64)
+#elif (defined(__ANDROID__) && __ANDROID_API__ < 24) || (defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS < 64) || defined(__SWITCH__)
 	return fseek(file, offset, whence);
 #else
 	return fseeko(file, offset, whence);
@@ -1259,7 +1259,7 @@ int64_t Fseektell(FILE *file, int64_t offset, int whence) {
 	return filestream_seek(file, offset, whence) != 0 ? -1 : filestream_tell(file);
 #elif defined(_WIN32)
 	return _fseeki64(file, offset, whence) != 0 ? -1 : _ftelli64(file);
-#elif (defined(__ANDROID__) && __ANDROID_API__ < 24) || (defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS < 64)
+#elif (defined(__ANDROID__) && __ANDROID_API__ < 24) || (defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS < 64) || defined(__SWITCH__)
 	return fseek(file, offset, whence) != 0 ? -1 : ftell(file);
 #else
 	return fseeko(file, offset, whence) != 0 ? -1 : ftello(file);
@@ -1271,7 +1271,7 @@ int64_t Ftell(FILE *file) {
 	return filestream_tell(file);
 #elif defined(_WIN32)
 	return _ftelli64(file);
-#elif defined(__ANDROID__) || (defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS < 64)
+#elif defined(__ANDROID__) || (defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS < 64) || defined(__SWITCH__)
 	return ftell(file);
 #else
 	return ftello(file);
@@ -1361,7 +1361,11 @@ bool IOFile::Resize(uint64_t size)
 		_chsize_s(_fileno(m_file), size)
 #else
 		// TODO: handle 64bit and growing
+#if defined(__SWITCH__)
+		-1
+#else
 		ftruncate(fileno(m_file), size)
+#endif
 #endif
 	)
 		m_good = false;

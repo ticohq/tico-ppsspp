@@ -673,9 +673,11 @@ public:
 	Path defaultCurrentDirectory;  // Platform dependent, initialized at startup.
 
 	Path memStickDirectory;
+	Path memStickSavedataDirectory;  // Optional override for ms0:/PSP/SAVEDATA.
 	Path flash0Directory;
 	Path internalDataDirectory;
 	Path appCacheDirectory;
+	Path saveStateDirectory;
 
 	Path mountRoot;  // Actually, mount as host0. keeping consistent with headless args.
 

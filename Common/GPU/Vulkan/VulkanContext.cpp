@@ -169,6 +169,11 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 		instance_extensions_enabled_.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
 	}
 #endif
+#if defined(VK_USE_PLATFORM_VI_NN)
+	if (IsInstanceExtensionAvailable(VK_NN_VI_SURFACE_EXTENSION_NAME)) {
+		instance_extensions_enabled_.push_back(VK_NN_VI_SURFACE_EXTENSION_NAME);
+	}
+#endif
 #endif
 
 	if ((createInfo_.flags & VulkanInitFlags::VALIDATE) && info.customDriver.empty()) {
@@ -1005,6 +1010,25 @@ VkResult VulkanContext::ReinitSurface() {
 		metal.pLayer = winsysData1_;
 		metal.pNext = winsysData2_;
 		retval = vkCreateMetalSurfaceEXT(instance_, &metal, nullptr, &surface_);
+		break;
+	}
+#endif
+#if defined(VK_USE_PLATFORM_VI_NN)
+	case WINDOWSYSTEM_SWITCH:
+	{
+		VkViSurfaceCreateInfoNN vi{ VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN };
+		vi.flags = 0;
+		vi.window = winsysData1_ ? winsysData1_ : winsysData2_;
+		if (!vi.window) {
+			retval = VK_ERROR_INITIALIZATION_FAILED;
+			break;
+		}
+		if (!vkCreateViSurfaceNN) {
+			ERROR_LOG(Log::G3D, "vkCreateViSurfaceNN is not loaded");
+			retval = VK_ERROR_EXTENSION_NOT_PRESENT;
+			break;
+		}
+		retval = vkCreateViSurfaceNN(instance_, &vi, nullptr, &surface_);
 		break;
 	}
 #endif
