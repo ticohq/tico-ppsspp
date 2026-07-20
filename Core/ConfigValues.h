@@ -93,7 +93,7 @@ enum {
 	ROTATION_LOCKED_VERTICAL = 2,
 	ROTATION_LOCKED_HORIZONTAL180 = 3,
 	ROTATION_LOCKED_VERTICAL180 = 4,  // Deprecated
-	ROTATION_AUTO_HORIZONTAL = 5,     // Deprecated
+	ROTATION_AUTO_HORIZONTAL = 5,     // Un-deprecated again
 };
 
 enum TextureFiltering {
@@ -224,6 +224,7 @@ enum class DumpFileType {
 	EBOOT = (1 << 0),
 	PRX = (1 << 1),
 	Atrac3 = (1 << 2),
+	PBP_ISO = (1 << 3),
 };
 ENUM_CLASS_BITOPS(DumpFileType);
 

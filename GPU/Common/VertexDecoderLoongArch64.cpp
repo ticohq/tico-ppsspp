@@ -506,11 +506,11 @@ void VertexDecoderJitCache::Jit_WeightsU16Skin() {
 
 	if (dec_->nweights > 4) {
 		switch (dec_->nweights) {
-		case 5: LD_HU(scratchReg, srcReg, 0); break;
-	    case 6: LD_WU(scratchReg, srcReg, 0); break;
+		case 5: LD_HU(scratchReg, srcReg, 8); break;
+		case 6: LD_WU(scratchReg, srcReg, 8); break;
 		case 7:
 		case 8:
-			LD_D(scratchReg, srcReg, 0);
+			LD_D(scratchReg, srcReg, 8);
 			break;
 		}
 		VINSGR2VR_D(lsxScratchReg, scratchReg, 0);

@@ -28,6 +28,8 @@
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/Log.h"
 #include "Common/TimeUtil.h"
+#include "Common/GPU/Vulkan/VulkanMemory.h"
+
 #include "GPU/GPUState.h"
 #include "GPU/Common/FragmentShaderGenerator.h"
 #include "GPU/Common/VertexShaderGenerator.h"
@@ -246,6 +248,9 @@ void ShaderManagerVulkan::Clear() {
 	lastFSID_.set_invalid();
 	lastVSID_.set_invalid();
 	lastGSID_.set_invalid();
+	lastVShader_ = nullptr;
+	lastFShader_ = nullptr;
+	lastGShader_ = nullptr;
 	gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_GEOMETRYSHADER_STATE);
 }
 

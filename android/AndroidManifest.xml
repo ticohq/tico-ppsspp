@@ -56,7 +56,7 @@
             android:theme="@style/ppsspp_style"
 			android:launchMode="singleInstance"
             android:exported="true">
-            <!-- android:screenOrientation="landscape" -->
+            <property android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY" android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
@@ -111,6 +111,9 @@
             </intent-filter>
         </activity>
 		<activity android:name=".ImageResultProxyActivity"
+			android:theme="@style/Theme.ProxyTransparent"
+			android:launchMode="standard" />
+		<activity android:name=".DocumentResultProxyActivity"
 			android:theme="@style/Theme.ProxyTransparent"
 			android:launchMode="standard" />
         <profileable android:shell="true" android:enabled="true" />

@@ -113,7 +113,7 @@ void SetMemStickDirDarwin(int requesterToken) {
 #endif
 
 GameSettingsScreen::GameSettingsScreen(const Path &gamePath, std::string gameID, bool editThenRestore)
-	: UITabbedBaseDialogScreen(gamePath, TabDialogFlags::HorizontalOnlyIcons | TabDialogFlags::VerticalShowIcons), gameID_(gameID), editGameSpecificThenRestore_(editThenRestore) {
+	: UITabbedBaseDialogScreen(gamePath, &g_Config.iSettingsCurrentTab, TabDialogFlags::HorizontalOnlyIcons | TabDialogFlags::VerticalShowIcons), gameID_(gameID), editGameSpecificThenRestore_(editThenRestore) {
 	prevInflightFrames_ = g_Config.iInflightFrames;
 	analogSpeedMapped_ = KeyMap::InputMappingsFromPspButton(VIRTKEY_SPEED_ANALOG, nullptr, true);
 
@@ -917,6 +917,13 @@ void GameSettingsScreen::CreateControlsSettings(UI::ViewGroup *controlsSettings)
 		disableDiags->SetEnabledPtr(&g_Config.bShowTouchControls);
 	}
 
+#if PPSSPP_PLATFORM(WINDOWS)
+	controlsSettings->Add(new ItemHeader(co->T("Control input sources")));
+	controlsSettings->Add(new CheckBox(&g_Config.bAllowHIDInput, co->T("HID input")));
+	controlsSettings->Add(new CheckBox(&g_Config.bAllowXInput, co->T("XInput")));
+	controlsSettings->Add(new CheckBox(&g_Config.bAllowDInput, co->T("DirectInput")));
+#endif
+
 	if (deviceType != DEVICE_TYPE_VR) {
 		controlsSettings->Add(new ItemHeader(co->T("Keyboard", "Keyboard Control Settings")));
 #if defined(USING_WIN_UI)
@@ -1023,15 +1030,33 @@ void GameSettingsScreen::CreateNetworkingSettings(UI::ViewGroup *networkingSetti
 
 	networkingSettings->Add(new ItemHeader(n->T("Ad Hoc multiplayer")));
 
-	LinearLayout *serverRow = networkingSettings->Add(new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
-	serverRow->SetSpacing(0.0f);
-	serverRow->Add(new ChoiceWithValueDisplay(&g_Config.sProAdhocServer, n->T("Change proAdhocServer Address"), I18NCat::NONE, new LinearLayoutParams(1.0f)))->OnClick.Add([=](UI::EventParams &) {
+	auto launchAdhocServerScreen = [this](UI::EventParams &) {
+		auto n = GetI18NCategory(I18NCat::NETWORKING);
 		screenManager()->push(new AdhocServerScreen(&g_Config.sProAdhocServer, n->T("Ad hoc server address")));
-	});
+	};
+
 	if (AdhocServerNameIsCustom()) {
+		LinearLayout *serverRow = networkingSettings->Add(new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
+		serverRow->SetSpacing(0.0f);
+		serverRow->Add(new ChoiceWithValueDisplay(&g_Config.sProAdhocServer, n->T("Ad hoc server address"), I18NCat::NONE, new LinearLayoutParams(1.0f)))->OnClick.Add(launchAdhocServerScreen);
 		serverRow->Add(new Choice(ImageID("I_EDIT_TEXT"), new LinearLayoutParams(ITEM_HEIGHT, ITEM_HEIGHT)))->OnClick.Add([this](UI::EventParams &) {
 			AskToEditCurrentServer(GetRequesterToken(), screenManager());
 		});
+	} else if (!g_Config.sProAdhocServer.empty()) {
+		AdhocServerListEntry entry;
+		if (AdhocGetServerByHost(g_Config.sProAdhocServer, &entry)) {
+			networkingSettings->Add(new ChoiceWithFixedValueDisplay(ApplySafeSubstitutions("%1 (%2)", entry.name, entry.host), n->T("Ad hoc server address")))->OnClick.Add(launchAdhocServerScreen);
+			Choice *status = networkingSettings->Add(new Choice(ApplySafeSubstitutions(n->T("Server status: %1"), entry.name)));
+			status->SetIconLeft(ImageID("I_INFO"));
+			status->OnClick.Add([this, entry](UI::EventParams &) {
+				screenManager()->push(new AdhocServerInfoScreen(entry));
+			});
+		} else {
+			// This case happens when updating from a previous version, as well as clicking on one of the local addresses
+			networkingSettings->Add(new ChoiceWithFixedValueDisplay(g_Config.sProAdhocServer, n->T("Ad hoc server address")))->OnClick.Add(launchAdhocServerScreen);
+		}
+	} else {
+		networkingSettings->Add(new ChoiceWithFixedValueDisplay(g_Config.sProAdhocServer, n->T("Ad hoc server address")))->OnClick.Add(launchAdhocServerScreen);
 	}
 
 	static const char *relayModes[] = {"Auto", "Yes", "No"};
@@ -1039,7 +1064,14 @@ void GameSettingsScreen::CreateNetworkingSettings(UI::ViewGroup *networkingSetti
 	relayModePopup->SetEnabled(!PSP_IsInited());
 	networkingSettings->Add(new SettingHint(n->T("PacketRelayHint", "Available on servers that provide 'aemu_postoffice' packet relay, like socom.cc. Disable this for LAN or VPN play. Can be more reliable, but sometimes slower."), relayModePopup));
 
-	networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sNickName, sy->T("Change Nickname"), "", 32, screenManager()));
+	PopupTextInputChoice *nickname = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sNickName, sy->T("Nickname"), "", 32, screenManager()));
+	if (g_Config.sNickName == "PPSSPP") {
+		nickname->SetIconRight(ImageID("I_WARNING"));
+	}
+	nickname->OnChange.Add([this](UI::EventParams &e) {
+		RecreateViews();
+	});
+	networkingSettings->Add(new SettingHint(n->T("Try to pick a unique nickname for ad hoc play"), nullptr));
 
 	networkingSettings->Add(new CheckBox(&g_Config.bEnableAdhocServer, n->T("Enable built-in ad hoc server")));
 
@@ -1071,49 +1103,14 @@ void GameSettingsScreen::CreateNetworkingSettings(UI::ViewGroup *networkingSetti
 	static const char *chatScreenPositions[] = { "Bottom Left", "Bottom Center", "Bottom Right", "Top Left", "Top Center", "Top Right" };
 	networkingSettings->Add(new PopupMultiChoice(&g_Config.iChatScreenPosition, n->T("Chat Screen Position"), chatScreenPositions, 0, ARRAY_SIZE(chatScreenPositions), I18NCat::DIALOG, screenManager()))->SetEnabledPtr(&g_Config.bEnableNetworkChat);
 
-#if (!defined(MOBILE_DEVICE) && !defined(USING_QT_UI)) || defined(USING_QT_UI) || PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS) // Missing only iOS?
-	networkingSettings->Add(new ItemHeader(n->T("QuickChat", "Quick Chat")));
-	CheckBox *qc = networkingSettings->Add(new CheckBox(&g_Config.bEnableQuickChat, n->T("EnableQuickChat", "Enable Quick Chat")));
+	networkingSettings->Add(new ItemHeader(n->T("Quick chat")));
+	CheckBox *qc = networkingSettings->Add(new CheckBox(&g_Config.bEnableQuickChat, n->T("Enable quick chat")));
 	qc->SetEnabledPtr(&g_Config.bEnableNetworkChat);
-#endif
 
-#if !defined(MOBILE_DEVICE) && !defined(USING_QT_UI)  // TODO: Add all platforms where KeyInputFlags::CHAR support is added
-	PopupTextInputChoice *qc1 = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sQuickChat[0], n->T("Quick Chat 1"), "", 32, screenManager()));
-	PopupTextInputChoice *qc2 = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sQuickChat[1], n->T("Quick Chat 2"), "", 32, screenManager()));
-	PopupTextInputChoice *qc3 = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sQuickChat[2], n->T("Quick Chat 3"), "", 32, screenManager()));
-	PopupTextInputChoice *qc4 = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sQuickChat[3], n->T("Quick Chat 4"), "", 32, screenManager()));
-	PopupTextInputChoice *qc5 = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sQuickChat[4], n->T("Quick Chat 5"), "", 32, screenManager()));
-#elif defined(USING_QT_UI)
-	Choice *qc1 = networkingSettings->Add(new Choice(n->T("Quick Chat 1")));
-	Choice *qc2 = networkingSettings->Add(new Choice(n->T("Quick Chat 2")));
-	Choice *qc3 = networkingSettings->Add(new Choice(n->T("Quick Chat 3")));
-	Choice *qc4 = networkingSettings->Add(new Choice(n->T("Quick Chat 4")));
-	Choice *qc5 = networkingSettings->Add(new Choice(n->T("Quick Chat 5")));
-#elif PPSSPP_PLATFORM(ANDROID)
-	ChoiceWithValueDisplay *qc1 = networkingSettings->Add(new ChoiceWithValueDisplay(&g_Config.sQuickChat[0], n->T("Quick Chat 1"), I18NCat::NONE));
-	ChoiceWithValueDisplay *qc2 = networkingSettings->Add(new ChoiceWithValueDisplay(&g_Config.sQuickChat[1], n->T("Quick Chat 2"), I18NCat::NONE));
-	ChoiceWithValueDisplay *qc3 = networkingSettings->Add(new ChoiceWithValueDisplay(&g_Config.sQuickChat[2], n->T("Quick Chat 3"), I18NCat::NONE));
-	ChoiceWithValueDisplay *qc4 = networkingSettings->Add(new ChoiceWithValueDisplay(&g_Config.sQuickChat[3], n->T("Quick Chat 4"), I18NCat::NONE));
-	ChoiceWithValueDisplay *qc5 = networkingSettings->Add(new ChoiceWithValueDisplay(&g_Config.sQuickChat[4], n->T("Quick Chat 5"), I18NCat::NONE));
-#endif
-
-#if (!defined(MOBILE_DEVICE) && !defined(USING_QT_UI)) || defined(USING_QT_UI) || PPSSPP_PLATFORM(ANDROID)
-	qc1->SetEnabledFunc([] { return g_Config.bEnableQuickChat && g_Config.bEnableNetworkChat; });
-	qc2->SetEnabledFunc([] { return g_Config.bEnableQuickChat && g_Config.bEnableNetworkChat; });
-	qc3->SetEnabledFunc([] { return g_Config.bEnableQuickChat && g_Config.bEnableNetworkChat; });
-	qc4->SetEnabledFunc([] { return g_Config.bEnableQuickChat && g_Config.bEnableNetworkChat; });
-	qc5->SetEnabledFunc([] { return g_Config.bEnableQuickChat && g_Config.bEnableNetworkChat; });
-#endif
-
-#if defined(USING_QT_UI) || PPSSPP_PLATFORM(ANDROID)
-	if (System_GetPropertyBool(SYSPROP_HAS_KEYBOARD)) {
-		qc1->OnClick.Handle(this, &GameSettingsScreen::OnChangeQuickChat0);
-		qc2->OnClick.Handle(this, &GameSettingsScreen::OnChangeQuickChat1);
-		qc3->OnClick.Handle(this, &GameSettingsScreen::OnChangeQuickChat2);
-		qc4->OnClick.Handle(this, &GameSettingsScreen::OnChangeQuickChat3);
-		qc5->OnClick.Handle(this, &GameSettingsScreen::OnChangeQuickChat4);
+	for (int i = 0; i < 5; i++) {
+		PopupTextInputChoice *qc1 = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sQuickChat[i], ApplySafeSubstitutions(n->T("Quick chat %1"), i + 1), "", 32, screenManager()));
+		qc1->SetEnabledFunc([] { return g_Config.bEnableQuickChat && g_Config.bEnableNetworkChat; });
 	}
-#endif
 
 	networkingSettings->Add(new ItemHeader(n->T("Misc", "Misc (default = compatibility)")));
 	Choice *wiki = networkingSettings->Add(new Choice(n->T("Open PPSSPP Multiplayer Wiki Page"), ImageID("I_LINK_OUT")));
@@ -1450,7 +1447,7 @@ void GameSettingsScreen::CreateSystemSettings(UI::ViewGroup *systemSettings) {
 	static const char *screenshotModeChoices[] = { "Final processed image", "Raw game image" };
 	systemSettings->Add(new PopupMultiChoice(&g_Config.iScreenshotMode, sy->T("Screenshot mode"), screenshotModeChoices, 0, ARRAY_SIZE(screenshotModeChoices), I18NCat::SYSTEM, screenManager()));
 	// TODO: Make this setting available on Mac too.
-#if PPSSPP_PLATFORM(WINDOWS)
+#if PPSSPP_PLATFORM(WINDOWS) || (defined (SDL) && !defined(MOBILE_DEVICE))
 	systemSettings->Add(new CheckBox(&g_Config.bPauseOnLostFocus, sy->T("Pause when not focused")));
 #endif
 
@@ -1478,7 +1475,7 @@ void GameSettingsScreen::CreateSystemSettings(UI::ViewGroup *systemSettings) {
 	systemSettings->Add(new PopupMultiChoice(&g_Config.iLanguage, psps->T("Game language"), defaultLanguages, -1, ARRAY_SIZE(defaultLanguages), I18NCat::PSPSETTINGS, screenManager()));
 	static const char *models[] = { "PSP-1000", "PSP-2000/3000" };
 	systemSettings->Add(new PopupMultiChoice(&g_Config.iPSPModel, sy->T("PSP Model"), models, 0, ARRAY_SIZE(models), I18NCat::SYSTEM, screenManager()))->SetEnabled(!PSP_IsInited());
-	systemSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sNickName, sy->T("Change Nickname"), "", 32, screenManager()))->OnChange.Add([](UI::EventParams &e) {
+	systemSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sNickName, sy->T("Nickname"), "", 32, screenManager()))->OnChange.Add([](UI::EventParams &e) {
 		// Copy to infrastructure name if valid and not already set.
 		if (g_Config.sInfrastructureUsername.empty()) {
 			if (g_Config.sNickName == SanitizeString(g_Config.sNickName, StringRestriction::AlphaNumDashUnderscore, 3, 16)) {
@@ -1814,41 +1811,6 @@ void GameSettingsScreen::OnAudioDevice(UI::EventParams &e) {
 		g_Config.sAudioDevice.clear();
 	}
 	System_Notify(SystemNotification::AUDIO_RESET_DEVICE);
-}
-
-void GameSettingsScreen::OnChangeQuickChat0(UI::EventParams &e) {
-	auto n = GetI18NCategory(I18NCat::NETWORKING);
-	System_InputBoxGetString(GetRequesterToken(), n->T("Enter Quick Chat 1"), g_Config.sQuickChat[0], false, [](const std::string &value, int) {
-		g_Config.sQuickChat[0] = value;
-	});
-}
-
-void GameSettingsScreen::OnChangeQuickChat1(UI::EventParams &e) {
-	auto n = GetI18NCategory(I18NCat::NETWORKING);
-	System_InputBoxGetString(GetRequesterToken(), n->T("Enter Quick Chat 2"), g_Config.sQuickChat[1], false, [](const std::string &value, int) {
-		g_Config.sQuickChat[1] = value;
-	});
-}
-
-void GameSettingsScreen::OnChangeQuickChat2(UI::EventParams &e) {
-	auto n = GetI18NCategory(I18NCat::NETWORKING);
-	System_InputBoxGetString(GetRequesterToken(), n->T("Enter Quick Chat 3"), g_Config.sQuickChat[2], false, [](const std::string &value, int) {
-		g_Config.sQuickChat[2] = value;
-	});
-}
-
-void GameSettingsScreen::OnChangeQuickChat3(UI::EventParams &e) {
-	auto n = GetI18NCategory(I18NCat::NETWORKING);
-	System_InputBoxGetString(GetRequesterToken(), n->T("Enter Quick Chat 4"), g_Config.sQuickChat[3], false, [](const std::string &value, int) {
-		g_Config.sQuickChat[3] = value;
-	});
-}
-
-void GameSettingsScreen::OnChangeQuickChat4(UI::EventParams &e) {
-	auto n = GetI18NCategory(I18NCat::NETWORKING);
-	System_InputBoxGetString(GetRequesterToken(), n->T("Enter Quick Chat 5"), g_Config.sQuickChat[4], false, [](const std::string &value, int) {
-		g_Config.sQuickChat[4] = value;
-	});
 }
 
 void GameSettingsScreen::CallbackRestoreDefaults(bool yes) {

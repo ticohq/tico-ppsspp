@@ -212,8 +212,22 @@ void LoadPostShaderInfo(Draw::DrawContext *draw, const std::vector<Path> &direct
 					info.scaleFactor = 0;
 					section.Get("Name", &info.name);
 					section.Get("Scale", &info.scaleFactor);
+					bool hidden = false;
+					section.Get("Hidden", &info.hidden);
+					std::string cbufferFilename;
+					if (section.Get("ConstantBuffer", &cbufferFilename)) {
+						Path cbufferPath = path / cbufferFilename;
+						info.constantBuffer = cbufferPath;
+					}
 					if (section.Get("Compute", &temp)) {
 						info.computeShaderFile = path / temp;
+						info.computeShaderFiles.push_back(info.computeShaderFile);
+						for (int computeIndex = 2; computeIndex <= 4; ++computeIndex) {
+							temp.clear();
+							if (section.Get(StringFromFormat("Compute%d", computeIndex).c_str(), &temp)) {
+								info.computeShaderFiles.push_back(path / temp);
+							}
+						}
 						if (info.scaleFactor >= 2 && info.scaleFactor < 8) {
 							appendTextureShader(info);
 						}

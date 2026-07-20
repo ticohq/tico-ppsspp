@@ -261,6 +261,9 @@
     <ClInclude Include="GPU\OpenGL\GLQueueRunner.h">
       <Filter>GPU\OpenGL</Filter>
     </ClInclude>
+    <ClInclude Include="GPU\OpenGL\GLProfiler.h">
+      <Filter>GPU\OpenGL</Filter>
+    </ClInclude>
     <ClInclude Include="GPU\OpenGL\GLRenderManager.h">
       <Filter>GPU\OpenGL</Filter>
     </ClInclude>
@@ -727,6 +730,57 @@
     <ClInclude Include="UI\Notice.h">
       <Filter>UI</Filter>
     </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\7z.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\7zBuf.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\7zCrc.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\7zFile.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\7zTypes.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\7zWindows.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\Bcj2.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\Bra.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\CpuArch.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\Delta.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\Lzma2Dec.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\LzmaDec.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\Precomp.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\lzma-sdk\RotateDefs.h">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClInclude>
+    <ClInclude Include="File\VFS\SevenZipFileReader.h">
+      <Filter>File\VFS</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\pugixml\pugiconfig.hpp">
+      <Filter>ext\pugixml</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\pugixml\pugixml.hpp">
+      <Filter>ext\pugixml</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ABI.cpp" />
@@ -964,6 +1018,9 @@
       <Filter>GPU\OpenGL</Filter>
     </ClCompile>
     <ClCompile Include="GPU\OpenGL\GLQueueRunner.cpp">
+      <Filter>GPU\OpenGL</Filter>
+    </ClCompile>
+    <ClCompile Include="GPU\OpenGL\GLProfiler.cpp">
       <Filter>GPU\OpenGL</Filter>
     </ClCompile>
     <ClCompile Include="GPU\OpenGL\GLRenderManager.cpp">
@@ -1350,6 +1407,48 @@
     <ClCompile Include="UI\Notice.cpp">
       <Filter>UI</Filter>
     </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\7zArcIn.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\7zBuf.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\7zCrc.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\7zCrcOpt.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\7zDec.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\7zFile.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\7zStream.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\Bcj2.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\CpuArch.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\Delta.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\Lzma2Dec.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma-sdk\LzmaDec.c">
+      <Filter>ext\lzma-sdk</Filter>
+    </ClCompile>
+    <ClCompile Include="File\VFS\SevenZipFileReader.cpp">
+      <Filter>File\VFS</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\pugixml\pugixml.cpp">
+      <Filter>ext\pugixml</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Crypto">
@@ -1486,6 +1585,12 @@
     </Filter>
     <Filter Include="ext\aemu_postoffice">
       <UniqueIdentifier>{9352e975-d162-4110-b6a0-e8a4639d5b90}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\lzma-sdk">
+      <UniqueIdentifier>{00053099-bdf5-4638-9bf5-45e44dca79d4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\pugixml">
+      <UniqueIdentifier>{32c8149f-f6e1-45e4-b0a5-79093450ac82}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>

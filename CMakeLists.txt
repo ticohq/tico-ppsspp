@@ -207,9 +207,12 @@ option(USE_DISCORD "Build with Discord support" ON)
 option(USE_MINIUPNPC "Build with miniUPnPc support" ON)
 option(USE_SYSTEM_SNAPPY "Dynamically link against system snappy" ${USE_SYSTEM_SNAPPY})
 option(USE_SYSTEM_FFMPEG "Dynamically link against system FFMPEG" ${USE_SYSTEM_FFMPEG})
+option(USE_SYSTEM_FREETYPE "Dynamically link against system freetype" ${USE_SYSTEM_FREETYPE})
+option(USE_SYSTEM_LIBCHDR "Dynamically link against system libchdr" ${USE_SYSTEM_LIBCHDR})
 option(USE_SYSTEM_LIBZIP "Dynamically link against system libzip" ${USE_SYSTEM_LIBZIP})
 option(USE_SYSTEM_LIBSDL2 "Dynamically link against system SDL2" ${DEFAULT_USE_SYSTEM_LIBSDL2})
 option(USE_SYSTEM_LIBPNG "Dynamically link against system libpng" ON)
+option(USE_SYSTEM_RAPIDJSON "Build using system rapidjson" ${USE_SYSTEM_RAPIDJSON})
 option(USE_SYSTEM_ZSTD "Dynamically link against system zstd" ${USE_SYSTEM_ZSTD})
 option(USE_SYSTEM_MINIUPNPC "Dynamically link against system miniUPnPc" ${USE_SYSTEM_MINIUPNPC})
 option(USE_ASAN "Use address sanitizer" OFF)
@@ -232,6 +235,10 @@ endif()
 
 if(USE_CCACHE)
 	include(ccache)
+endif()
+
+if(USE_SYSTEM_RAPIDJSON)
+	add_compile_definitions(SYSTEM_RAPIDJSON)
 endif()
 
 if(WEBOS)
@@ -514,12 +521,12 @@ if(NOT MSVC)
 
 	add_compile_options(-fno-math-errno)
 
-	if(X86 OR X86_64)
-		# enable sse2 code generation
+	if(X86)
+		# enable sse2 code generation (enabled by default on X86_64)
 		if(NOT MACOSX)
 			add_compile_options(-msse2)
 		endif()
-		if(NOT X86_64 AND NOT CLANG)
+		if(NOT CLANG)
 			add_compile_options(-mfpmath=sse)
 			# add_compile_options(-mstackrealign)
 		endif()
@@ -758,6 +765,8 @@ add_library(Common STATIC
 	Common/File/VFS/VFS.cpp
 	Common/File/VFS/ZipFileReader.cpp
 	Common/File/VFS/ZipFileReader.h
+	Common/File/VFS/SevenZipFileReader.cpp
+	Common/File/VFS/SevenZipFileReader.h
 	Common/File/VFS/DirectoryReader.cpp
 	Common/File/VFS/DirectoryReader.h
 	Common/File/AndroidStorage.h
@@ -807,6 +816,8 @@ add_library(Common STATIC
 	Common/GPU/OpenGL/GLRenderManager.h
 	Common/GPU/OpenGL/GLQueueRunner.cpp
 	Common/GPU/OpenGL/GLQueueRunner.h
+	Common/GPU/OpenGL/GLProfiler.cpp
+	Common/GPU/OpenGL/GLProfiler.h
 	Common/GPU/OpenGL/DataFormatGL.cpp
 	Common/GPU/OpenGL/DataFormatGL.h
 	Common/GPU/Vulkan/VulkanBarrier.cpp
@@ -1003,6 +1014,8 @@ if(ARM64)
 		target_link_libraries(Common adrenotools)
 	endif()
 endif()
+
+target_compile_definitions(Common PRIVATE Z7_CRC_NUM_TABLES=1)
 
 if(TARGET Ext::GLEW)
 	target_link_libraries(Common Ext::GLEW)
@@ -1298,6 +1311,25 @@ else()
 	set(LIBZIP_LIBRARY libzip)
 endif()
 
+add_library(7zip STATIC
+	ext/lzma-sdk/7zArcIn.c
+	ext/lzma-sdk/7zBuf.c
+	ext/lzma-sdk/7zCrc.c
+	ext/lzma-sdk/7zCrcOpt.c
+	ext/lzma-sdk/7zDec.c
+	ext/lzma-sdk/7zFile.c
+	ext/lzma-sdk/7zStream.c
+	ext/lzma-sdk/Bcj2.c
+	ext/lzma-sdk/Bra.c
+	ext/lzma-sdk/Bra86.c
+	ext/lzma-sdk/Delta.c
+	ext/lzma-sdk/Lzma2Dec.c
+	ext/lzma-sdk/LzmaDec.c
+)
+target_link_libraries(7zip)
+include_directories(ext/lzma-sdk)
+set(LIB7ZIP_LIBRARY 7zip)
+
 # Arm platforms require at least libpng17.
 if(ANDROID OR ARMV7 OR ARM64 OR ARM OR IOS)
 	set(PNG_REQUIRED_VERSION 1.7)
@@ -1373,6 +1405,11 @@ add_library(basis_universal STATIC
 	ext/basis_universal/basisu_transcoder_uastc.h
 )
 set(BASISU_LIBRARIES basis_universal)
+
+add_library(pugixml STATIC
+	ext/pugixml/pugixml.cpp
+	ext/pugixml/pugixml.hpp
+)
 
 set(nativeExtra)
 set(nativeExtraLibs)
@@ -1641,6 +1678,8 @@ list(APPEND NativeAppSource
 	UI/IAPScreen.h
 	UI/MainScreen.h
 	UI/MainScreen.cpp
+	UI/GameBrowser.h
+	UI/GameBrowser.cpp
 	UI/MiscScreens.h
 	UI/MiscScreens.cpp
 	UI/MiscViews.h
@@ -1746,7 +1785,8 @@ if(ANDROID OR (LINUX AND ARM_DEVICE) OR (LINUX AND RISCV64) OR (LINUX AND LOONGA
 	set(ATOMIC_LIB atomic)
 endif()
 
-target_link_libraries(native ${LIBZIP_LIBRARY} ${PNG_LIBRARIES} ${BASISU_LIBRARIES} ${ZLIB_LIBRARY} vma gason udis86 ${RT_LIB} ${nativeExtraLibs} ${ATOMIC_LIB} Common)
+target_link_libraries(native ${LIBZIP_LIBRARY} ${LIB7ZIP_LIBRARY} ${PNG_LIBRARIES} ${BASISU_LIBRARIES} ${ZLIB_LIBRARY} pugixml vma gason udis86 ${RT_LIB} ${nativeExtraLibs} ${ATOMIC_LIB} Common)
+
 if(TARGET Ext::GLEW)
 	target_link_libraries(native Ext::GLEW)
 endif()
@@ -2136,7 +2176,7 @@ if(WIN32)
 	)
 endif()
 
-if(LINUX OR ANDROID OR MACOSX OR IOS OR USE_LIBNX)
+if(LINUX OR ANDROID OR MACOSX OR IOS OR BSD OR USE_LIBNX)
 	list(APPEND aemu_postoffice
 		ext/aemu_postoffice/client/sock_impl_linux.c
 	)
@@ -2640,7 +2680,14 @@ else()
 	include_directories(ext/zstd/lib)
 endif()
 
-include_directories(ext/libchdr/include)
+if(USE_SYSTEM_LIBCHDR)
+	find_package(PkgConfig)
+	if(PkgConfig_FOUND)
+		pkg_check_modules(libchdr_PKGCONFIG IMPORTED_TARGET libchdr)
+	endif()
+else()
+	include_directories(ext/libchdr/include)
+endif()
 
 set(PPSSPP_DL_LIBS ${CMAKE_DL_LIBS})
 if(USE_LIBNX)
@@ -2921,7 +2968,6 @@ set(NativeAssets
 	assets/Roboto_Condensed-Bold.ttf
 	assets/Roboto_Condensed-Italic.ttf
 	assets/Inconsolata-Regular.ttf
-	assets/7z.png
 	assets/compat.ini
 	assets/adhoc-servers.json
 	assets/infra-dns.json
@@ -2929,8 +2975,6 @@ set(NativeAssets
 	assets/langregion.ini
 	assets/ppge_atlas.zim
 	assets/ppge_atlas.meta
-	assets/rargray.png
-	assets/zip.png
 	assets/sfx_back.wav
 	assets/sfx_confirm.wav
 	assets/sfx_select.wav
@@ -3077,7 +3121,13 @@ if(UNITTEST)
 endif()
 
 if(ATLAS_TOOL)
-	include_directories(ext/freetype/include)
+	if(USE_SYSTEM_FREETYPE)
+		find_package(Freetype REQUIRED)
+		include_directories(${FREETYPE_INCLUDE_DIRS})
+		add_compile_definitions(SYSTEM_FREETYPE)
+	else()
+		include_directories(ext/freetype/include)
+	endif()
 
 	set(AtlasToolSource
 		ext/native/tools/atlastool.cpp

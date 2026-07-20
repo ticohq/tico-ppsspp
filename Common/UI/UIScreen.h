@@ -32,6 +32,19 @@ struct QueuedEvent {
 	};
 };
 
+enum class Modifier {
+	NONE = 0,
+	LCTRL = 1,
+	RCTRL = 2,
+	LSHIFT = 4,
+	RSHIFT = 8,
+	LALT = 16,
+	RALT = 32,
+	LMETA = 64,
+	RMETA = 128,
+};
+ENUM_CLASS_BITOPS(Modifier);
+
 class UIScreen : public Screen {
 public:
 	UIScreen();
@@ -60,6 +73,11 @@ public:
 	void OnBack(UI::EventParams &e);
 
 	virtual UI::Margins RootMargins() const { return UI::Margins(0); }
+
+	virtual void focusChanged(ScreenFocusChange focusChange) override {
+		Screen::focusChanged(focusChange);
+		modifiersPressed_ = Modifier::NONE;
+	}
 
 protected:
 	virtual void CreateViews() = 0;
@@ -90,6 +108,8 @@ protected:
 private:
 	std::mutex eventQueueLock_;
 	std::deque<QueuedEvent> eventQueue_;
+
+	Modifier modifiersPressed_{};
 };
 
 class UIDialogScreen : public UIScreen {

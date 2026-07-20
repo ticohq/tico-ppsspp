@@ -15,8 +15,22 @@
 void Screen::focusChanged(ScreenFocusChange focusChange) {
 	const char *eventName = "";
 	switch (focusChange) {
-	case ScreenFocusChange::FOCUS_LOST_TOP: eventName = "FOCUS_LOST_TOP"; break;
-	case ScreenFocusChange::FOCUS_BECAME_TOP: eventName = "FOCUS_BECAME_TOP"; break;
+	case ScreenFocusChange::FOCUS_LOST_TOP:
+	#if !defined(MOBILE_DEVICE)
+		if (WantsTextInput()) {
+			System_NotifyUIEvent(UIEventNotification::TEXT_LOSTFOCUS);
+		}
+	#endif
+		eventName = "FOCUS_LOST_TOP";
+		break;
+	case ScreenFocusChange::FOCUS_BECAME_TOP:
+	#if !defined(MOBILE_DEVICE)
+		if (WantsTextInput()) {
+			System_NotifyUIEvent(UIEventNotification::TEXT_GOTFOCUS);
+		}
+	#endif
+		eventName = "FOCUS_BECAME_TOP";
+		break;
 	}
 	DEBUG_LOG(Log::UI, "Screen %s got %s", this->tag(), eventName);
 }
@@ -136,7 +150,7 @@ void ScreenManager::switchToNext() {
 	stack_.push_back(nextStack_.front());
 	nextStack_.front().screen->focusChanged(ScreenFocusChange::FOCUS_BECAME_TOP);
 	delete temp.screen;
-	UI::SetFocusedView(nullptr);
+	UI::SetFocusedView(nullptr, UI::FocusFlags::CAUSE_SCREEN_CHANGE);
 
 	// When will this ever happen? Should handle focus here too?
 	for (size_t i = 1; i < nextStack_.size(); ++i) {
@@ -364,7 +378,7 @@ void ScreenManager::push(Screen *screen, int layerFlags) {
 	}
 
 	// Release touches and unfocus.
-	UI::SetFocusedView(nullptr);
+	UI::SetFocusedView(nullptr, UI::FocusFlags::CAUSE_SCREEN_CHANGE);
 	TouchInput input{};
 	input.x = -50000.0f;
 	input.y = -50000.0f;

@@ -62,7 +62,6 @@ enum class ScreenRenderFlags {
 };
 ENUM_CLASS_BITOPS(ScreenRenderFlags);
 
-
 enum class ScreenRenderRole {
 	NONE = 0,
 	CAN_BE_BACKGROUND = 1,
@@ -113,6 +112,7 @@ public:
 	virtual bool isTopLevel() const { return false; }
 
 	virtual TouchInput transformTouch(const TouchInput &touch) { return touch; }
+	virtual bool WantsTextInput() const { return false; }
 
 protected:
 	int GetRequesterToken();

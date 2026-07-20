@@ -31,8 +31,8 @@ using namespace PPSSPP_VK;
 // Always keep around push buffers at least this long (seconds).
 static const double PUSH_GARBAGE_COLLECTION_DELAY = 10.0;
 
-VulkanPushPool::VulkanPushPool(VulkanContext *vulkan, const char *name, size_t originalBlockSize, VkBufferUsageFlags usage)
-	: vulkan_(vulkan), name_(name), originalBlockSize_(originalBlockSize), usage_(usage) {
+VulkanPushPool::VulkanPushPool(VulkanContext *vulkan, const char *name, size_t originalBlockSize, size_t slack, VkBufferUsageFlags usage)
+	: vulkan_(vulkan), name_(name), originalBlockSize_(originalBlockSize), usage_(usage), slack_(slack) {
 	RegisterGPUMemoryManager(this);
 
 	for (int i = 0; i < VulkanContext::MAX_INFLIGHT_FRAMES; i++) {
@@ -175,4 +175,36 @@ void VulkanPushPool::GetDebugString(char *buffer, size_t bufSize) const {
 	}
 
 	snprintf(buffer, bufSize, "Pool %s: %s / %s (%d extra blocks)", name_, NiceSizeFormat(used).c_str(), NiceSizeFormat(capacity).c_str(), (int)blocks_.size() - 3);
+}
+
+void VulkanBuffer::Create(VulkanContext *vulkan, const char *name, VkDeviceSize size, VkBufferUsageFlags usage) {
+	if (buffer_) {
+		Destroy(vulkan);
+	}
+
+	size_ = size;
+
+	if (size == 0) {
+		return;
+	}
+
+	VkBufferCreateInfo b{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	b.size = size;
+	b.usage = usage;
+	b.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VmaAllocationCreateInfo allocCreateInfo{};
+
+	allocCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	allocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;  // required to not get memory where we have to manually flush.
+	VmaAllocationInfo allocInfo{};
+
+	VkResult result = vmaCreateBuffer(vulkan->Allocator(), &b, &allocCreateInfo, &buffer_, &allocation_, &allocInfo);
+	_dbg_assert_(result == VK_SUCCESS);
+	vulkan->SetDebugName(buffer_, VK_OBJECT_TYPE_BUFFER, name);
+}
+
+void VulkanBuffer::Destroy(VulkanContext *vulkan) {
+	if (buffer_) {
+		vulkan->Delete().QueueDeleteBufferAllocation(buffer_, allocation_);
+	}
 }

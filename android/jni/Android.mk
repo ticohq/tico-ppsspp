@@ -75,6 +75,17 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 include $(LOCAL_PATH)/Locals.mk
 
+PUGI_ROOT := $(SRC)/ext/pugixml
+
+LOCAL_MODULE    := pugixml
+LOCAL_SRC_FILES := $(PUGI_ROOT)/pugixml.cpp
+LOCAL_C_INCLUDES := $(PUGI_ROOT)
+
+include $(BUILD_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+include $(LOCAL_PATH)/Locals.mk
+
 LOCAL_CFLAGS += -DSTACK_LINE_READER_BUFFER_SIZE=1024 -DHAVE_DLFCN_H -DRC_DISABLE_LUA -DZ7_ST
 
 # http://software.intel.com/en-us/articles/getting-started-on-optimizing-ndk-project-for-multiple-cpu-architectures
@@ -115,6 +126,7 @@ NATIVE_FILES :=\
   $(SRC)/Common/GPU/OpenGL/GLMemory.cpp \
   $(SRC)/Common/GPU/OpenGL/GLRenderManager.cpp \
   $(SRC)/Common/GPU/OpenGL/GLQueueRunner.cpp \
+  $(SRC)/Common/GPU/OpenGL/GLProfiler.cpp \
   $(SRC)/Common/GPU/OpenGL/DataFormatGL.cpp
 
 VULKAN_FILES := \
@@ -266,7 +278,15 @@ EXT_FILES := \
   $(SRC)/ext/cpu_features/src/impl_x86_macos.c \
   $(SRC)/ext/cpu_features/src/impl_x86_windows.c \
   $(SRC)/ext/cpu_features/src/stack_line_reader.c \
-  $(SRC)/ext/cpu_features/src/string_view.c
+  $(SRC)/ext/cpu_features/src/string_view.c \
+  $(SRC)/ext/lzma-sdk/7zArcIn.c \
+  $(SRC)/ext/lzma-sdk/7zBuf.c \
+  $(SRC)/ext/lzma-sdk/7zCrc.c \
+  $(SRC)/ext/lzma-sdk/7zDec.c \
+  $(SRC)/ext/lzma-sdk/7zFile.c \
+  $(SRC)/ext/lzma-sdk/7zStream.c \
+  $(SRC)/ext/lzma-sdk/Bcj2.c \
+  $(SRC)/ext/lzma-sdk/Lzma2Dec.c
 
 EXEC_AND_LIB_FILES := \
   $(ARCH_FILES) \
@@ -311,6 +331,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Common/File/VFS/VFS.cpp \
   $(SRC)/Common/File/VFS/ZipFileReader.cpp \
   $(SRC)/Common/File/VFS/DirectoryReader.cpp \
+  $(SRC)/Common/File/VFS/SevenZipFileReader.cpp \
   $(SRC)/Common/File/DiskFree.cpp \
   $(SRC)/Common/File/Path.cpp \
   $(SRC)/Common/File/PathBrowser.cpp \
@@ -396,7 +417,7 @@ include $(BUILD_STATIC_LIBRARY)
 # Next up, Core, GPU, and other core parts shared by headless.
 include $(CLEAR_VARS)
 include $(LOCAL_PATH)/Locals.mk
-LOCAL_WHOLE_STATIC_LIBRARIES += ppsspp_common libchdr lua
+LOCAL_WHOLE_STATIC_LIBRARIES += ppsspp_common libchdr lua pugixml
 
 ifeq ($(TARGET_ARCH_ABI),x86_64)
 ARCH_FILES := \
@@ -913,6 +934,7 @@ LOCAL_SRC_FILES := \
   $(SRC)/UI/DriverManagerScreen.cpp \
   $(SRC)/UI/DisplayLayoutScreen.cpp \
   $(SRC)/UI/EmuScreen.cpp \
+  $(SRC)/UI/GameBrowser.cpp \
   $(SRC)/UI/MainScreen.cpp \
   $(SRC)/UI/TabbedDialogScreen.cpp \
   $(SRC)/UI/AdhocServerScreen.cpp \

@@ -1212,7 +1212,7 @@ void FramebufferManagerCommon::DrawPixels(VirtualFramebuffer *vfb, int dstX, int
 	} else {
 		// The hacky way to get the display layout config (normally we pass it down, but it would require a lot of plumbing here).
 		// This is only for non-buffered rendering.
-		auto config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
+		const auto& config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 		// Here config is valid.
 		_dbg_assert_(channel == RASTER_COLOR);
 		// We are drawing directly to the back buffer so need to flip.
@@ -2296,7 +2296,7 @@ bool FramebufferManagerCommon::FindTransferFramebuffer(u32 basePtr, int stride_p
 		// Use bufferHeight in case of buffers that resize up and down often per frame (Valkyrie Profile.)
 
 		// If it's outside the vfb by a single pixel, we currently disregard it.
-		if (memYOffset > vfb->bufferHeight - h) {
+		if (memYOffset + y + h > vfb->bufferHeight) {
 			continue;
 		}
 
@@ -2642,14 +2642,14 @@ bool FramebufferManagerCommon::NotifyBlockTransferBefore(u32 dstBasePtr, int dst
 					// No info left - just fall back to something. But this is definitely split pixel tricks.
 					ramFormat = GE_FORMAT_5551;
 				}
-				dstRect.vfb = CreateRAMFramebuffer(dstBasePtr, width, height, dstStride, ramFormat);
+				dstRect.vfb = CreateRAMFramebuffer(dstBasePtr, dstX + width, dstY + height, dstStride, ramFormat);
 				dstRect.x_bytes = bpp * dstX;
 				dstRect.y = dstY;
 				dstRect.w_bytes = bpp * width;
 				dstRect.h = height;
 				dstRect.channel = RASTER_COLOR;
 			} else {
-				dstRect.vfb = CreateRAMFramebuffer(dstBasePtr, width, height, dstStride, GE_FORMAT_DEPTH16);
+				dstRect.vfb = CreateRAMFramebuffer(dstBasePtr, dstX + width, dstY + height, dstStride, GE_FORMAT_DEPTH16);
 				dstRect.x_bytes = 0;
 				dstRect.w_bytes = 2 * width;  // 2 = depth bpp
 				dstRect.y = 0;
@@ -2701,6 +2701,16 @@ bool FramebufferManagerCommon::NotifyBlockTransferBefore(u32 dstBasePtr, int dst
 			return true;  // Skip the memory copy.
 		}
 
+		// If the formats mismatch badly, we need a resolve.
+		if (srcRect.vfb && dstRect.vfb && srcRect.channel == RASTER_COLOR && dstRect.channel == RASTER_COLOR && srcRect.vfb->fb_format != dstRect.vfb->fb_format) {
+			WARN_LOG_N_TIMES(dstnotsrc, 5, Log::G3D, "Mismatched color format requiring reinterpret during block transfer %dx%d %dbpp from %08x (x:%d y:%d stride:%d %s) -> %08x (x:%d y:%d stride:%d %s)",
+				width, height, bpp,
+				srcBasePtr, srcRect.x_bytes / bpp, srcRect.y, srcStride, GeBufferFormatToString(srcRect.vfb->fb_format),
+				dstBasePtr, dstRect.x_bytes / bpp, dstRect.y, dstStride, GeBufferFormatToString(dstRect.vfb->fb_format));
+			// Seen in Silent Hill: Shattered Memories.
+			srcRect.vfb = ResolveFramebufferColorToFormat(srcRect.vfb, dstRect.vfb->fb_format);
+		}
+
 		// Straightforward blit between two same-format framebuffers.
 		if (srcRect.vfb && srcRect.channel == dstRect.channel && srcRect.vfb->Format(srcRect.channel) == dstRect.vfb->Format(dstRect.channel)) {
 			WARN_LOG_N_TIMES(dstnotsrc, 5, Log::G3D, "Inter-buffer %s block transfer %dx%d %dbpp from %08x (x:%d y:%d stride:%d %s) -> %08x (x:%d y:%d stride:%d %s)",
@@ -2728,6 +2738,40 @@ bool FramebufferManagerCommon::NotifyBlockTransferBefore(u32 dstBasePtr, int dst
 			WARN_LOG_N_TIMES(blockformat, 5, Log::G3D, "Mismatched buffer formats in block transfer: %s->%s (%dx%d)",
 				GeBufferFormatToString(srcRect.vfb->Format(srcRect.channel)), GeBufferFormatToString(dstRect.vfb->Format(dstRect.channel)),
 				width, height);
+
+			VirtualFramebuffer *src = srcRect.vfb, *dst = dstRect.vfb;
+			float scaleFactorX = 1.0f;
+			Draw2DPipeline *pipeline = GetReinterpretPipeline(src->fb_format, dst->fb_format, &scaleFactorX);
+
+			if (pipeline) {
+				const char *pass_name = reinterpretStrings[(int)src->fb_format][(int)dst->fb_format];
+
+				int srcWidth = width * src->renderScaleFactor;
+				int srcHeight = height * src->renderScaleFactor;
+				int dstWidth = width * dst->renderScaleFactor;
+				int dstHeight = height * dst->renderScaleFactor;
+
+				int srcX1 = srcX * src->renderScaleFactor;
+				int srcY1 = srcY * src->renderScaleFactor;
+				int srcX2 = srcX1 + srcWidth;
+				int srcY2 = srcY1 + srcHeight;
+
+				int dstX1 = dstX * dst->renderScaleFactor;
+				int dstY1 = dstY * dst->renderScaleFactor;
+				int dstX2 = dstX1 + dstWidth;
+				int dstY2 = dstY1 + dstHeight;
+
+				srcX1 /= scaleFactorX;
+				srcX2 /= scaleFactorX;
+
+				gpuStats.numReinterpretCopies++;
+				FlushBeforeCopy();
+				BlitUsingRaster(src->fbo, srcX1, srcY1, srcX2, srcY2,
+					dst->fbo, dstX1, dstY1, dstX2, dstY2, false, dst->renderScaleFactor, pipeline, pass_name);
+				RebindFramebuffer("RebindFramebuffer - Inter-buffer block transfer with mismatched formats");
+				SetColorUpdated(dst, skipDrawReason);
+				return true;
+			}
 		}
 
 		// TODO
@@ -2999,6 +3043,7 @@ bool FramebufferManagerCommon::GetFramebuffer(u32 fb_address, int fb_stride, GEB
 			return false;
 		// If there's no vfb and we're drawing there, must be memory?
 		buffer = GPUDebugBuffer(Memory::GetPointerWriteUnchecked(fb_address), fb_stride, 512, format);
+		buffer.SetScaleFactor(1);
 		return true;
 	}
 
@@ -3039,6 +3084,7 @@ bool FramebufferManagerCommon::GetFramebuffer(u32 fb_address, int fb_stride, GEB
 	buffer.Allocate(w, h, GE_FORMAT_8888, flipY);
 	bool retval = draw_->CopyFramebufferToMemory(bound, Draw::Aspect::COLOR_BIT, 0, 0, w, h, Draw::DataFormat::R8G8B8A8_UNORM, buffer.GetData(), w, Draw::ReadbackMode::BLOCK, "GetFramebuffer");
 
+	buffer.SetScaleFactor(vfb->renderScaleFactor);
 	// Don't need to increment gpu stats for readback count here, this is a debugger-only function.
 
 	// After a readback we'll have flushed and started over, need to dirty a bunch of things to be safe.
@@ -3059,6 +3105,7 @@ bool FramebufferManagerCommon::GetDepthbuffer(u32 fb_address, int fb_stride, u32
 			return false;
 		// If there's no vfb and we're drawing there, must be memory?
 		buffer = GPUDebugBuffer(Memory::GetPointerWriteUnchecked(z_address), z_stride, 512, GPU_DBG_FORMAT_16BIT);
+		buffer.SetScaleFactor(1);
 		return true;
 	}
 
@@ -3090,6 +3137,7 @@ bool FramebufferManagerCommon::GetDepthbuffer(u32 fb_address, int fb_stride, u32
 	gstate_c.Dirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
 	// That may have unbound the framebuffer, rebind to avoid crashes when debugging.
 	RebindFramebuffer("RebindFramebuffer - GetDepthbuffer");
+	buffer.SetScaleFactor(vfb->renderScaleFactor);
 	return retval;
 }
 
@@ -3337,6 +3385,7 @@ void FramebufferManagerCommon::RebindFramebuffer(const char *tag) {
 
 std::vector<const VirtualFramebuffer *> FramebufferManagerCommon::GetFramebufferList() const {
 	std::vector<const VirtualFramebuffer *> list;
+	list.reserve(vfbs_.size());
 	for (auto vfb : vfbs_) {
 		list.push_back(vfb);
 	}

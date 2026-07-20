@@ -22,9 +22,6 @@
 
 class PointerWrap;
 
-typedef std::function<void()> VblankCallback;
-// Listen for vblank events. Callbacks are cleared in DisplayHWShutdown().
-void __DisplayListenVblank(VblankCallback callback);
 typedef void (*FlipCallback)(void *userdata);
 void __DisplayListenFlip(FlipCallback callback, void *userdata);
 void __DisplayForgetFlip(FlipCallback callback, void *userdata);
@@ -52,9 +49,6 @@ void DisplayFireVblankEnd();
 void DisplayFireFlip();
 void DisplayFireActualFlip();
 
-int DisplayCalculateFrameSkip();
-
 void DisplayHWInit();
-void DisplayHWReset();
 void DisplayHWShutdown();
 void DisplayHWDoState(PointerWrap &p, int hleCompatV2);

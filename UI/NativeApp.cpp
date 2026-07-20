@@ -390,6 +390,13 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 #endif
 
 #if PPSSPP_PLATFORM(ANDROID)
+#ifdef _DEBUG
+	g_logManager.SetAllLogLevels(LogLevel::LINFO);
+	g_logManager.SetAllLogEnable(true);
+	g_logManager.SetOutputsEnabled(LogOutput::Stdio);
+	INFO_LOG(Log::System, "Logging test");
+#endif
+
 	// In Android 12 with scoped storage, due to the above, the external directory
 	// is no longer the plain root of external storage, but it's an app specific directory
 	// on external storage (g_extFilesDir).
@@ -624,12 +631,14 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 					boot_filename = Path(str);
 					skipLogo = true;
 				}
+				// This is needed on iOS, to fixup the path to match the current app directory, if it's stored in it.
+				TryUpdateSavedPath(&boot_filename);
 				if (okToLoad && okToCheck) {
 					std::unique_ptr<FileLoader> fileLoader(ConstructFileLoader(boot_filename));
 					if (!fileLoader->Exists()) {
 						fprintf(stderr, "File not found: %s\n", boot_filename.c_str());
-#if defined(_WIN32) || defined(__ANDROID__)
-						// Ignore and proceed.
+
+#if defined(_WIN32) || defined(__ANDROID__) || PPSSPP_PLATFORM(IOS)
 						boot_filename.clear();
 #else
 						// Bail.
@@ -639,7 +648,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 				}
 			} else {
 				fprintf(stderr, "Syntax error: Can only boot one file.\nNote: Many command line args need a =, like --appendconfig=FILENAME.ini.\n");
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || PPSSPP_PLATFORM(IOS)
 				// Ignore and proceed.
 #else
 				// Bail.
@@ -761,6 +770,7 @@ static void NativeMixWrapper(float *dest, int framesToWrite, int sampleRateHz, v
 	static int16_t *buffer;
 	static int bufSize;
 	if (bufSize < framesToWrite * 2) {
+		// This one leaks on exit. Oh well.
 		buffer = new int16_t[framesToWrite * 2];
 		bufSize = framesToWrite * 2;
 	}
@@ -822,10 +832,8 @@ bool NativeInitGraphics(GraphicsContext *graphicsContext) {
 
 #if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
 	if (IsWin7OrHigher()) {
-		winCamera = new WindowsCaptureDevice(CAPTUREDEVIDE_TYPE::VIDEO);
-		winCamera->sendMessage({ CAPTUREDEVIDE_COMMAND::INITIALIZE, nullptr });
-		winMic = new WindowsCaptureDevice(CAPTUREDEVIDE_TYPE::Audio);
-		winMic->sendMessage({ CAPTUREDEVIDE_COMMAND::INITIALIZE, nullptr });
+		winCamera = new WindowsCaptureDevice(CAPTUREDEVICE_TYPE::VIDEO);
+		winMic = new WindowsCaptureDevice(CAPTUREDEVICE_TYPE::AUDIO);
 	}
 #endif
 
@@ -1289,7 +1297,7 @@ bool NativeKey(const KeyInput &key) {
 #if PPSSPP_PLATFORM(UWP)
 	// Ignore if key sent from OnKeyDown/OnKeyUp/XInput while text edit active
 	// it's already handled by `OnCharacterReceived`
-	if (IgnoreInput(key.keyCode) && !(key.flags & KeyInputFlags::CHAR)) {
+	if (key.deviceId == DEVICE_ID_KEYBOARD && IgnoreInput(key.keyCode) && !(key.flags & KeyInputFlags::CHAR)) {
 		return false;
 	}
 #endif

@@ -68,6 +68,9 @@
     <Filter Include="Windows\Input\Hid">
       <UniqueIdentifier>{55d277d0-1afa-464d-9bde-672334ad73fe}</UniqueIdentifier>
     </Filter>
+    <Filter Include="assets">
+      <UniqueIdentifier>{a5b85611-e50f-4179-814d-426816c1e04d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Debugger\CtrlDisAsmView.cpp">
@@ -830,6 +833,18 @@
     <None Include="..\scripts\websocket-test.py">
       <Filter>Other Platforms</Filter>
     </None>
+    <None Include="..\assets\adhoc-servers.json">
+      <Filter>assets</Filter>
+    </None>
+    <None Include="..\assets\infra-dns.json">
+      <Filter>assets</Filter>
+    </None>
+    <None Include="..\assets\redump.csv">
+      <Filter>assets</Filter>
+    </None>
+    <None Include="..\assets\shaders\defaultshaders.ini">
+      <Filter>assets</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ppsspp.rc">
@@ -863,6 +878,9 @@
     </Text>
     <Text Include="..\SDL\README.TXT">
       <Filter>Other Platforms\SDL</Filter>
+    </Text>
+    <Text Include="..\assets\gamecontrollerdb.txt">
+      <Filter>assets</Filter>
     </Text>
   </ItemGroup>
 </Project>

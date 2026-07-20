@@ -81,6 +81,9 @@ static std::string PostShaderTranslateName(std::string_view value) {
 	}
 }
 
+DeveloperToolsScreen::DeveloperToolsScreen(const Path &gamePath)
+	: UITabbedBaseDialogScreen(gamePath, &g_Config.iDeveloperSettingsCurrentTab, TabDialogFlags::AddAutoTitles) {}
+
 void DeveloperToolsScreen::CreateTextureReplacementTab(UI::LinearLayout *list) {
 	using namespace UI;
 	auto dev = GetI18NCategory(I18NCat::DEVELOPER);
@@ -180,6 +183,7 @@ void DeveloperToolsScreen::CreateGeneralTab(UI::LinearLayout *list) {
 			}
 		});
 	}
+
 	list->Add(new CheckBox(&g_Config.bLogFrameDrops, dev->T("Log Dropped Frame Statistics")));
 	if (GetGPUBackend() == GPUBackend::VULKAN) {
 		list->Add(new CheckBox(&g_Config.bGpuLogProfiler, dev->T("GPU log profiler")));
@@ -198,6 +202,8 @@ void DeveloperToolsScreen::CreateGeneralTab(UI::LinearLayout *list) {
 		screenManager()->push(new GPIGPOScreen(dev->T("GPI/GPO switches/LEDs")));
 	});
 
+	list->Add(new CheckBox(&g_Config.bShowSaveLoadIndicator, dev->T("Show indicator when saving/loading")));
+
 #if PPSSPP_PLATFORM(ANDROID)
 	static const char *framerateModes[] = { "Default", "Request 60 Hz", "Force 60Hz" };
 	PopupMultiChoice *framerateMode = list->Add(new PopupMultiChoice(&g_Config.iDisplayFramerateMode, gr->T("Framerate mode"), framerateModes, 0, ARRAY_SIZE(framerateModes), I18NCat::GRAPHICS, screenManager()));
@@ -208,7 +214,7 @@ void DeveloperToolsScreen::CreateGeneralTab(UI::LinearLayout *list) {
 #endif
 
 #if PPSSPP_PLATFORM(IOS)
-	list->Add(new NoticeView(NoticeLevel::WARN, ms->T("Moving the memstick directory is NOT recommended on iOS"), ""));
+	list->Add(new NoticeView(NoticeLevel::WARN, ms->T("Moving the memstick directory is NOT recommended on iOS"), ""))->SetWrapText(true);
 	list->Add(new Choice(sy->T("Set Memory Stick folder")))->OnClick.Add(
 		[=](UI::EventParams &) {
 		SetMemStickDirDarwin(GetRequesterToken());
@@ -237,7 +243,10 @@ void DeveloperToolsScreen::CreateTestsTab(UI::LinearLayout *list) {
 	using namespace UI;
 	auto dev = GetI18NCategory(I18NCat::DEVELOPER);
 
-	list->Add(new Choice(dev->T("Touchscreen Test")))->OnClick.Handle(this, &DeveloperToolsScreen::OnTouchscreenTest);
+	list->Add(new Choice(dev->T("Touchscreen Test")))->OnClick.Add([this](UI::EventParams &e) {
+		screenManager()->push(new TouchTestScreen(gamePath_));
+		// Handle touchscreen test event
+	});
 	// list->Add(new Choice(dev->T("Memstick Test")))->OnClick.Handle(this, &DeveloperToolsScreen::OnMemstickTest);
 	Choice *frameDumpTests = list->Add(new Choice(dev->T("Framedump tests")));
 	frameDumpTests->OnClick.Add([this](UI::EventParams &e) {
@@ -268,6 +277,7 @@ void DeveloperToolsScreen::CreateDumpFileTab(UI::LinearLayout *list) {
 	list->Add(new BitCheckBox(&g_Config.iDumpFileTypes, (int)DumpFileType::EBOOT, dev->T("Dump Decrypted Eboot", "Dump Decrypted EBOOT.BIN (If Encrypted) When Booting Game")));
 	list->Add(new BitCheckBox(&g_Config.iDumpFileTypes, (int)DumpFileType::PRX, dev->T("PRX")));
 	list->Add(new BitCheckBox(&g_Config.iDumpFileTypes, (int)DumpFileType::Atrac3, dev->T("Atrac3/3+")));
+	list->Add(new BitCheckBox(&g_Config.iDumpFileTypes, (int)DumpFileType::PBP_ISO, dev->T("ISO from PBP")));
 }
 
 void DeveloperToolsScreen::CreateHLETab(UI::LinearLayout *list) {
@@ -477,12 +487,13 @@ void DeveloperToolsScreen::CreateNetworkTab(UI::LinearLayout *list) {
 	auto dev = GetI18NCategory(I18NCat::DEVELOPER);
 	auto ms = GetI18NCategory(I18NCat::MAINSETTINGS);
 	auto ri = GetI18NCategory(I18NCat::REMOTEISO);
+	auto nw = GetI18NCategory(I18NCat::NETWORKING);
 	list->Add(new ItemHeader(ms->T("Networking")));
 	list->Add(new CheckBox(&g_Config.bDontDownloadInfraJson, dev->T("Don't download infra-dns.json")));
-
 	// This is shared between RemoteISO and the remote debugger.
-	PopupSliderChoice *portChoice = new PopupSliderChoice(&g_Config.iRemoteISOPort, 0, 65535, 0, ri->T("Local Server Port", "Local Server Port"), 100, screenManager());
-	list->Add(portChoice);
+	list->Add(new PopupSliderChoice(&g_Config.iRemoteISOPort, 0, 65535, 0, ri->T("Local Server Port", "Local Server Port"), 100, screenManager()));
+	list->Add(new ItemHeader(nw->T("AdHoc server")));
+	list->Add(new CheckBox(&g_Config.bAdhocServerShowPlayerPorts, nw->T("Show player port numbers")));
 }
 
 // TODO: Make this generic
@@ -697,10 +708,6 @@ void DeveloperToolsScreen::OnJitDebugTools(UI::EventParams &e) {
 
 void DeveloperToolsScreen::OnGPUDriverTest(UI::EventParams &e) {
 	screenManager()->push(new GPUDriverTestScreen());
-}
-
-void DeveloperToolsScreen::OnTouchscreenTest(UI::EventParams &e) {
-	screenManager()->push(new TouchTestScreen(gamePath_));
 }
 
 void DeveloperToolsScreen::OnJitAffectingSetting(UI::EventParams &e) {

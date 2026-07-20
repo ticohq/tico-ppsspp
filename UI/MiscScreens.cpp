@@ -244,6 +244,9 @@ void TextureShaderScreen::CreateViews() {
 	std::vector<std::string> items;
 	int selected = -1;
 	for (int i = 0; i < (int)shaders_.size(); i++) {
+		if (shaders_[i].hidden) {
+			continue;
+		}
 		if (shaders_[i].section == g_Config.sTextureShaderName)
 			selected = i;
 		items.emplace_back(ps->T(shaders_[i].section, shaders_[i].name));

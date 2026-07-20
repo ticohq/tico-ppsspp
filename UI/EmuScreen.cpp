@@ -171,7 +171,6 @@ EmuScreen::EmuScreen(const Path &filename)
 	_dbg_assert_(coreState == CORE_POWERDOWN);
 
 	OnDevMenu.Handle(this, &EmuScreen::OnDevTools);
-	OnChatMenu.Handle(this, &EmuScreen::OnChat);
 
 	// Usually, we don't want focus movement enabled on this screen, so disable on start.
 	// Only if you open chat or dev tools do we want it to start working.
@@ -663,14 +662,12 @@ void EmuScreen::sendMessage(UIMessage message, const char *value) {
 				// temporary workaround for hotkey its freeze the ui when open chat screen using hotkey and native keyboard is enable
 				if (g_Config.bBypassOSKWithKeyboard) {
 					// TODO: Make translatable.
-					g_OSD.Show(OSDType::MESSAGE_INFO, "Disable \"Use system native keyboard\" to use ctrl + c hotkey", 2.0f);
+					g_OSD.Show(OSDType::MESSAGE_INFO, "Disable \"Use system native keyboard\" to use chat hotkey", 2.0f);
 				} else {
-					UI::EventParams e{};
-					OnChatMenu.Trigger(e);
+					OpenChat(true);
 				}
 			} else {
-				UI::EventParams e{};
-				OnChatMenu.Trigger(e);
+				OpenChat(false);
 			}
 		} else if (!g_Config.bEnableNetworkChat) {
 			if (chatButton_) {
@@ -861,8 +858,8 @@ void EmuScreen::ProcessVKey(VirtKey virtKey) {
 	case VIRTKEY_OPENCHAT:
 		if (g_Config.bEnableNetworkChat && !g_Config.bShowImDebugger) {
 			UI::EventParams e{};
-			OnChatMenu.Trigger(e);
 			g_controlMapper.ForceReleaseVKey(VIRTKEY_OPENCHAT);
+			OpenChat(true);
 		}
 		break;
 
@@ -995,7 +992,7 @@ void EmuScreen::ProcessVKey(VirtKey virtKey) {
 				auto mm = GetI18NCategory(I18NCat::MAINMENU);
 				confirmExitMessage += '\n';
 				confirmExitMessage += di->T("Are you sure you want to exit?");
-				screenManager()->push(new UI::MessagePopupScreen(mm->T("Exit"), confirmExitMessage, di->T("Yes"), di->T("No"), [=](bool result) {
+				screenManager()->push(new UI::MessagePopupScreen(di->T("Exit"), confirmExitMessage, di->T("Yes"), di->T("No"), [](bool result) {
 					if (result) {
 						System_ExitApp();
 					}
@@ -1319,9 +1316,12 @@ void EmuScreen::CreateViews() {
 		if (g_Config.iChatButtonPosition != 8) {
 			auto n = GetI18NCategory(I18NCat::NETWORKING);
 			AnchorLayoutParams *layoutParams = AnchorInCorner(bounds, g_Config.iChatButtonPosition, 80.0f, 50.0f);
-			ChoiceWithValueDisplay *btn = new ChoiceWithValueDisplay(&newChatMessages_, n->T("Chat"), layoutParams);
-			root_->Add(btn)->OnClick.Handle(this, &EmuScreen::OnChat);
-			chatButton_ = btn;
+			chatButton_ = root_->Add(new ChoiceWithValueDisplay(&newChatMessages_, n->T("Chat"), layoutParams));
+			chatButton_->OnClick.Add([this](UI::EventParams &e) {
+				// Really, the check here should be "has a hard keyboard".
+				bool focus = System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_DESKTOP;
+				OpenChat(focus);
+			});
 		}
 		chatMenu_ = root_->Add(new ChatMenu(GetRequesterToken(), screenManager()->getUIContext()->GetBounds(), screenManager(), new LayoutParams(FILL_PARENT, FILL_PARENT)));
 		chatMenu_->SetVisibility(UI::V_GONE);
@@ -1407,23 +1407,23 @@ void EmuScreen::OnDevTools(UI::EventParams &params) {
 	screenManager()->push(devMenu);
 }
 
-void EmuScreen::OnChat(UI::EventParams &params) {
+void EmuScreen::OpenChat(bool focus) {
 	if (chatButton_ != nullptr && chatButton_->GetVisibility() == UI::V_VISIBLE) {
 		chatButton_->SetVisibility(UI::V_GONE);
 	}
 	if (chatMenu_ != nullptr) {
 		chatMenu_->SetVisibility(UI::V_VISIBLE);
 
-#if PPSSPP_PLATFORM(WINDOWS) || defined(USING_QT_UI) || defined(SDL)
-		UI::EnableFocusMovement(true);
-		root_->SetDefaultFocusView(chatMenu_);
+		if (focus) {
+			UI::EnableFocusMovement(true);
+			root_->SetDefaultFocusView(chatMenu_);
 
-		chatMenu_->SetFocus();
-		UI::View *focused = UI::GetFocusedView();
-		if (focused) {
-			root_->SubviewFocused(focused);
+			chatMenu_->SetFocus(UI::FocusFlags::CAUSE_FORCED);
+			UI::View *focused = UI::GetFocusedView();
+			if (focused) {
+				root_->SubviewFocused(focused);
+			}
 		}
-#endif
 	}
 }
 
@@ -1469,7 +1469,7 @@ void EmuScreen::update() {
 		UpdateUIState(coreState != CORE_RUNTIME_ERROR ? UISTATE_INGAME : UISTATE_EXCEPTION);
 	}
 
-	if (errorMessage_.size()) {
+	if (!errorMessage_.empty()) {
 		auto err = GetI18NCategory(I18NCat::ERRORS);
 		auto di = GetI18NCategory(I18NCat::DIALOG);
 		std::string errLoadingFile = GetFriendlyPath(gamePath_) + "\n\n";
@@ -1495,7 +1495,7 @@ void EmuScreen::update() {
 	double now = time_now_d();
 
 	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
-	g_controlMapper.Update(config, now);
+	g_controlMapper.UpdateConfig(config);
 
 	if (saveStatePreview_ && !bootPending_) {
 		int currentSlot = SaveState::GetCurrentSlot();
@@ -1542,7 +1542,7 @@ bool EmuScreen::checkPowerDown() {
 }
 
 ScreenRenderRole EmuScreen::renderRole(bool isTop) const {
-	auto CanBeBackground = [&]() -> bool {
+	auto CanBeBackground = [this, isTop]() -> bool {
 		if (skipBufferEffects_) {
 			return isTop || (g_Config.bTransparentBackground && ShouldRunBehind());
 		}
@@ -1568,14 +1568,16 @@ ScreenRenderRole EmuScreen::renderRole(bool isTop) const {
 }
 
 void EmuScreen::darken() {
-	if (!screenManager()->topScreen()->wantBrightBackground()) {
-		UIContext &dc = *screenManager()->getUIContext();
-		uint32_t color = GetBackgroundColorWithAlpha(dc);
-		dc.Begin();
-		dc.RebindTexture();
-		dc.FillRect(UI::Drawable(color), dc.GetBounds());
-		dc.Flush();
+	if (screenManager()->topScreen()->wantBrightBackground()) {
+		return;
 	}
+
+	UIContext &dc = *screenManager()->getUIContext();
+	uint32_t color = GetBackgroundColorWithAlpha(dc);
+	dc.Begin();
+	dc.RebindTexture();
+	dc.FillRect(UI::Drawable(color), dc.GetBounds());
+	dc.Flush();
 }
 
 void EmuScreen::HandleFlip() {
@@ -1851,7 +1853,12 @@ ScreenRenderFlags EmuScreen::RunEmulation(bool skipBufferEffects) {
 
 void EmuScreen::runImDebugger() {
 	if (!lastImguiEnabled_ && g_Config.bShowImDebugger) {
+#if !defined(MOBILE_DEVICE)
+		// On mobile devices (specifically iOS) we don't want to pop the keyboard
+		// on activating imgui. Instead, we should do it when a text edit field in imgui gets focus,
+		// although we'll still have ugly overlap problems.
 		System_NotifyUIEvent(UIEventNotification::TEXT_GOTFOCUS);
+#endif
 		VERBOSE_LOG(Log::System, "activating keyboard");
 	} else if (lastImguiEnabled_ && !g_Config.bShowImDebugger) {
 		System_NotifyUIEvent(UIEventNotification::TEXT_LOSTFOCUS);

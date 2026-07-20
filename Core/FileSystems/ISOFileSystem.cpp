@@ -138,9 +138,18 @@ struct VolDescriptor {
 	char zeroos[653];
 };
 
+// Removes version numbers from filenames.
+static std::string_view CleanISOFileName(std::string_view name) {
+	auto pos = name.find(';');
+	if (pos != name.npos) {
+		name = name.substr(0, pos);
+	}
+	return name;
+}
+
 #pragma pack(pop)
 
-ISOFileSystem::ISOFileSystem(IHandleAllocator *_hAlloc, BlockDevice *_blockDevice) {
+ISOFileSystem::ISOFileSystem(IHandleAllocator *_hAlloc, std::shared_ptr<BlockDevice> _blockDevice) {
 	blockDevice = _blockDevice;
 	hAlloc = _hAlloc;
 
@@ -173,7 +182,6 @@ ISOFileSystem::ISOFileSystem(IHandleAllocator *_hAlloc, BlockDevice *_blockDevic
 }
 
 ISOFileSystem::~ISOFileSystem() {
-	delete blockDevice;
 	delete treeroot;
 }
 
@@ -224,7 +232,7 @@ void ISOFileSystem::ReadDirectory(TreeEntry *root) const {
 				entry->name = "..";
 				relative = true;
 			} else {
-				entry->name = std::string((const char *)&dir.firstIdChar, dir.identifierLength);
+				entry->name = std::string(CleanISOFileName(std::string_view((const char *)&dir.firstIdChar, dir.identifierLength)));
 				relative = false;
 			}
 

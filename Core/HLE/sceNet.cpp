@@ -228,7 +228,7 @@ bool LoadDNSForGameID(std::string_view gameID, std::string_view jsonStr, InfraDN
 				dns->revivalTeamURL = revived.getStringOr("url", "");
 			}
 		}
-		dns->connectAdHocForGrouping = def.getBool("connect_adhoc_for_grouping", false);
+		dns->connectAdHocForGrouping = def.getBoolOr("connect_adhoc_for_grouping", false);
 	}
 
 	const JsonNode *games = root.getArray("games");
@@ -290,7 +290,7 @@ bool LoadDNSForGameID(std::string_view gameID, std::string_view jsonStr, InfraDN
 		dns->gameName = game.getStringOr("name", "");
 		dns->dns = game.getStringOr("dns", dns->dns.c_str());
 		dns->dyn_dns = game.getStringOr("dyn_dns", "");
-		dns->connectAdHocForGrouping = game.getBool("connect_adhoc_for_grouping", dns->connectAdHocForGrouping);
+		dns->connectAdHocForGrouping = game.getBoolOr("connect_adhoc_for_grouping", dns->connectAdHocForGrouping);
 		if (game.hasChild("domains", JSON_OBJECT)) {
 			const JsonGet domains = game.getDict("domains");
 			for (const auto &iter : domains.value_) {

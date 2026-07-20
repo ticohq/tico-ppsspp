@@ -190,14 +190,15 @@ public:
 	bool bDumpVideoOutput;
 	bool bDumpAudio;
 	bool bSaveLoadResetsAVdumping;
+	bool bShowSaveLoadIndicator;
 	bool bEnableLogging;
 	bool bEnableFileLogging;
 	int iLogOutputTypes;  // enum class LogOutput
 	int iDumpFileTypes;  // DumpFileType bitflag enum
 	bool bFullscreenOnDoubleclick;
-
-	// These four are Win UI only
 	bool bPauseOnLostFocus;
+
+	// These are Win UI only
 	bool bTopMost;
 	bool bIgnoreWindowsKey;
 	bool bRestartRequired;
@@ -425,6 +426,8 @@ public:
 	float fGameGridScale;
 	int iBackgroundAnimation;  // enum BackgroundAnimation
 	bool bTransparentBackground;
+	int iSettingsCurrentTab;
+	int iDeveloperSettingsCurrentTab;
 
 	std::string sThemeName;
 
@@ -529,6 +532,11 @@ public:
 	float fMouseSmoothing;
 	int iMouseWheelUpDelayMs;
 
+	// Crude Windows controller filter.
+	bool bAllowHIDInput;
+	bool bAllowXInput;
+	bool bAllowDInput;
+
 	bool bSystemControls;
 	int iRapidFireInterval;
 
@@ -555,6 +563,7 @@ public:
 	bool bEnableAdhocServer;
 	std::string sProAdhocServer;
 	int iAdhocServerRelayMode;
+	bool bAdhocServerShowPlayerPorts;
 	std::string sInfrastructureDNSServer;
 	std::string sInfrastructureUsername;  // Username used for Infrastructure play. Different restrictions.
 	bool bInfrastructureAutoDNS;

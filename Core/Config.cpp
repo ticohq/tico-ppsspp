@@ -263,6 +263,7 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("DumpFrames", SETTING(g_Config, bDumpFrames), false, CfgFlag::DEFAULT),
 	ConfigSetting("DumpVideoOutput", SETTING(g_Config, bDumpVideoOutput), false, CfgFlag::DEFAULT),
 	ConfigSetting("DumpAudio", SETTING(g_Config, bDumpAudio), false, CfgFlag::DEFAULT),
+	ConfigSetting("ShowSaveLoadIndicator", SETTING(g_Config, bShowSaveLoadIndicator), false, CfgFlag::DEFAULT),
 	ConfigSetting("SaveLoadResetsAVdumping", SETTING(g_Config, bSaveLoadResetsAVdumping), false, CfgFlag::DEFAULT),
 	ConfigSetting("StateSlot", SETTING(g_Config, iCurrentStateSlot), 0, CfgFlag::PER_GAME),
 	ConfigSetting("EnableStateUndo", SETTING(g_Config, bEnableStateUndo), &DefaultEnableStateUndo, CfgFlag::PER_GAME),
@@ -316,8 +317,16 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("UITint", SETTING(g_Config, fUITint), 0.0, CfgFlag::DEFAULT),
 	ConfigSetting("UISaturation", SETTING(g_Config, fUISaturation), &DefaultUISaturation, CfgFlag::DEFAULT),
 
+	// Current settings tabs
+	// Decided for now that these should not be saved, so commented out from here. Still saved within the session, of course.
+	// ConfigSetting("SettingsCurrentTab", SETTING(g_Config, iSettingsCurrentTab), 0, CfgFlag::DEFAULT),
+	// ConfigSetting("DeveloperSettingsCurrentTab", SETTING(g_Config, iDeveloperSettingsCurrentTab), 0, CfgFlag::DEFAULT),
+
 #if defined(USING_WIN_UI)
 	ConfigSetting("TopMost", SETTING(g_Config, bTopMost), false, CfgFlag::DEFAULT),
+#endif
+
+#if defined(USING_WIN_UI) || (defined (SDL) && !defined(MOBILE_DEVICE))
 	ConfigSetting("PauseOnLostFocus", SETTING(g_Config, bPauseOnLostFocus), false, CfgFlag::PER_GAME),
 #endif
 
@@ -760,7 +769,7 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("TexDeposterize", SETTING(g_Config, bTexDeposterize), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("TexHardwareScaling", SETTING(g_Config, bTexHardwareScaling), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("VerticalSync", SETTING(g_Config, bVSync), true, CfgFlag::PER_GAME),
-	ConfigSetting("LowLatencyPresent", SETTING(g_Config, bLowLatencyPresent), true, CfgFlag::PER_GAME),
+	ConfigSetting("LowLatencyPresent", SETTING(g_Config, bLowLatencyPresent), false, CfgFlag::PER_GAME),
 	ConfigSetting("BloomHack", SETTING(g_Config, iBloomHack), 0, CfgFlag::PER_GAME | CfgFlag::REPORT),
 
 	// Not really a graphics setting...
@@ -1029,6 +1038,12 @@ static const ConfigSetting controlSettings[] = {
 
 	ConfigSetting("SystemControls", SETTING(g_Config, bSystemControls), true, CfgFlag::DEFAULT),
 	ConfigSetting("RapidFileInterval", SETTING(g_Config, iRapidFireInterval), 5, CfgFlag::DEFAULT),
+
+#if PPSSPP_PLATFORM(WINDOWS)
+	ConfigSetting("AllowHIDInput", SETTING(g_Config, bAllowHIDInput), true, CfgFlag::DEFAULT),
+	ConfigSetting("AllowXInput", SETTING(g_Config, bAllowXInput), true, CfgFlag::DEFAULT),
+	ConfigSetting("AllowDInput", SETTING(g_Config, bAllowDInput), true, CfgFlag::DEFAULT),
+#endif
 };
 
 static const std::vector<std::string_view> emptyList;
@@ -1038,6 +1053,7 @@ static const ConfigSetting networkSettings[] = {
 	ConfigSetting("EnableAdhocServer", SETTING(g_Config, bEnableAdhocServer), false, CfgFlag::PER_GAME),
 	ConfigSetting("proAdhocServer", SETTING(g_Config, sProAdhocServer), &DefaultProAdhocServer, CfgFlag::PER_GAME),
 	ConfigSetting("AdhocServerRelayMode", SETTING(g_Config, iAdhocServerRelayMode), (int)AdhocServerRelayMode::Auto, CfgFlag::PER_GAME),
+	ConfigSetting("AdhocServerShowPlayerPorts", SETTING(g_Config, bAdhocServerShowPlayerPorts), false, CfgFlag::PER_GAME),
 	ConfigSetting("PortOffset", SETTING(g_Config, iPortOffset), 10000, CfgFlag::PER_GAME),
 	ConfigSetting("PrimaryDNSServer", SETTING(g_Config, sInfrastructureDNSServer), "67.222.156.250", CfgFlag::PER_GAME),
 	ConfigSetting("MinTimeout", SETTING(g_Config, iMinTimeout), 0, CfgFlag::PER_GAME),
@@ -1590,9 +1606,7 @@ void Config::PostLoadCleanup() {
 	}
 
 	// Squash unsupported screen rotations.
-	if (g_Config.iScreenRotation == ROTATION_AUTO_HORIZONTAL) {
-		g_Config.iScreenRotation = ROTATION_LOCKED_HORIZONTAL;
-	} else if (g_Config.iScreenRotation == ROTATION_LOCKED_VERTICAL180) {
+	if (g_Config.iScreenRotation == ROTATION_LOCKED_VERTICAL180) {
 		g_Config.iScreenRotation = ROTATION_LOCKED_VERTICAL;
 	}
 

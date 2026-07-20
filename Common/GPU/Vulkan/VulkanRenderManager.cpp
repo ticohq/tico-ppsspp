@@ -1811,6 +1811,10 @@ VKRPipelineLayout *VulkanRenderManager::CreatePipelineLayout(BindingType *bindin
 			bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 			bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 			break;
+		case BindingType::UNIFORM_BUFFER_COMPUTE:
+			bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			break;
 		default:
 			UNREACHABLE();
 			break;
@@ -1993,8 +1997,18 @@ void VKRPipelineLayout::FlushDescSets(VulkanContext *vulkan, int frame, QueuePro
 				_dbg_assert_(data[i].buffer.buffer != VK_NULL_HANDLE);
 				bufferInfo[numBuffers].buffer = data[i].buffer.buffer;
 				bufferInfo[numBuffers].range = data[i].buffer.range;
-				bufferInfo[numBuffers].offset = 0;  // This is supplied by the dynamic offset.
+				bufferInfo[numBuffers].offset = 0;  // This is supplied by the dynamic offset, if available.
 				writes[numWrites].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+				writes[numWrites].pBufferInfo = &bufferInfo[numBuffers];
+				writes[numWrites].pImageInfo = nullptr;
+				numBuffers++;
+				break;
+			case BindingType::UNIFORM_BUFFER_COMPUTE:
+				_dbg_assert_(data[i].buffer.buffer != VK_NULL_HANDLE);
+				bufferInfo[numBuffers].buffer = data[i].buffer.buffer;
+				bufferInfo[numBuffers].range = data[i].buffer.range;
+				bufferInfo[numBuffers].offset = 0;  // This is supplied by the dynamic offset, if available.
+				writes[numWrites].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 				writes[numWrites].pBufferInfo = &bufferInfo[numBuffers];
 				writes[numWrites].pImageInfo = nullptr;
 				numBuffers++;

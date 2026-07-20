@@ -708,11 +708,15 @@ void TouchTestScreen::UpdateLogView() {
 bool TouchTestScreen::key(const KeyInput &key) {
 	UIScreen::key(key);
 	char buf[512];
-	snprintf(buf, sizeof(buf), "%s (%d) Device ID: %d [%s%s%s%s]", KeyMap::GetKeyName(key.keyCode).c_str(), key.keyCode, key.deviceId,
-		(key.flags & KeyInputFlags::IS_REPEAT) ? "REP" : "",
-		(key.flags & KeyInputFlags::UP) ? "UP" : "",
-		(key.flags & KeyInputFlags::DOWN) ? "DOWN" : "",
-		(key.flags & KeyInputFlags::CHAR) ? "CHAR" : "");
+	snprintf(buf, sizeof(buf), "%s (%d) Device ID: %d [%s%s%s%s%s%s%s%s]", KeyMap::GetKeyName(key.keyCode).c_str(), key.keyCode, key.deviceId,
+		(key.flags & KeyInputFlags::IS_REPEAT) ? "REP " : "",
+		(key.flags & KeyInputFlags::UP) ? "UP " : "",
+		(key.flags & KeyInputFlags::DOWN) ? "DOWN " : "",
+		(key.flags & KeyInputFlags::CHAR) ? "CHAR " : "",
+		(key.flags & KeyInputFlags::MOD_CTRL) ? "CTRL " : "",
+		(key.flags & KeyInputFlags::MOD_SHIFT) ? "SHIFT " : "",
+		(key.flags & KeyInputFlags::MOD_ALT) ? "ALT " : "",
+		(key.flags & KeyInputFlags::MOD_META) ? "META " : "");
 	keyEventLog_.push_back(buf);
 	UpdateLogView();
 	return true;

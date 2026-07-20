@@ -174,7 +174,7 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 				ImGui::Image(texId, ImVec2(w, h));
 				ImGui::Text("%08x: %dx%d, %d mips, %s", (uint32_t)(cfg.selectedTexAddr & 0xFFFFFFFF), w, h, entry->maxLevel + 1, GeTextureFormatToString((GETextureFormat)entry->format));
 				ImGui::Text("Stride: %d", entry->bufw);
-				ImGui::Text("Status: %08x", entry->status);  // TODO: Show the flags
+				ImGui::Text("Status: %08x: %s", entry->status, TexStatusToString((TexCacheEntry::TexStatus)(entry->status)).c_str());
 				ImGui::Text("Hash: %08x", entry->fullhash);
 				ImGui::Text("CLUT Hash: %08x", entry->cluthash);
 				ImGui::Text("Minihash: %08x", entry->minihash);
@@ -426,31 +426,34 @@ bool ImGePixelViewer::FormatValueAt(char *buf, size_t bufSize, int x, int y) con
 	// Go look directly in RAM.
 	int bpp = BufferFormatBytesPerPixel(format);
 	u32 pixelAddr = addr + (y * stride + x) * bpp;
+	if (!Memory::IsValidAddress(pixelAddr)) {
+		return false;
+	}
 	switch (format) {
 	case GE_FORMAT_8888:
-		snprintf(buf, bufSize, "%08x", Memory::Read_U32(pixelAddr));
+		snprintf(buf, bufSize, "%08x", Memory::ReadUnchecked_U32(pixelAddr));
 		break;
 	case GE_FORMAT_4444:
 	{
-		u16 raw = Memory::Read_U16(pixelAddr);
+		u16 raw = Memory::ReadUnchecked_U16(pixelAddr);
 		snprintf(buf, bufSize, "%08x (raw: %04x)", RGBA4444ToRGBA8888(raw), raw);
 		break;
 	}
 	case GE_FORMAT_565:
 	{
-		u16 raw = Memory::Read_U16(pixelAddr);
+		u16 raw = Memory::ReadUnchecked_U16(pixelAddr);
 		snprintf(buf, bufSize, "%08x (raw: %04x)", RGB565ToRGBA8888(raw), raw);
 		break;
 	}
 	case GE_FORMAT_5551:
 	{
-		u16 raw = Memory::Read_U16(pixelAddr);
+		u16 raw = Memory::ReadUnchecked_U16(pixelAddr);
 		snprintf(buf, bufSize, "%08x (raw: %04x)", RGBA5551ToRGBA8888(raw), raw);
 		break;
 	}
 	case GE_FORMAT_DEPTH16:
 	{
-		u16 raw = Memory::Read_U16(pixelAddr);
+		u16 raw = Memory::ReadUnchecked_U16(pixelAddr);
 		snprintf(buf, bufSize, "%0.4f (raw: %04x / %d)", (float)raw / 65535.0f, raw, raw);
 		break;
 	}
@@ -779,7 +782,7 @@ void ImGeDisasmView::Draw(GPUDebugInterface *gpuDebug) {
 		if (Memory::IsValid4AlignedAddress(addr)) {
 			draw_list->AddText(lineStart, 0xFFC0C0C0, addrBuffer);
 
-			u32 opcode = Memory::Read_U32(addr);
+			u32 opcode = Memory::ReadUnchecked_U32(addr);
 			GPUDebugOp op = gpuDebug->DisassembleOp(addr, opcode);
 			u32 color = 0xFFFFFFFF;
 			char temp[16];
@@ -842,7 +845,7 @@ void ImGeDisasmView::Draw(GPUDebugInterface *gpuDebug) {
 			}
 		} else if (Memory::IsValid4AlignedAddress(dragAddr_)) {
 			char buffer[64];
-			u32 opcode = Memory::Read_U32(dragAddr_);
+			u32 opcode = Memory::ReadUnchecked_U32(dragAddr_);
 			GPUDebugOp op = gpuDebug->DisassembleOp(dragAddr_, opcode);
 			// affect dragAddr_?
 			if (ImGui::MenuItem("Copy Address", NULL, false)) {
@@ -1182,7 +1185,8 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUDebugInterfa
 	DisplayList list;
 	bool isOnBlockTransfer = false;
 	if (gpuDebug->GetCurrentDisplayList(list)) {
-		op = Memory::Read_U32(list.pc);
+		_dbg_assert_(Memory::IsValid4AlignedAddress(list.pc));
+		op = Memory::ReadUnchecked_U32(list.pc);
 
 		// TODO: Also add support for block transfer previews!
 

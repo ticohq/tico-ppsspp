@@ -28,13 +28,15 @@
 #include "Common/UI/Tween.h"
 #include "Core/KeyMap.h"
 #include "Core/ControlMapper.h"
-
-#include "UI/ImDebugger/ImDebugger.h"
+#include "UI/ImDebugger/ImCommand.h"
 
 struct AxisInput;
 
 class AsyncImageFileView;
 class ChatMenu;
+class ImDebugger;
+struct ImCommand;
+struct ImGuiContext;
 
 class EmuScreen : public UIScreen, protected ControlListener {
 public:
@@ -83,7 +85,7 @@ private:
 	void CreateViews() override;
 	ScreenRenderFlags RunEmulation(bool skipBufferEffects);
 	void OnDevTools(UI::EventParams &params);
-	void OnChat(UI::EventParams &params);
+	void OpenChat(bool focus);
 
 	void HandleFlip();
 	void ProcessGameBoot(const Path &filename);
@@ -104,7 +106,6 @@ private:
 	bool ShouldRunEmulation(ScreenRenderMode mode) const;
 
 	UI::Event OnDevMenu;
-	UI::Event OnChatMenu;
 	bool bootPending_ = true;
 	bool bootIsReset_ = false;
 	Path gamePath_;
@@ -134,14 +135,14 @@ private:
 	UI::Button *resumeButton_ = nullptr;
 	UI::Button *resetButton_ = nullptr;
 	UI::Button *backButton_ = nullptr;
-	UI::View *chatButton_ = nullptr;
+	UI::Clickable *chatButton_ = nullptr;
 	ChatMenu *chatMenu_ = nullptr;
 
 	UI::Button *cardboardDisableButton_ = nullptr;
 
 	std::string extraAssertInfoStr_;
 
-	std::unique_ptr<ImDebugger> imDebugger_ = nullptr;
+	std::unique_ptr<ImDebugger> imDebugger_;
 	ImCommand imCmd_{};  // needed to buffer commands in case imgui wasn't created yet.
 
 	bool imguiInited_ = false;
