@@ -3072,7 +3072,7 @@ if(USE_LIBNX)
 	nx_generate_nacp(tico-ppsspp.nacp
 		NAME "tico PPSSPP"
 		AUTHOR "ticoverse.com"
-		VERSION "2.0.0"
+		VERSION "2.0.2"
 	)
 	nx_create_nro(tico-ppsspp NACP tico-ppsspp.nacp ROMFS "${tico-ppsspp_ROMFS_DIR}")
 endif()

@@ -30,6 +30,11 @@ static PFNGLGETQUERYOBJECTUI64VPROC glGetQueryObjectui64v = nullptr;
 // GLCommon.h provides access to GL functions:
 // - On GLES: function pointers from gl3stub.h, loaded via eglGetProcAddress
 // - On desktop GL: GLEW provides the functions
+#if PPSSPP_PLATFORM(SWITCH)
+#define PPSSPP_GL_TIMER_QUERY_AVAILABLE 0
+#else
+#define PPSSPP_GL_TIMER_QUERY_AVAILABLE 1
+#endif
 
 void GLProfiler::Init() {
 	supported_ = false;
@@ -40,7 +45,7 @@ void GLProfiler::Init() {
 
 	// NOTE: Getting a lot of hangs on Android from this, I'm disabling it entirely for now.
 	// Will later re-enable on desktop.
-#if 0
+#if PPSSPP_GL_TIMER_QUERY_AVAILABLE && 0
 
 	// Check for extension support
 	// Function pointers are declared in gl3stub.h and loaded appropriately per platform
@@ -78,6 +83,9 @@ void GLProfiler::Shutdown() {
 }
 
 void GLProfiler::BeginFrame() {
+#if !PPSSPP_GL_TIMER_QUERY_AVAILABLE
+	return;
+#else
 	if (!supported_) {
 		return;
 	}
@@ -135,9 +143,13 @@ void GLProfiler::BeginFrame() {
 	scopes_.clear();
 	scopeStack_.clear();
 	numQueries_ = 0;
+#endif
 }
 
 void GLProfiler::Begin(const char *fmt, ...) {
+#if !PPSSPP_GL_TIMER_QUERY_AVAILABLE
+	return;
+#else
 	if (!supported_ || (enabledPtr_ && !*enabledPtr_) || numQueries_ >= MAX_QUERY_COUNT - 1) {
 		return;
 	}
@@ -156,9 +168,13 @@ void GLProfiler::Begin(const char *fmt, ...) {
 
 	glQueryCounter(queries_[numQueries_], GL_TIMESTAMP);
 	numQueries_++;
+#endif
 }
 
 void GLProfiler::End() {
+#if !PPSSPP_GL_TIMER_QUERY_AVAILABLE
+	return;
+#else
 	if (!supported_ || (enabledPtr_ && !*enabledPtr_) || numQueries_ >= MAX_QUERY_COUNT - 1) {
 		return;
 	}
@@ -176,4 +192,5 @@ void GLProfiler::End() {
 
 	glQueryCounter(queries_[numQueries_], GL_TIMESTAMP);
 	numQueries_++;
+#endif
 }
