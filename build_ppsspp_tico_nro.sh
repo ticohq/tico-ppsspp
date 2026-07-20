@@ -11,6 +11,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build_switch_tico"
 MESA_NVK_DIR="${MESA_NVK_DIR:-/nvk-build}"
 
+if command -v git >/dev/null 2>&1 && [ -d "${SCRIPT_DIR}/.git" ]; then
+	git config --global --add safe.directory "${SCRIPT_DIR}" || true
+fi
+
 if [ -z "${SWITCH_VULKAN_LIBRARY:-}" ] && [ -f "${MESA_NVK_DIR}/src/nouveau/vulkan/libvulkan.a" ]; then
 	SWITCH_VULKAN_LIBRARY="${MESA_NVK_DIR}/src/nouveau/vulkan/libvulkan.a"
 fi

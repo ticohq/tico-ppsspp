@@ -130,6 +130,12 @@ std::string TranslationManager::LanguageFileName(const std::string &language) co
 	if (language == "French" || language == "fr") {
 		return "fr.json";
 	}
+	if (language == "German" || language == "Deutsch" || language == "de") {
+		return "de.json";
+	}
+	if (language == "Russian" || language == "Russkiy" || language == "ru") {
+		return "ru.json";
+	}
 	if (language == "Chinese" || language == "Chinese Traditional" || language == "Chinese Simplified" || language == "zh") {
 		return "zh.json";
 	}
