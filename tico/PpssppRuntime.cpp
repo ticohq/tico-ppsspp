@@ -80,8 +80,28 @@ constexpr int kAudioThreadCore = 1;
 constexpr size_t kCheatLoadThreadStackSize = 0x20000;
 constexpr int kCheatLoadThreadPriority = 0x3B;
 constexpr int kCheatLoadThreadCore = -2;
-constexpr int kRightStickFaceButtonThreshold = 12000;
+constexpr int kDefaultRightStickButtonThreshold = 12000;
 constexpr size_t kCheatMetadataLineChars = 68;
+
+enum class RightStickMode {
+	Disabled,
+	FaceButtons,
+	DPad,
+	Analog,
+};
+
+struct InputButtonMapping {
+	u64 switchButton = 0;
+	const char *configKey = nullptr;
+	u32 defaultPspButtons = 0;
+	u32 pspButtons = 0;
+};
+
+struct InputConfig {
+	std::array<InputButtonMapping, 16> buttonMappings{};
+	RightStickMode rightStickMode = RightStickMode::FaceButtons;
+	int rightStickButtonThreshold = kDefaultRightStickButtonThreshold;
+};
 
 struct RuntimeState {
 	LogCallback log;
@@ -104,6 +124,7 @@ struct RuntimeState {
 	std::array<bool, Ppsspp::SaveStateSlotCount> saveStateSlots{};
 	u64 lastSaveStateScanMs = 0;
 	u32 lastPspButtons = 0;
+	InputConfig inputConfig;
 	bool audioReady = false;
 	int audioSampleRate = kAudioSampleRate;
 	int audioBufferSamples = kAudioSamples;
@@ -119,6 +140,29 @@ struct RuntimeState {
 };
 
 RuntimeState g_state;
+
+InputConfig DefaultInputConfig() {
+	InputConfig config{};
+	config.buttonMappings = {{
+		{ HidNpadButton_B, "ppsspp_map_b", CTRL_CROSS, CTRL_CROSS },
+		{ HidNpadButton_A, "ppsspp_map_a", CTRL_CIRCLE, CTRL_CIRCLE },
+		{ HidNpadButton_Y, "ppsspp_map_y", CTRL_SQUARE, CTRL_SQUARE },
+		{ HidNpadButton_X, "ppsspp_map_x", CTRL_TRIANGLE, CTRL_TRIANGLE },
+		{ HidNpadButton_Up, "ppsspp_map_dpad_up", CTRL_UP, CTRL_UP },
+		{ HidNpadButton_Down, "ppsspp_map_dpad_down", CTRL_DOWN, CTRL_DOWN },
+		{ HidNpadButton_Left, "ppsspp_map_dpad_left", CTRL_LEFT, CTRL_LEFT },
+		{ HidNpadButton_Right, "ppsspp_map_dpad_right", CTRL_RIGHT, CTRL_RIGHT },
+		{ HidNpadButton_Plus, "ppsspp_map_plus", CTRL_START, CTRL_START },
+		{ HidNpadButton_Minus, "ppsspp_map_minus", CTRL_SELECT, CTRL_SELECT },
+		{ HidNpadButton_L, "ppsspp_map_l", CTRL_LTRIGGER, CTRL_LTRIGGER },
+		{ HidNpadButton_R, "ppsspp_map_r", CTRL_RTRIGGER, CTRL_RTRIGGER },
+		{ HidNpadButton_ZL, "ppsspp_map_zl", CTRL_L2, CTRL_L2 },
+		{ HidNpadButton_ZR, "ppsspp_map_zr", CTRL_R2, CTRL_R2 },
+		{ HidNpadButton_StickL, "ppsspp_map_stick_l", CTRL_L3, CTRL_L3 },
+		{ HidNpadButton_StickR, "ppsspp_map_stick_r", CTRL_R3, CTRL_R3 },
+	}};
+	return config;
+}
 
 void Log(const char *fmt, ...) {
 	if (!g_state.log || !fmt) {
@@ -161,20 +205,163 @@ float NormalizeStickAxis(int value) {
 	return ClampAnalog(normalized * g_Config.fAnalogSensitivity);
 }
 
-void AddRightStickFaceButtons(const FrameInput &input, u32 *buttons) {
+std::string NormalizeInputConfigValue(const std::string &value) {
+	std::string normalized;
+	normalized.reserve(value.size());
+	for (char ch : value) {
+		if (std::isalnum((unsigned char)ch)) {
+			normalized.push_back((char)std::tolower((unsigned char)ch));
+		}
+	}
+	return normalized;
+}
+
+bool PspButtonsFromName(const std::string &name, u32 *buttons) {
+	if (!buttons) {
+		return false;
+	}
+
+	const std::string normalized = NormalizeInputConfigValue(name);
+	if (normalized.empty() || normalized == "none" || normalized == "disabled" || normalized == "off") {
+		*buttons = 0;
+		return true;
+	}
+	if (normalized == "cross" || normalized == "x") {
+		*buttons = CTRL_CROSS;
+	} else if (normalized == "circle" || normalized == "o") {
+		*buttons = CTRL_CIRCLE;
+	} else if (normalized == "square") {
+		*buttons = CTRL_SQUARE;
+	} else if (normalized == "triangle") {
+		*buttons = CTRL_TRIANGLE;
+	} else if (normalized == "up" || normalized == "dpadup") {
+		*buttons = CTRL_UP;
+	} else if (normalized == "down" || normalized == "dpaddown") {
+		*buttons = CTRL_DOWN;
+	} else if (normalized == "left" || normalized == "dpadleft") {
+		*buttons = CTRL_LEFT;
+	} else if (normalized == "right" || normalized == "dpadright") {
+		*buttons = CTRL_RIGHT;
+	} else if (normalized == "start") {
+		*buttons = CTRL_START;
+	} else if (normalized == "select") {
+		*buttons = CTRL_SELECT;
+	} else if (normalized == "l" || normalized == "l1" || normalized == "lefttrigger") {
+		*buttons = CTRL_LTRIGGER;
+	} else if (normalized == "r" || normalized == "r1" || normalized == "righttrigger") {
+		*buttons = CTRL_RTRIGGER;
+	} else if (normalized == "l2") {
+		*buttons = CTRL_L2;
+	} else if (normalized == "r2") {
+		*buttons = CTRL_R2;
+	} else if (normalized == "l3") {
+		*buttons = CTRL_L3;
+	} else if (normalized == "r3") {
+		*buttons = CTRL_R3;
+	} else {
+		return false;
+	}
+	return true;
+}
+
+u32 ParsePspButtonMapping(const std::string &value, u32 fallback) {
+	u32 parsedButtons = 0;
+	bool parsedAny = false;
+	size_t tokenStart = 0;
+
+	for (size_t i = 0; i <= value.size(); ++i) {
+		if (i != value.size() && value[i] != '+' && value[i] != ',' && value[i] != '|') {
+			continue;
+		}
+
+		const std::string token = value.substr(tokenStart, i - tokenStart);
+		tokenStart = i + 1;
+		if (NormalizeInputConfigValue(token).empty()) {
+			continue;
+		}
+
+		u32 tokenButtons = 0;
+		if (!PspButtonsFromName(token, &tokenButtons)) {
+			return fallback;
+		}
+		parsedButtons |= tokenButtons;
+		parsedAny = true;
+	}
+
+	return parsedAny ? parsedButtons : fallback;
+}
+
+RightStickMode ParseRightStickMode(const std::string &value, RightStickMode fallback) {
+	const std::string normalized = NormalizeInputConfigValue(value);
+	if (normalized == "disabled" || normalized == "none" || normalized == "off") {
+		return RightStickMode::Disabled;
+	}
+	if (normalized == "facebuttons" || normalized == "face" || normalized == "buttons") {
+		return RightStickMode::FaceButtons;
+	}
+	if (normalized == "dpad" || normalized == "directionalpad") {
+		return RightStickMode::DPad;
+	}
+	if (normalized == "analog" || normalized == "rightanalog" || normalized == "stick") {
+		return RightStickMode::Analog;
+	}
+	return fallback;
+}
+
+InputConfig LoadInputConfig(const CoreConfig &coreConfig) {
+	InputConfig inputConfig = DefaultInputConfig();
+	const auto &options = coreConfig.Options();
+
+	for (InputButtonMapping &mapping : inputConfig.buttonMappings) {
+		if (const std::string *value = FindOption(options, mapping.configKey)) {
+			mapping.pspButtons = ParsePspButtonMapping(*value, mapping.defaultPspButtons);
+		}
+	}
+	if (const std::string *value = FindOption(options, "ppsspp_right_stick_mode")) {
+		inputConfig.rightStickMode = ParseRightStickMode(*value, inputConfig.rightStickMode);
+	}
+	if (const std::string *value = FindOption(options, "ppsspp_right_stick_threshold")) {
+		inputConfig.rightStickButtonThreshold = std::clamp(OptionInt(*value, inputConfig.rightStickButtonThreshold), 1, 32767);
+	}
+
+	return inputConfig;
+}
+
+void AddRightStickButtons(const FrameInput &input, u32 *buttons) {
 	if (!buttons) {
 		return;
 	}
-	if (input.rightStickY > kRightStickFaceButtonThreshold) {
+	if (g_state.inputConfig.rightStickMode == RightStickMode::Disabled || g_state.inputConfig.rightStickMode == RightStickMode::Analog) {
+		return;
+	}
+
+	const int threshold = g_state.inputConfig.rightStickButtonThreshold;
+	if (g_state.inputConfig.rightStickMode == RightStickMode::DPad) {
+		if (input.rightStickY > threshold) {
+			*buttons |= CTRL_UP;
+		}
+		if (input.rightStickY < -threshold) {
+			*buttons |= CTRL_DOWN;
+		}
+		if (input.rightStickX < -threshold) {
+			*buttons |= CTRL_LEFT;
+		}
+		if (input.rightStickX > threshold) {
+			*buttons |= CTRL_RIGHT;
+		}
+		return;
+	}
+
+	if (input.rightStickY > threshold) {
 		*buttons |= CTRL_TRIANGLE;
 	}
-	if (input.rightStickY < -kRightStickFaceButtonThreshold) {
+	if (input.rightStickY < -threshold) {
 		*buttons |= CTRL_CROSS;
 	}
-	if (input.rightStickX < -kRightStickFaceButtonThreshold) {
+	if (input.rightStickX < -threshold) {
 		*buttons |= CTRL_SQUARE;
 	}
-	if (input.rightStickX > kRightStickFaceButtonThreshold) {
+	if (input.rightStickX > threshold) {
 		*buttons |= CTRL_CIRCLE;
 	}
 }
@@ -191,28 +378,21 @@ void ClearPspInput() {
 void UpdatePspInput(const FrameInput &input) {
 	u32 currentButtons = 0;
 	const u64 buttons = input.buttons;
-	if (buttons & HidNpadButton_B) currentButtons |= CTRL_CROSS;
-	if (buttons & HidNpadButton_A) currentButtons |= CTRL_CIRCLE;
-	if (buttons & HidNpadButton_Y) currentButtons |= CTRL_SQUARE;
-	if (buttons & HidNpadButton_X) currentButtons |= CTRL_TRIANGLE;
-	if (buttons & HidNpadButton_Up) currentButtons |= CTRL_UP;
-	if (buttons & HidNpadButton_Down) currentButtons |= CTRL_DOWN;
-	if (buttons & HidNpadButton_Left) currentButtons |= CTRL_LEFT;
-	if (buttons & HidNpadButton_Right) currentButtons |= CTRL_RIGHT;
-	if (buttons & HidNpadButton_Plus) currentButtons |= CTRL_START;
-	if (buttons & HidNpadButton_Minus) currentButtons |= CTRL_SELECT;
-	if (buttons & HidNpadButton_L) currentButtons |= CTRL_LTRIGGER;
-	if (buttons & HidNpadButton_R) currentButtons |= CTRL_RTRIGGER;
-	if (buttons & HidNpadButton_ZL) currentButtons |= CTRL_L2;
-	if (buttons & HidNpadButton_ZR) currentButtons |= CTRL_R2;
-	if (buttons & HidNpadButton_StickL) currentButtons |= CTRL_L3;
-	if (buttons & HidNpadButton_StickR) currentButtons |= CTRL_R3;
-	AddRightStickFaceButtons(input, &currentButtons);
+	for (const InputButtonMapping &mapping : g_state.inputConfig.buttonMappings) {
+		if (buttons & mapping.switchButton) {
+			currentButtons |= mapping.pspButtons;
+		}
+	}
+	AddRightStickButtons(input, &currentButtons);
 
 	__CtrlUpdateButtons(currentButtons & ~g_state.lastPspButtons, g_state.lastPspButtons & ~currentButtons);
 	g_state.lastPspButtons = currentButtons;
 	__CtrlSetAnalogXY(CTRL_STICK_LEFT, NormalizeStickAxis(input.leftStickX), NormalizeStickAxis(input.leftStickY));
-	__CtrlSetAnalogXY(CTRL_STICK_RIGHT, 0.0f, 0.0f);
+	if (g_state.inputConfig.rightStickMode == RightStickMode::Analog) {
+		__CtrlSetAnalogXY(CTRL_STICK_RIGHT, NormalizeStickAxis(input.rightStickX), NormalizeStickAxis(input.rightStickY));
+	} else {
+		__CtrlSetAnalogXY(CTRL_STICK_RIGHT, 0.0f, 0.0f);
+	}
 }
 
 void FreeAudioBuffers() {
@@ -402,6 +582,7 @@ void InitializeConfig() {
 	g_Config.RestoreDefaults(RestoreSettingsBits::SETTINGS | RestoreSettingsBits::CONTROLS, true);
 	PpssppCoreConfig config(g_state.log);
 	config.Load();
+	g_state.inputConfig = LoadInputConfig(config.RawConfig());
 	config.Apply(g_state.audioReady);
 	g_state.displaySettings = LoadPpssppDisplaySettings(g_state.log);
 	g_state.displaySettingsLoaded = true;
