@@ -403,6 +403,7 @@ void InitializeConfig() {
 	PpssppCoreConfig config(g_state.log);
 	config.Load();
 	config.Apply(g_state.audioReady);
+	config.PersistGeneratedMacAddress();
 	g_state.displaySettings = LoadPpssppDisplaySettings(g_state.log);
 	g_state.displaySettingsLoaded = true;
 	SavePpssppDisplaySettings(g_state.displaySettings, g_state.log);
