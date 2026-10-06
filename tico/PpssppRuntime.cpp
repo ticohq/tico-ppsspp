@@ -12,6 +12,7 @@
 #include "Common/Net/Resolve.h"
 #include "Common/GPU/Vulkan/SwitchLSFG.h"
 #include "Core/HW/Display.h"
+#include "Core/ControlMapper.h"
 #include "tico/PpssppTicoConfig.h"
 #include "tico/TicoAssetInstaller.h"
 #include "tico/TicoAudioSfx.h"
@@ -200,12 +201,14 @@ float ClampAnalog(float value) {
 	return std::clamp(value, -1.0f, 1.0f);
 }
 
-float NormalizeStickAxis(int value) {
-	float normalized = ClampAnalog(value / 32767.0f);
-	if (std::fabs(normalized) < g_Config.fAnalogDeadzone) {
-		return 0.0f;
-	}
-	return ClampAnalog(normalized * g_Config.fAnalogSensitivity);
+// A Switch stick through PPSSPP's own conversion (ControlMapper's): deadzone
+// and sensitivity on the stick's radius, and with Analog Circularity on, the
+// round stick stretched to the PSP's square, so diagonals reach the corners
+// at full speed (per axis, a full diagonal only gave about 0.71 each).
+void SetPspStick(int stick, int rawX, int rawY) {
+	float x = 0.0f, y = 0.0f;
+	ConvertAnalogStick(ClampAnalog(rawX / 32767.0f), ClampAnalog(rawY / 32767.0f), &x, &y);
+	__CtrlSetAnalogXY(stick, x, y);
 }
 
 std::string NormalizeInputConfigValue(const std::string &value) {
@@ -390,9 +393,9 @@ void UpdatePspInput(const FrameInput &input) {
 
 	__CtrlUpdateButtons(currentButtons & ~g_state.lastPspButtons, g_state.lastPspButtons & ~currentButtons);
 	g_state.lastPspButtons = currentButtons;
-	__CtrlSetAnalogXY(CTRL_STICK_LEFT, NormalizeStickAxis(input.leftStickX), NormalizeStickAxis(input.leftStickY));
+	SetPspStick(CTRL_STICK_LEFT, input.leftStickX, input.leftStickY);
 	if (g_state.inputConfig.rightStickMode == RightStickMode::Analog) {
-		__CtrlSetAnalogXY(CTRL_STICK_RIGHT, NormalizeStickAxis(input.rightStickX), NormalizeStickAxis(input.rightStickY));
+		SetPspStick(CTRL_STICK_RIGHT, input.rightStickX, input.rightStickY);
 	} else {
 		__CtrlSetAnalogXY(CTRL_STICK_RIGHT, 0.0f, 0.0f);
 	}
