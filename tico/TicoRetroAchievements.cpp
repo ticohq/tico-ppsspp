@@ -6,6 +6,7 @@
 
 #include "Common/File/Path.h"
 #include "Common/Net/HTTPRequest.h"
+#include "Common/Net/Resolve.h"
 #include "Common/Render/ManagedTexture.h"
 #include "Common/StringUtils.h"
 #include "Core/Config.h"
@@ -68,9 +69,10 @@ std::string LowerCopy(std::string value) {
 	return value;
 }
 
+// RetroAchievements over HTTPS (libcurl); plain HTTP only in a build without it.
 std::string ForcePlainHttp(std::string url) {
 	constexpr const char *httpsPrefix = "https://";
-	if (url.rfind(httpsPrefix, 0) == 0) {
+	if (!net::HTTPSAvailable() && url.rfind(httpsPrefix, 0) == 0) {
 		url.replace(0, std::strlen(httpsPrefix), "http://");
 	}
 	return url;
