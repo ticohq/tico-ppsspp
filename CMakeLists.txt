@@ -296,7 +296,23 @@ endif()
 
 # naett wraps a native HTTPS implementation per platform: WinHTTP on Windows, the Java
 # APIs on Android, NSURLSession on macOS, and libcurl elsewhere.
-if(WIN32 OR ANDROID OR (APPLE AND NOT IOS))
+if(USE_LIBNX)
+	# The Switch uses libcurl from the portlibs directly (over the system's TLS
+	# service), in place of naett (see HTTPNaettRequest.cpp); no curl, no HTTPS.
+	find_path(SWITCH_CURL_INCLUDE_DIR curl/curl.h)
+	find_library(SWITCH_CURL_LIBRARY curl)
+	find_library(SWITCH_CURL_ZLIB z)
+	if(SWITCH_CURL_INCLUDE_DIR AND SWITCH_CURL_LIBRARY)
+		add_library(SwitchCurl INTERFACE)
+		target_include_directories(SwitchCurl INTERFACE "${SWITCH_CURL_INCLUDE_DIR}")
+		target_compile_definitions(SwitchCurl INTERFACE CURL_STATICLIB)
+		target_link_libraries(SwitchCurl INTERFACE "${SWITCH_CURL_LIBRARY}" ${SWITCH_CURL_ZLIB})
+		message(STATUS "HTTPS through libcurl: ${SWITCH_CURL_LIBRARY}")
+	else()
+		message(STATUS "libcurl not found - building without HTTPS support")
+		set(HTTPS_NOT_AVAILABLE ON)
+	endif()
+elseif(WIN32 OR ANDROID OR (APPLE AND NOT IOS))
 	# Nothing to do, these need no external library.
 elseif(UNIX AND NOT APPLE AND NOT LIBRETRO)
 	# We only need the curl headers at build time - libcurl itself is loaded with dlopen
@@ -630,6 +646,29 @@ macro(setup_target_project TargetName ProjectDir)
 endmacro()
 
 add_subdirectory(ext)
+
+if(USE_LIBNX)
+	# Frame generation (LSFG) for the Vulkan renderer, from ppsspp-nx:
+	# Lossless Scaling's shaders, read from the user's own Lossless.dll.
+	file(GLOB_RECURSE SWITCH_LSFG_SOURCES CONFIGURE_DEPENDS
+		"${CMAKE_CURRENT_SOURCE_DIR}/ext/lsfg-vk/lsfg-vk-common/src/*.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/ext/lsfg-vk/lsfg-vk-backend/src/*.cpp")
+	add_library(SwitchLsfgBackend STATIC
+		Common/GPU/Vulkan/lsfg/lsfg_bridge.cpp
+		${SWITCH_LSFG_SOURCES})
+	set_target_properties(SwitchLsfgBackend PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+	# LSFG-VK reports errors with exceptions, all caught inside its bridge
+	target_compile_options(SwitchLsfgBackend PRIVATE -fexceptions)
+	target_include_directories(SwitchLsfgBackend PRIVATE
+		"${CMAKE_CURRENT_SOURCE_DIR}/Common/GPU/Vulkan/lsfg"
+		"${CMAKE_CURRENT_SOURCE_DIR}/ext/lsfg-vk/lsfg-vk-common/include"
+		"${CMAKE_CURRENT_SOURCE_DIR}/ext/lsfg-vk/lsfg-vk-backend/include"
+		"${CMAKE_CURRENT_SOURCE_DIR}/ext/lsfg-vk/lsfg-vk-backend/src")
+	target_compile_definitions(SwitchLsfgBackend PRIVATE
+		VK_USE_PLATFORM_VI_NN
+		VK_NO_PROTOTYPES
+		PPSSPP_LSFG_VULKAN_DISPATCH)
+endif()
 
 include_directories(ext/OpenXR-SDK/include)
 

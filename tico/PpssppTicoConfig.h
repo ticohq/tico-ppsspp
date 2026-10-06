@@ -46,6 +46,15 @@ private:
 	CoreConfig config_;
 };
 
+// Frame generation (LSFG, Vulkan): ppsspp_lsfg, ppsspp_lsfg_flow_scale
+// ("0.25"/"0.5") and ppsspp_lsfg_performance_mode, as applied at launch.
+struct LsfgSettings {
+	bool enabled = false;
+	float flowScale = 0.25f;
+	bool performanceMode = true;
+};
+const LsfgSettings &PpssppLsfgSettings();
+
 DisplaySettings LoadPpssppDisplaySettings(LogCallback log = {});
 void SavePpssppDisplaySettings(const DisplaySettings &settings, LogCallback log = {});
 DisplaySettings NormalizePpssppDisplaySettingsForCurrentMode(const DisplaySettings &settings);

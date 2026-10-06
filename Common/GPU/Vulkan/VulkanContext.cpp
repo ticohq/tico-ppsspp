@@ -13,6 +13,9 @@
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/GPU/Vulkan/VulkanDebug.h"
 #include "Common/GPU/Vulkan/FixedSPIRVCache.h"
+#if PPSSPP_PLATFORM(SWITCH)
+#include "Common/GPU/Vulkan/SwitchLSFG.h"
+#endif
 #include "Common/StringUtils.h"
 #include "Common/File/FileUtil.h"
 #include "ext/xxhash.h"
@@ -104,6 +107,7 @@ const char *WindowSystemToString(WindowSystem winsys) {
 	case WINDOWSYSTEM_XCB: return "XCB";
 	case WINDOWSYSTEM_WAYLAND: return "WAYLAND";
 	case WINDOWSYSTEM_DISPLAY: return "DISPLAY";
+	case WINDOWSYSTEM_SWITCH: return "SWITCH";
 	case WINDOWSYSTEM_SDL: return "SDL";
 	case WINDOWSYSTEM_NONE: return "NONE";
 	default:
@@ -157,6 +161,8 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 	instance_extensions_enabled_.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif defined(__ANDROID__)
 	instance_extensions_enabled_.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+#elif defined(VK_USE_PLATFORM_VI_NN)
+	instance_extensions_enabled_.push_back(VK_NN_VI_SURFACE_EXTENSION_NAME);
 #else
 #if defined(VK_USE_PLATFORM_XLIB_KHR)
 	if (IsInstanceExtensionAvailable(VK_KHR_XLIB_SURFACE_EXTENSION_NAME)) {
@@ -464,6 +470,9 @@ bool VulkanContext::MemoryTypeFromProperties(uint32_t typeBits, VkFlags requirem
 
 void VulkanContext::DestroySwapchain() {
 	if (swapchain_ != VK_NULL_HANDLE) {
+#if PPSSPP_PLATFORM(SWITCH)
+		SwitchLSFG_DetachSwapchain(swapchain_);
+#endif
 		vkDestroySwapchainKHR(device_, swapchain_, nullptr);
 		swapchain_ = VK_NULL_HANDLE;
 	}
@@ -906,6 +915,12 @@ VkResult VulkanContext::CreateDevice(int physical_device, const std::vector<cons
 		if (extensionsLookup_.KHR_present_mode_fifo_latest_ready) {
 			ChainStruct(features2, &deviceFeatures_.enabled.presentModeFifoProps);
 		}
+#if PPSSPP_PLATFORM(SWITCH)
+		VkPhysicalDeviceTimelineSemaphoreFeatures lsfgTimelineFeature{};
+		void *featureChain = features2.pNext;
+		SwitchLSFG_PrepareDeviceFeatures(physical_devices_[physical_device_], featureChain, lsfgTimelineFeature);
+		features2.pNext = featureChain;
+#endif
 	} else {
 		device_info.pEnabledFeatures = &deviceFeatures_.enabled.standard;
 	}
@@ -923,17 +938,23 @@ VkResult VulkanContext::CreateDevice(int physical_device, const std::vector<cons
 
 	INFO_LOG(Log::G3D, "Vulkan Device created: %s", physicalDeviceProperties_[physical_device_].properties.deviceName);
 
-	// Since we successfully created a device (however we got here, might be interesting in debug), we force the choice to be visible in the menu.
-	VulkanSetAvailable(true);
-
 	VmaAllocatorCreateInfo allocatorInfo = {};
 	allocatorInfo.vulkanApiVersion = std::min(vulkanDeviceApiVersion_, vulkanInstanceApiVersion_);
 	allocatorInfo.physicalDevice = physical_devices_[physical_device_];
 	allocatorInfo.device = device_;
 	allocatorInfo.instance = instance_;
 	VkResult result = vmaCreateAllocator(&allocatorInfo, &allocator_);
-	_assert_(result == VK_SUCCESS);
-	_assert_(allocator_ != VK_NULL_HANDLE);
+	if (result != VK_SUCCESS || allocator_ == VK_NULL_HANDLE) {
+		init_error_ = "Unable to create Vulkan memory allocator";
+		ERROR_LOG(Log::G3D, "%s", init_error_.c_str());
+		if (ownsDevice_) {
+			vkDestroyDevice(device_, nullptr);
+		}
+		device_ = VK_NULL_HANDLE;
+		return result != VK_SUCCESS ? result : VK_ERROR_INITIALIZATION_FAILED;
+	}
+
+	VulkanSetAvailable(true);
 
 	// Examine the physical device to figure out super rough performance grade.
 	// Basically all we want to do is to identify low performance mobile devices
@@ -1460,6 +1481,9 @@ bool VulkanContext::ChooseQueue() {
 	}
 
 	vkGetDeviceQueue(device_, graphics_queue_family_index_, 0, &gfx_queue_);
+#if PPSSPP_PLATFORM(SWITCH)
+	SwitchLSFG_SetDevice(instance_, physical_devices_[physical_device_], device_, gfx_queue_, graphics_queue_family_index_, vkGetInstanceProcAddr);
+#endif
 	return true;
 }
 
@@ -1477,6 +1501,9 @@ bool VulkanContext::ChooseGraphicsQueueWithoutSurface() {
 	}
 	graphics_queue_family_index_ = graphicsQueueNodeIndex;
 	vkGetDeviceQueue(device_, graphics_queue_family_index_, 0, &gfx_queue_);
+#if PPSSPP_PLATFORM(SWITCH)
+	SwitchLSFG_SetDevice(instance_, physical_devices_[physical_device_], device_, gfx_queue_, graphics_queue_family_index_, vkGetInstanceProcAddr);
+#endif
 	return true;
 }
 
@@ -1704,6 +1731,10 @@ bool VulkanContext::InitSwapchain(VkPresentModeKHR desiredPresentMode) {
 	}
 #endif
 
+#if PPSSPP_PLATFORM(SWITCH)
+	const bool lsfgCompatible = SwitchLSFG_AdjustSwapchainCreateInfo(true, swap_chain_info, surfCapabilities_);
+#endif
+
 	res = vkCreateSwapchainKHR(device_, &swap_chain_info, NULL, &swapchain_);
 	if (res != VK_SUCCESS) {
 		ERROR_LOG(Log::G3D, "vkCreateSwapchainKHR failed! %s", VulkanResultToString(res));
@@ -1711,6 +1742,19 @@ bool VulkanContext::InitSwapchain(VkPresentModeKHR desiredPresentMode) {
 	}
 	INFO_LOG(Log::G3D, "Created swapchain: %dx%d %s", swap_chain_info.imageExtent.width, swap_chain_info.imageExtent.height, (surfCapabilities_.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ? "(TRANSFER_SRC_BIT supported)" : "");
 	swapchainInited_ = true;
+
+#if PPSSPP_PLATFORM(SWITCH)
+	uint32_t lsfgImageCount = 0;
+	std::vector<VkImage> lsfgImages;
+	if (vkGetSwapchainImagesKHR(device_, swapchain_, &lsfgImageCount, nullptr) == VK_SUCCESS && lsfgImageCount) {
+		lsfgImages.resize(lsfgImageCount);
+		if (vkGetSwapchainImagesKHR(device_, swapchain_, &lsfgImageCount, lsfgImages.data()) != VK_SUCCESS) {
+			lsfgImages.clear();
+		}
+	}
+	SwitchLSFG_AttachSwapchain(true, swapchain_, swap_chain_info.imageExtent,
+		lsfgImages.data(), (uint32_t)lsfgImages.size(), lsfgCompatible);
+#endif
 
 	if (oldSwapchain != VK_NULL_HANDLE) {
 		vkDestroySwapchainKHR(device_, oldSwapchain, nullptr);
@@ -1756,6 +1800,9 @@ void VulkanContext::DestroyDevice() {
 	vmaDestroyAllocator(allocator_);
 	allocator_ = VK_NULL_HANDLE;
 
+#if PPSSPP_PLATFORM(SWITCH)
+	SwitchLSFG_ResetDevice();
+#endif
 	if (ownsDevice_) {
 		vkDestroyDevice(device_, nullptr);
 	}

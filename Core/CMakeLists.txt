@@ -743,7 +743,7 @@ if(WIN32)
 	target_link_libraries(Core ws2_32)
 endif()
 
-if(NOT HTTPS_NOT_AVAILABLE)
+if(NOT HTTPS_NOT_AVAILABLE AND NOT USE_LIBNX)
 	target_link_libraries(Core naett)
 endif()
 

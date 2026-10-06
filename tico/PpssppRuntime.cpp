@@ -9,6 +9,8 @@
 #endif
 
 #include "tico/TicoGraphicsHost.h"
+#include "Common/GPU/Vulkan/SwitchLSFG.h"
+#include "Core/HW/Display.h"
 #include "tico/PpssppTicoConfig.h"
 #include "tico/TicoAssetInstaller.h"
 #include "tico/TicoAudioSfx.h"
@@ -395,6 +397,23 @@ void UpdateDisplayMode() {
 	if (PSP_GetBootState() == BootState::Complete) {
 		PSP_CoreParameter().pixelWidth = g_display.pixel_xres;
 		PSP_CoreParameter().pixelHeight = g_display.pixel_yres;
+	}
+}
+
+// Frame generation: asked for while the option is on; LSFG only takes a game
+// running near 30 fps (and steps aside again at 60), so this is retried.
+void UpdateFrameGeneration() {
+	const LsfgSettings &lsfg = PpssppLsfgSettings();
+	if (!lsfg.enabled || !SwitchLSFG_IsPrepared() || SwitchLSFG_IsEnabled() || !SwitchLSFG_IsAvailable()) {
+		return;
+	}
+	if (g_state.frameCount % 60 != 0 || PSP_GetBootState() != BootState::Complete) {
+		return;
+	}
+	float fps = 0.0f;
+	__DisplayGetFPS(nullptr, &fps, nullptr);
+	if (SwitchLSFG_RequestEnabled(true, fps)) {
+		Log("frame generation on (game at %.1f fps)", fps);
 	}
 }
 
@@ -1073,6 +1092,15 @@ bool PpssppRuntime::Initialize(const LaunchInfo &) {
 	Log("thread manager cores=%d logical=%d", cpu_info.num_cores, cpu_info.logical_cpu_count);
 	RetroAchievements().Initialize(g_state.log);
 
+	// before Vulkan starts: with Lossless.dll installed, the device and the
+	// swapchain are made ready for frame generation
+	{
+		const LsfgSettings &lsfg = PpssppLsfgSettings();
+		SwitchLSFG_Configure(lsfg.enabled, lsfg.flowScale, lsfg.performanceMode);
+		Log("frame generation option=%d installed=%d prepared=%d", lsfg.enabled ? 1 : 0,
+			SwitchLSFG_IsInstalled() ? 1 : 0, SwitchLSFG_IsPrepared() ? 1 : 0);
+	}
+
 	std::string errorString;
 	const GPUCore gpuCore = GPUCORE_VULKAN;
 	Log("graphics init start gpuCore=%d", (int)gpuCore);
@@ -1103,6 +1131,7 @@ bool PpssppRuntime::LoadContent(const std::string &path) {
 
 	Core_SetGraphicsContext(g_state.graphicsContext);
 	Log("PSP_InitStart file=%s", path.c_str());
+	SwitchLSFG_ResetSession();
 	if (!PSP_InitStart(coreParameter)) {
 		std::fprintf(stderr, "Failed to start PSP core for '%s'\n", path.c_str());
 		Log("PSP_InitStart failed");
@@ -1193,6 +1222,7 @@ void PpssppRuntime::RunFrame() {
 	} else {
 		RetroAchievements().FrameUpdate();
 		PSP_RunLoopWhileState();
+		UpdateFrameGeneration();
 	}
 
 	if (coreState == CORE_NEXTFRAME) {
@@ -1216,11 +1246,18 @@ void PpssppRuntime::RenderFrame() {
 	}
 
 	const DisplayLayoutConfig &displayLayoutConfig = g_Config.GetDisplayLayoutConfig(DeviceOrientation::Landscape);
-	if (gpu && !gpu->PresentedThisFrame()) {
+	// With frame generation on, a frame the game did not draw is not shown
+	// again: it never touches the backbuffer, so nothing is presented, and a
+	// 30 fps game hands LSFG its 30 distinct frames. The menu still draws.
+	const bool repeatedFrame = gpu && !gpu->PresentedThisFrame();
+	const bool skipRepeat = repeatedFrame && SwitchLSFG_IsEnabled() && !g_state.overlay.IsVisible();
+	if (repeatedFrame && !skipRepeat) {
 		g_state.draw->BindFramebufferAsRenderTarget(nullptr, { Draw::RPAction::CLEAR, Draw::RPAction::CLEAR, Draw::RPAction::CLEAR }, "TicoPpsspp");
 		gpu->CopyDisplayToOutput(displayLayoutConfig);
 	}
-	g_state.overlay.Render(g_state.draw);
+	if (!skipRepeat) {
+		g_state.overlay.Render(g_state.draw);
+	}
 	g_state.draw->EndFrame();
 	g_state.frameOpen = false;
 	g_frameTiming.PostSubmit();
@@ -1253,6 +1290,7 @@ void PpssppRuntime::Shutdown() {
 		g_state.frameOpen = false;
 	}
 	RetroAchievements().Shutdown();
+	SwitchLSFG_ResetSession();
 	if (PSP_IsInited() && !g_state.ppssppShutdown) {
 		PSP_Shutdown(true);
 		g_state.ppssppShutdown = true;

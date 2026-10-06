@@ -56,7 +56,23 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "integer_scale": "Auto"
 })json";
 
+LsfgSettings g_lsfgSettings;
+
 void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
+	{
+		LsfgSettings lsfg;
+		if (const std::string *value = FindOption(options, "ppsspp_lsfg")) {
+			lsfg.enabled = OptionEnabled(*value);
+		}
+		if (const std::string *value = FindOption(options, "ppsspp_lsfg_flow_scale")) {
+			lsfg.flowScale = (*value == "0.5") ? 0.5f : 0.25f;
+		}
+		if (const std::string *value = FindOption(options, "ppsspp_lsfg_performance_mode")) {
+			lsfg.performanceMode = OptionEnabled(*value);
+		}
+		g_lsfgSettings = lsfg;
+	}
+
 	auto applyBool = [&](const char *key, bool &setting) {
 		if (const std::string *value = FindOption(options, key)) {
 			setting = OptionEnabled(*value);
@@ -380,6 +396,10 @@ void ApplySwitchRequiredConfig(bool audioReady) {
 
 PpssppCoreConfig::PpssppCoreConfig(LogCallback log)
 	: config_("ppsspp", kPpssppCoreConfigPath, kDefaultPpssppCoreConfig, std::move(log)) {
+}
+
+const LsfgSettings &PpssppLsfgSettings() {
+	return g_lsfgSettings;
 }
 
 void PpssppCoreConfig::Load() {
