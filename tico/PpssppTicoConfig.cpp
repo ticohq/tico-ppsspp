@@ -8,7 +8,14 @@
 #include "GPU/Common/TextureScalerCommon.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include <utility>
+
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 
 namespace Tico {
 namespace {
@@ -88,6 +95,62 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
 
 LsfgSettings g_lsfgSettings;
 
+constexpr const char *kMacAddressPath = "sdmc:/tico/system/psp/mac.txt";
+
+// A MAC address made once and kept beside the core's data: tico's settings
+// screen writes ppsspp.jsonc from its own definitions and can drop
+// ppsspp_mac_address, which would otherwise make this console a new player.
+std::string LastingMacAddress() {
+	char line[32] = {};
+	if (FILE *f = std::fopen(kMacAddressPath, "rb")) {
+		const size_t n = std::fread(line, 1, sizeof(line) - 1, f);
+		std::fclose(f);
+		std::string mac(line, n);
+		while (!mac.empty() && (mac.back() == '\n' || mac.back() == '\r' || mac.back() == ' '))
+			mac.pop_back();
+		if (mac.size() == 17)
+			return mac;
+	}
+	const std::string mac = CreateRandMAC();
+	if (FILE *f = std::fopen(kMacAddressPath, "wb")) {
+		std::fwrite(mac.data(), 1, mac.size(), f);
+		std::fclose(f);
+	}
+	return mac;
+}
+
+// The Switch user's nickname (the preselected, last opened or first user).
+std::string SwitchProfileNickname() {
+#ifdef __SWITCH__
+	if (R_FAILED(accountInitialize(AccountServiceType_Application)))
+		return {};
+	std::string nickname;
+	AccountUid uid = {};
+	bool found = R_SUCCEEDED(accountGetPreselectedUser(&uid)) && accountUidIsValid(&uid);
+	if (!found)
+		found = R_SUCCEEDED(accountGetLastOpenedUser(&uid)) && accountUidIsValid(&uid);
+	if (!found) {
+		AccountUid uids[ACC_USER_LIST_SIZE];
+		s32 total = 0;
+		if (R_SUCCEEDED(accountListAllUsers(uids, ACC_USER_LIST_SIZE, &total)) && total > 0) {
+			uid = uids[0];
+			found = accountUidIsValid(&uid);
+		}
+	}
+	AccountProfile profile;
+	if (found && R_SUCCEEDED(accountGetProfile(&profile, uid))) {
+		AccountProfileBase base = {};
+		if (R_SUCCEEDED(accountProfileGet(&profile, nullptr, &base)))
+			nickname.assign(base.nickname, strnlen(base.nickname, sizeof(base.nickname)));
+		accountProfileClose(&profile);
+	}
+	accountExit();
+	return nickname;
+#else
+	return {};
+#endif
+}
+
 void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 	{
 		LsfgSettings lsfg;
@@ -165,10 +228,16 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 	// the server drops the connection on the first ping ("Error parsing mac
 	// address", then socket error 32).
 	if (g_Config.sMACAddress.length() != 17)
-		g_Config.sMACAddress = CreateRandMAC();
+		g_Config.sMACAddress = LastingMacAddress();
 	if (const std::string *value = FindOption(options, "ppsspp_nickname")) {
 		if (!value->empty())
 			g_Config.sNickName = *value;
+	}
+	// Left empty: the Switch user's name, rather than "PPSSPP" for everyone.
+	if (g_Config.sNickName.empty() || g_Config.sNickName == "PPSSPP") {
+		const std::string profileName = SwitchProfileNickname();
+		if (!profileName.empty())
+			g_Config.sNickName = profileName.substr(0, 32);
 	}
 	applyBool("ppsspp_software_rendering", g_Config.bSoftwareRendering);
 	applyBool("ppsspp_cropto16x9", g_Config.bDisplayCropTo16x9);
