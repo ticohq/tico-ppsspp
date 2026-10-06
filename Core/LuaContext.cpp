@@ -1,3 +1,5 @@
+#include <climits>
+
 #include "Core/LuaContext.h"
 
 #ifndef RC_DISABLE_LUA

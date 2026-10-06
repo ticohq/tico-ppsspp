@@ -1,4 +1,4 @@
-// Copyright (C) 2003 m4xw, Dan (ticoverse.com).
+// Copyright (C) 2023 M4xw
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -24,70 +24,104 @@
 static uintptr_t memoryBase = 0;
 static uintptr_t memoryCodeBase = 0;
 static uintptr_t memorySrcBase = 0;
+static VirtmemReservation *memoryReservation = nullptr;
+static VirtmemReservation *memoryCodeReservation = nullptr;
+static bool memoryCodeMapped = false;
+
+static constexpr size_t PSP_ADDRESS_SPACE_SIZE = 0x10000000;
+static constexpr size_t PSP_BACKING_STORE_SIZE = PSP_ADDRESS_SPACE_SIZE;
+
+static void *ReserveVirtmem(size_t size, bool code, VirtmemReservation **reservation) {
+	virtmemLock();
+	void *address = code ? virtmemFindCodeMemory(size, 0x1000) : virtmemFindAslr(size, 0x1000);
+	*reservation = address ? virtmemAddReservation(address, size) : nullptr;
+	virtmemUnlock();
+	return *reservation ? address : nullptr;
+}
 
 size_t MemArena::roundup(size_t x) {
-  return x;
+	return x;
 }
 
 bool MemArena::NeedsProbing() {
-  return false;
+	return false;
 }
 
 bool MemArena::GrabMemSpace(size_t size) {
-  return true;
+	return true;
 }
 
 void MemArena::ReleaseSpace() {
-  if (R_FAILED(svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, 0x10000000)))
-    printf("Failed to release view space...\n");
+	if (memoryCodeMapped && R_FAILED(svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, PSP_BACKING_STORE_SIZE))) {
+		printf("Failed to release view space...\n");
+	}
+	memoryCodeMapped = false;
 
-  free((void *)memorySrcBase);
-  memorySrcBase = 0;
-  memoryBase = 0;
-  memoryCodeBase = 0;
+	free((void *)memorySrcBase);
+	memorySrcBase = 0;
+	virtmemLock();
+	if (memoryReservation) {
+		virtmemRemoveReservation(memoryReservation);
+	}
+	if (memoryCodeReservation) {
+		virtmemRemoveReservation(memoryCodeReservation);
+	}
+	virtmemUnlock();
+	memoryReservation = nullptr;
+	memoryCodeReservation = nullptr;
+	memoryBase = 0;
+	memoryCodeBase = 0;
 }
 
 void *MemArena::CreateView(s64 offset, size_t size, void *base) {
+	if (offset < 0 || (size_t)offset > PSP_BACKING_STORE_SIZE || size > PSP_BACKING_STORE_SIZE - (size_t)offset) {
+		return nullptr;
+	}
 	Result rc = svcMapProcessMemory(base, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size);
 	if (R_FAILED(rc)) {
 		printf("Fatal error creating the view... base: %p offset: %p size: %p src: %p err: %d\n",
 			   (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
-		// Returning base here reports success, so the caller happily uses an unmapped address
-		// and we take a fault later with nothing pointing back at this.
 		return nullptr;
 	}
 
-	printf("Created the view... base: %p offset: %p size: %p src: %p err: %d\n",
-		   (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
 	return base;
 }
 
 void MemArena::ReleaseView(s64 offset, void *view, size_t size) {
-  if (R_FAILED(svcUnmapProcessMemory(view, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size)))
-    printf("Failed to unmap view...\n");
+	if (R_FAILED(svcUnmapProcessMemory(view, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size))) {
+		printf("Failed to unmap view...\n");
+	}
 }
 
 u8 *MemArena::Find4GBBase() {
-  memorySrcBase = (uintptr_t)memalign(0x1000, 0x10000000);
+	memorySrcBase = (uintptr_t)memalign(0x1000, PSP_BACKING_STORE_SIZE);
 
-  if (!memoryBase) {
-    virtmemLock();
-    memoryBase = (uintptr_t)virtmemFindAslr(0x10000000, 0);
-    virtmemUnlock();
-  }
+	if (!memoryBase) {
+		memoryBase = (uintptr_t)ReserveVirtmem(PSP_ADDRESS_SPACE_SIZE, false, &memoryReservation);
+	}
 
-  if (!memoryCodeBase) {
-    virtmemLock();
-    memoryCodeBase = (uintptr_t)virtmemFindCodeMemory(0x10000000, 0);
-    virtmemUnlock();
-  }
+	if (!memoryCodeBase) {
+		memoryCodeBase = (uintptr_t)ReserveVirtmem(PSP_BACKING_STORE_SIZE, true, &memoryCodeReservation);
+	}
 
-  if (R_FAILED(svcMapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, 0x10000000)))
-    printf("Failed to map memory...\n");
-  if (R_FAILED(svcSetProcessMemoryPermission(envGetOwnProcessHandle(), memoryCodeBase, 0x10000000, Perm_Rx)))
-    printf("Failed to set perms...\n");
+	if (!memorySrcBase || !memoryBase || !memoryCodeBase) {
+		ReleaseSpace();
+		return nullptr;
+	}
 
-  return (u8 *)memoryBase;
+	if (R_FAILED(svcMapProcessCodeMemory(envGetOwnProcessHandle(), (u64)memoryCodeBase, (u64)memorySrcBase, PSP_BACKING_STORE_SIZE))) {
+		printf("Failed to map memory...\n");
+		ReleaseSpace();
+		return nullptr;
+	}
+	memoryCodeMapped = true;
+	if (R_FAILED(svcSetProcessMemoryPermission(envGetOwnProcessHandle(), memoryCodeBase, PSP_BACKING_STORE_SIZE, Perm_Rx))) {
+		printf("Failed to set perms...\n");
+		ReleaseSpace();
+		return nullptr;
+	}
+
+	return (u8 *)memoryBase;
 }
 
 #endif // PPSSPP_PLATFORM(SWITCH)

@@ -396,7 +396,7 @@ Path Path::GetRootVolume() const {
 		return Path(path_.substr(0, len));
 	}
 #endif
-	size_t colonPos = path_.find(':');
+	const size_t colonPos = path_.find(':');
 	if (colonPos != std::string::npos && colonPos + 1 < path_.size() && path_[colonPos + 1] == '/') {
 		return Path(path_.substr(0, colonPos + 2));
 	}

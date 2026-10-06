@@ -47,7 +47,6 @@ typedef signed __int64 s64;
 #define Waitable _Waitable
 #define ThreadContext _ThreadContext
 #define BreakReason _BreakReason
-
 #include <switch.h>
 // Cleanup
 #undef UP
@@ -62,6 +61,7 @@ typedef signed __int64 s64;
 #undef Framebuffer
 #undef Waitable
 #undef ThreadContext
+#undef BreakReason
 
 // Conflicting types with libnx
 #ifndef _u64

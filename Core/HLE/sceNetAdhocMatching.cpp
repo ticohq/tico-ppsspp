@@ -1152,6 +1152,7 @@ void actOnByePacket(SceNetAdhocMatchingContext * context, SceNetEtherAddr * send
 * @return Exit Point is never reached...
 */
 int matchingEventThread(int matchingId) {
+	SetCurrentThreadAffinity(ThreadAffinityRole::IO);
 	SetCurrentThreadName("MatchingEvent");
 	// Multithreading Lock
 	peerlock.lock();
@@ -1281,6 +1282,7 @@ int matchingEventThread(int matchingId) {
 * @return Exit Point is never reached...
 */
 int matchingInputThread(int matchingId) { // TODO: The MatchingInput thread is using sceNetAdhocPdpRecv & sceNetAdhocPdpSend functions so it might be better to run this on PSP thread instead of real thread
+	SetCurrentThreadAffinity(ThreadAffinityRole::IO);
 	SetCurrentThreadName("MatchingInput");
 	auto n = GetI18NCategory(I18NCat::NETWORKING);
 	// Multithreading Lock
