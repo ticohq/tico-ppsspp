@@ -19,8 +19,6 @@
 #include <cstring>
 #include <memory>
 
-#include "ext/xxhash.h"
-
 #include "Common/File/VFS/VFS.h"
 #include "Common/Data/Text/I18n.h"
 #include "Common/LogReporting.h"
@@ -145,7 +143,7 @@ VkSampler SamplerCache::GetOrCreateSampler(const SamplerCacheKey &key) {
 
 	if (key.aniso) {
 		// Docs say the min of this value and the supported max are used.
-		samp.maxAnisotropy = 1 << g_Config.iAnisotropyLevel;
+		samp.maxAnisotropy = 1 << key.anisoLevel;
 		samp.anisotropyEnable = true;
 	} else {
 		samp.maxAnisotropy = 1.0f;
@@ -218,33 +216,29 @@ void TextureCacheVulkan::SetFramebufferManager(FramebufferManagerVulkan *fbManag
 }
 
 void TextureCacheVulkan::DeviceLost() {
-	textureShaderCache_->DeviceLost();
+	TextureCacheCommon::DeviceLost();
 	
 	VulkanContext *vulkan = draw_ ? (VulkanContext *)draw_->GetNativeObject(Draw::NativeObject::CONTEXT) : nullptr;
 
-	Clear(true);
-
 	samplerCache_.DeviceLost();
-	if (samplerNearest_)
+	if (samplerNearest_) {
 		vulkan->Delete().QueueDeleteSampler(samplerNearest_);
+	}
 
 	ClearScalingShaders(vulkan);
 
 	computeShaderManager_.DeviceLost();
 
-	nextTexture_ = nullptr;
 	draw_ = nullptr;
 	Unbind();
 }
 
 void TextureCacheVulkan::DeviceRestore(Draw::DrawContext *draw) {
-	draw_ = draw;
+	TextureCacheCommon::DeviceRestore(draw);
 
 	VulkanContext *vulkan = (VulkanContext *)draw->GetNativeObject(Draw::NativeObject::CONTEXT);
 	_assert_(vulkan);
-
 	samplerCache_.DeviceRestore(vulkan);
-	textureShaderCache_->DeviceRestore(draw);
 
 	VkSamplerCreateInfo samp{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 	samp.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
@@ -432,9 +426,9 @@ static void BarrierComputeImage(VkCommandBuffer cmd, VkImage image) {
 	batch.Flush(cmd);
 }
 
-void TextureCacheVulkan::LoadConstantBuffer(VulkanContext *vulkan, VkCommandBuffer cmdInit) {
+bool TextureCacheVulkan::LoadConstantBuffer(VulkanContext *vulkan, VkCommandBuffer cmdInit) {
 	if (cbufferInited_) {
-		return;
+		return true;
 	}
 
 	_dbg_assert_(!cbufferPath_.empty());
@@ -443,8 +437,12 @@ void TextureCacheVulkan::LoadConstantBuffer(VulkanContext *vulkan, VkCommandBuff
 	size_t constantsSize;
 	uint8_t *contents = g_VFS.ReadFile(cbufferPath_.c_str(), &constantsSize);
 	if (!contents) {
-		ERROR_LOG(Log::G3D, "Failed to read constant buffer file '%s'", cbufferPath_.c_str());
-		return;
+		ERROR_LOG(Log::G3D, "Failed to read constant buffer file '%s' - disabling hardware scaling", cbufferPath_.c_str());
+		// The scaling shaders declare the constant buffer, so dispatching them without it would leave
+		// a statically used descriptor binding unwritten. Drop the shaders instead, which makes
+		// HasScalingShader() false so following textures take the CPU scaling path.
+		ClearScalingShaders(vulkan);
+		return false;
 	}
 	textureScaleCBuffer_.Create(vulkan, "TextureScale CBuffer", constantsSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 	VulkanPushPool *pushPool = drawEngine_->GetPushBufferForTextureData();
@@ -459,6 +457,7 @@ void TextureCacheVulkan::LoadConstantBuffer(VulkanContext *vulkan, VkCommandBuff
 	delete[] contents;
 
 	cbufferInited_ = true;
+	return true;
 }
 
 bool TextureCacheVulkan::RunMultipassCompute(VulkanContext *vulkan, VkCommandBuffer cmdInit, VkImageView dstView, VkBuffer texBuf, uint32_t bufferOffset, int srcSize, int srcWidth, int srcHeight, int dstWidth, int dstHeight) {
@@ -468,7 +467,9 @@ bool TextureCacheVulkan::RunMultipassCompute(VulkanContext *vulkan, VkCommandBuf
 	std::vector<std::unique_ptr<VulkanTexture>> scratchTextures;
 	scratchTextures.reserve(multipassScratchDescs_.size());
 
-	LoadConstantBuffer(vulkan, cmdInit);
+	if (!LoadConstantBuffer(vulkan, cmdInit)) {
+		return false;
+	}
 
 	for (const MultipassScratchDesc &scratchDesc : multipassScratchDescs_) {
 		auto scratch = std::make_unique<VulkanTexture>(vulkan, scratchDesc.tag);
@@ -521,8 +522,12 @@ bool TextureCacheVulkan::RunMultipassCompute(VulkanContext *vulkan, VkCommandBuf
 			stage.useFinalOutputSize ? dstWidth : srcWidth * stage.dstWidthScale,
 			stage.useFinalOutputSize ? dstHeight : srcHeight * stage.dstHeightScale,
 		};
+		VkPipeline pipeline = computeShaderManager_.GetPipeline(multipassCS_[stage.shaderIndex], "Multipass Compute Shader");
+		if (!pipeline) {
+			return false;
+		}
 		VkDescriptorSet stageSet = computeShaderManager_.GetDescriptorSet(outputView, inputBuffer, inputOffset, inputRange, VK_NULL_HANDLE, 0, 0, inputImage, textureScaleCBuffer_.Buffer(), textureScaleCBuffer_.Size());
-		vkCmdBindPipeline(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipeline(multipassCS_[stage.shaderIndex]));
+		vkCmdBindPipeline(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 		vkCmdBindDescriptorSets(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipelineLayout(), 0, 1, &stageSet, 0, nullptr);
 		vkCmdPushConstants(cmdInit, computeShaderManager_.GetPipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 		vkCmdDispatch(cmdInit, (params.dstWidth + 7) / 8, (params.dstHeight + 7) / 8, 1);
@@ -539,7 +544,9 @@ bool TextureCacheVulkan::ScaleBufferToImage(VulkanContext *vulkan, VkCommandBuff
 		return false;
 	}
 
-	LoadConstantBuffer(vulkan, cmdInit);
+	if (!LoadConstantBuffer(vulkan, cmdInit)) {
+		return false;
+	}
 
 	switch (textureScalePipeline_) {
 	case TextureScalePipelineType::SINGLE_PASS: {
@@ -548,7 +555,11 @@ bool TextureCacheVulkan::ScaleBufferToImage(VulkanContext *vulkan, VkCommandBuff
 		}
 		VkDescriptorSet descSet = computeShaderManager_.GetDescriptorSet(dstView, texBuf, bufferOffset, srcSize, VK_NULL_HANDLE, 0, 0, VK_NULL_HANDLE, textureScaleCBuffer_.Buffer(), textureScaleCBuffer_.Size());
 		struct Params { int x; int y; } params{ srcWidth, srcHeight };
-		vkCmdBindPipeline(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipeline(singlePassCS_));
+		VkPipeline pipeline = computeShaderManager_.GetPipeline(singlePassCS_, "Single Pass Compute Shader");
+		if (!pipeline) {
+			return false;
+		}
+		vkCmdBindPipeline(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 		vkCmdBindDescriptorSets(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipelineLayout(), 0, 1, &descSet, 0, nullptr);
 		vkCmdPushConstants(cmdInit, computeShaderManager_.GetPipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 		vkCmdDispatch(cmdInit, (srcWidth + 7) / 8, (srcHeight + 7) / 8, 1);
@@ -570,20 +581,6 @@ void TextureCacheVulkan::ReleaseTexture(TexCacheEntry *entry, bool delete_them) 
 	entry->vkTex = nullptr;
 }
 
-VkFormat getClutDestFormatVulkan(GEPaletteFormat format) {
-	switch (format) {
-	case GE_CMODE_16BIT_ABGR4444:
-		return VULKAN_4444_FORMAT;
-	case GE_CMODE_16BIT_ABGR5551:
-		return VULKAN_1555_FORMAT;
-	case GE_CMODE_16BIT_BGR5650:
-		return VULKAN_565_FORMAT;
-	case GE_CMODE_32BIT_ABGR8888:
-		return VULKAN_8888_FORMAT;
-	}
-	return VK_FORMAT_UNDEFINED;
-}
-
 static const VkFilter MagFiltVK[2] = {
 	VK_FILTER_NEAREST,
 	VK_FILTER_LINEAR
@@ -596,57 +593,16 @@ void TextureCacheVulkan::StartFrame() {
 	computeShaderManager_.BeginFrame();
 }
 
-void TextureCacheVulkan::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBase, bool clutIndexIsSimple) {
-	const u32 clutBaseBytes = clutFormat == GE_CMODE_32BIT_ABGR8888 ? (clutBase * sizeof(u32)) : (clutBase * sizeof(u16));
-	// Technically, these extra bytes weren't loaded, but hopefully it was loaded earlier.
-	// If not, we're going to hash random data, which hopefully doesn't cause a performance issue.
-	//
-	// TODO: Actually, this seems like a hack.  The game can upload part of a CLUT and reference other data.
-	// clutTotalBytes_ is the last amount uploaded.  We should hash clutMaxBytes_, but this will often hash
-	// unrelated old entries for small palettes.
-	// Adding clutBaseBytes may just be mitigating this for some usage patterns.
-	const u32 clutExtendedBytes = std::min(clutTotalBytes_ + clutBaseBytes, clutMaxBytes_);
-
-	if (replacer_.Enabled())
-		clutHash_ = XXH32((const char *)clutBufRaw_, clutExtendedBytes, 0xC0108888);
-	else
-		clutHash_ = XXH3_64bits((const char *)clutBufRaw_, clutExtendedBytes) & 0xFFFFFFFF;
-	clutBuf_ = clutBufRaw_;
-
-	// Special optimization: fonts typically draw clut4 with just alpha values in a single color.
-	clutAlphaLinear_ = false;
-	clutAlphaLinearColor_ = 0;
-	if (clutFormat == GE_CMODE_16BIT_ABGR4444 && clutIndexIsSimple) {
-		const u16_le *clut = GetCurrentClut<u16_le>();
-		clutAlphaLinear_ = true;
-		clutAlphaLinearColor_ = clut[15] & 0x0FFF;
-		for (int i = 0; i < 16; ++i) {
-			u16 step = clutAlphaLinearColor_ | (i << 12);
-			if (clut[i] != step) {
-				clutAlphaLinear_ = false;
-				break;
-			}
-		}
-	}
-
-	clutLastFormat_ = gstate.clutformat;
-}
-
 void TextureCacheVulkan::BindTexture(TexCacheEntry *entry) {
 	if (!entry || !entry->vkTex) {
 		Unbind();
 		return;
 	}
-
-	int maxLevel = (entry->status & TexCacheEntry::STATUS_NO_MIPS) ? 0 : entry->maxLevel;
-	SamplerCacheKey samplerKey = GetSamplingParams(maxLevel, entry);
-	curSampler_ = samplerCache_.GetOrCreateSampler(samplerKey);
-	imageView_ = entry->vkTex->GetImageView();
 	drawEngine_->SetDepalTexture(VK_NULL_HANDLE, false);
-	gstate_c.SetUseShaderDepal(ShaderDepalMode::OFF);
+	imageView_ = entry->vkTex->GetImageView();
 }
 
-void TextureCacheVulkan::ApplySamplingParams(const SamplerCacheKey &key) {
+void TextureCacheVulkan::ApplySamplerByKey(const SamplerCacheKey &key) {
 	curSampler_ = samplerCache_.GetOrCreateSampler(key);
 }
 
@@ -777,24 +733,26 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry) {
 	VulkanBarrierBatch barrier;
 	bool allocSuccess = image->CreateDirect(plan.createW, plan.createH, plan.depth, plan.levelsToCreate, actualFmt, imageLayout, usage, &barrier, mapping);
 	barrier.Flush(cmdInit);
-	if (!allocSuccess && !lowMemoryMode_) {
-		WARN_LOG_REPORT(Log::G3D, "Texture cache ran out of GPU memory; switching to low memory mode");
-		lowMemoryMode_ = true;
+	if (!allocSuccess) {
+		WARN_LOG(Log::G3D, "Texture cache ran out of GPU memory; decimating");
 		decimationCounter_ = 0;
-		Decimate(entry, true);
+		Decimate(entry, true);  // note: First parameter is "exceptThisOne".
 
 		// TODO: We should stall the GPU here and wipe things out of memory.
 		// As is, it will almost definitely fail the second time, but next frame it may recover.
 
 		auto err = GetI18NCategory(I18NCat::ERRORS);
+		// TODO: These messages are not really accurate.
 		if (plan.scaleFactor > 1) {
 			g_OSD.Show(OSDType::MESSAGE_WARNING, err->T("Warning: Video memory FULL, reducing upscaling and switching to slow caching mode"), 2.0f);
 		} else {
 			g_OSD.Show(OSDType::MESSAGE_WARNING, err->T("Warning: Video memory FULL, switching to slow caching mode"), 2.0f);
 		}
 
-		// Turn off texture replacement for this texture.
+		// Turn off texture replacement for this texture. Both of these need to be reset, GetMipSize
+		// dereferences plan.replaced if doReplace is still set.
 		plan.replaced = nullptr;
+		plan.doReplace = false;
 
 		plan.createW /= plan.scaleFactor;
 		plan.createH /= plan.scaleFactor;
@@ -833,18 +791,18 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry) {
 	copyBatch.reserve(levels);
 
 	for (int i = 0; i < levels; i++) {
-		int mipUnscaledWidth = gstate.getTextureWidth(i);
-		int mipUnscaledHeight = gstate.getTextureHeight(i);
+		const int mipUnscaledWidth = gstate.getTextureWidth(i);
+		const int mipUnscaledHeight = gstate.getTextureHeight(i);
 
 		int mipWidth;
 		int mipHeight;
 		plan.GetMipSize(i, &mipWidth, &mipHeight);
 
-		int bpp = VkFormatBytesPerPixel(actualFmt);
+		const int bpp = VkFormatBytesPerPixel(actualFmt);
 		// RoundToNextPowerOf2 is probably not necessary as the optimal alignment is gonna be a power of 2.
-		int optimalStrideAlignment = RoundToNextPowerOf2(std::max(4, (int)vulkan->GetPhysicalDeviceProperties().properties.limits.optimalBufferCopyRowPitchAlignment));
-		int byteStride = RoundUpToMultipleOf(mipWidth * bpp, optimalStrideAlignment);  // output stride
-		int pixelStride = byteStride / bpp;
+		const int optimalStrideAlignment = RoundToNextPowerOf2(std::max(4, (int)vulkan->GetPhysicalDeviceProperties().properties.limits.optimalBufferCopyRowPitchAlignment));
+		const int byteStride = RoundUpToMultipleOf(mipWidth * bpp, optimalStrideAlignment);  // output stride
+		const int pixelStride = byteStride / bpp;
 		int uploadSize = byteStride * mipHeight;
 
 		uint32_t bufferOffset;
@@ -900,15 +858,25 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry) {
 				VkImageView view = entry->vkTex->CreateViewForMip(i);
 				VK_PROFILE_BEGIN(vulkan, cmdInit, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 					"Compute Upload: %dx%d->%dx%d", mipUnscaledWidth, mipUnscaledHeight, mipWidth, mipHeight);
-				ScaleBufferToImage(vulkan, cmdInit, view, texBuf, bufferOffset, srcSize, mipUnscaledWidth, mipUnscaledHeight, mipWidth, mipHeight);
+				if (!ScaleBufferToImage(vulkan, cmdInit, view, texBuf, bufferOffset, srcSize, mipUnscaledWidth, mipUnscaledHeight, mipWidth, mipHeight)) {
+					// Nothing was written to this level. Clear it rather than leave garbage in it.
+					WARN_LOG_ONCE(vkscalefail, Log::G3D, "Hardware texture scaling failed, clearing the texture");
+					VkClearColorValue clear{};
+					VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)i, 1, 0, 1 };
+					vkCmdClearColorImage(cmdInit, entry->vkTex->GetImage(), VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+					// The barrier at the end of the upload waits on compute, so order the clear before that.
+					VkMemoryBarrier barrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+					barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+					vkCmdPipelineBarrier(cmdInit, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+				}
 				VK_PROFILE_END(vulkan, cmdInit, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 				vulkan->Delete().QueueDeleteImageView(view);
 			} else {
 				loadLevel(uploadSize, i == 0 ? plan.baseLevelSrc : i, byteStride, plan.scaleFactor);
 				entry->vkTex->CopyBufferToMipLevel(cmdInit, &copyBatch, i, mipWidth, mipHeight, 0, texBuf, bufferOffset, pixelStride);
 			}
-			// Format might be wrong in lowMemoryMode_, so don't save.
-			if (plan.saveTexture && !lowMemoryMode_) {
+			if (plan.saveTexture) {
 				// When hardware texture scaling is enabled, this saves the original.
 				const int w = dataScaled ? mipWidth : mipUnscaledWidth;
 				const int h = dataScaled ? mipHeight : mipUnscaledHeight;
@@ -919,7 +887,7 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry) {
 				replacedInfo.hash = entry->fullhash;
 				replacedInfo.addr = entry->addr;
 				replacedInfo.isVideo = IsVideo(entry->addr);
-				replacedInfo.isFinal = (entry->status & TexCacheEntry::STATUS_TO_SCALE) == 0;
+				replacedInfo.isFinal = (entry->status & TexStatus::TO_SCALE) == 0;
 				replacedInfo.fmt = FromVulkanFormat(actualFmt);
 				replacer_.NotifyTextureDecoded(plan.replaced, replacedInfo, data, stride, plan.baseLevelSrc + i, mipUnscaledWidth, mipUnscaledHeight, w, h);
 			}
@@ -951,11 +919,11 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry) {
 
 	// Signal that we support depth textures so use it as one.
 	if (plan.depth > 1) {
-		entry->status |= TexCacheEntry::STATUS_3D;
+		entry->status |= TexStatus::IS_3D;
 	}
 
 	if (plan.doReplace) {
-		entry->SetAlphaStatus(TexCacheEntry::TexStatus(plan.replaced->AlphaStatus()));
+		entry->SetAlphaStatus(plan.replaced->AlphaStatus());
 	}
 }
 
@@ -968,7 +936,18 @@ VkFormat TextureCacheVulkan::GetDestFormat(GETextureFormat format, GEPaletteForm
 	case GE_TFMT_CLUT8:
 	case GE_TFMT_CLUT16:
 	case GE_TFMT_CLUT32:
-		return getClutDestFormatVulkan(clutFormat);
+		switch (clutFormat) {
+		case GE_CMODE_16BIT_ABGR4444:
+			return VULKAN_4444_FORMAT;
+		case GE_CMODE_16BIT_ABGR5551:
+			return VULKAN_1555_FORMAT;
+		case GE_CMODE_16BIT_BGR5650:
+			return VULKAN_565_FORMAT;
+		case GE_CMODE_32BIT_ABGR8888:
+			return VULKAN_8888_FORMAT;
+		default:
+			return VK_FORMAT_UNDEFINED;
+		}
 	case GE_TFMT_4444:
 		return VULKAN_4444_FORMAT;
 	case GE_TFMT_5551:
@@ -1004,7 +983,7 @@ void TextureCacheVulkan::LoadVulkanTextureLevel(TexCacheEntry &entry, uint8_t *w
 	if (!gstate_c.Use(GPU_USE_16BIT_FORMATS) || scaleFactor > 1 || dstFmt == VULKAN_8888_FORMAT) {
 		texDecFlags |= TexDecodeFlags::EXPAND32;
 	}
-	if (entry.status & TexCacheEntry::STATUS_CLUT_GPU) {
+	if (entry.status & TexStatus::CLUT8_INDEXED) {
 		texDecFlags |= TexDecodeFlags::TO_CLUT8;
 	}
 
@@ -1018,7 +997,7 @@ void TextureCacheVulkan::LoadVulkanTextureLevel(TexCacheEntry &entry, uint8_t *w
 		decPitch = rowPitch;
 	}
 
-	CheckAlphaResult alphaResult = DecodeTextureLevel((u8 *)pixelData, decPitch, tfmt, clutformat, texaddr, level, bufw, texDecFlags);
+	TextureAlpha alphaResult = DecodeTextureLevel((u8 *)pixelData, decPitch, tfmt, clutformat, texaddr, level, bufw, texDecFlags);
 	entry.SetAlphaStatus(alphaResult, level);
 
 	if (scaleFactor > 1) {
@@ -1053,17 +1032,17 @@ void TextureCacheVulkan::BoundFramebufferTexture() {
 }
 
 bool TextureCacheVulkan::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level, bool *isFramebuffer) {
-	SetTexture();
-	if (!nextTexture_) {
-		return GetCurrentFramebufferTextureDebug(buffer, isFramebuffer);
+	// Apply texture may need to rebuild the texture if we're about to render, or bind a framebuffer.
+	TextureApplyResult textureResult = ApplyTexture(false);
+	if (textureResult.framebuffer) {
+		*isFramebuffer = true;
+		return GetFramebufferTextureDebug(textureResult.framebuffer, textureResult.framebufferTextureChannel, buffer);
 	}
 
-	// Apply texture may need to rebuild the texture if we're about to render, or bind a framebuffer.
-	TexCacheEntry *entry = nextTexture_;
-	ApplyTexture();
-
-	if (!entry->vkTex)
+	TexCacheEntry *entry = textureResult.texCacheEntry;
+	if (!entry || !entry->vkTex) {
 		return false;
+	}
 
 	VulkanTexture *texture = entry->vkTex;
 	VulkanRenderManager *renderManager = (VulkanRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
@@ -1111,9 +1090,7 @@ bool TextureCacheVulkan::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int leve
 	return true;
 }
 
-void TextureCacheVulkan::GetStats(char *ptr, size_t size) {
-	snprintf(ptr, size, "N/A");
-}
+void TextureCacheVulkan::GetStats(StringWriter &w) {}
 
 std::vector<std::string> TextureCacheVulkan::DebugGetSamplerIDs() const {
 	return samplerCache_.DebugGetSamplerIDs();

@@ -1,6 +1,6 @@
 #include "tico/TicoAudioSfx.h"
 
-#include "ext/minimp3/minimp3_ex.h"
+#include "tico/deps/minimp3/minimp3_ex.h"
 
 #include <cstdio>
 #include <cstdlib>

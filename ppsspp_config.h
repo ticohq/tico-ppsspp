@@ -32,7 +32,7 @@
     #endif
 #endif
 
-#if defined(__arm__) || defined(_M_ARM)
+#if defined(__arm__)
     #define PPSSPP_ARCH_ARM 1
     #define PPSSPP_ARCH_32BIT 1
 
@@ -47,11 +47,6 @@
     #endif
 
     #if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        #define PPSSPP_ARCH_ARM_NEON 1
-    #endif
-
-    #if defined(_M_ARM)
-        #define PPSSPP_ARCH_ARMV7 1
         #define PPSSPP_ARCH_ARM_NEON 1
     #endif
 #endif
@@ -94,9 +89,6 @@
 #if defined(_WIN32)
     // Covers both 32 and 64bit Windows
     #define PPSSPP_PLATFORM_WINDOWS 1
-	#ifdef _M_ARM
-        #define PPSSPP_ARCH_ARM_HARDFP 1
-	#endif
 	// UWP trickery
     #if defined(WINAPI_FAMILY) && defined(WINAPI_FAMILY_PARTITION)
         #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP) && WINAPI_FAMILY != WINAPI_FAMILY_DESKTOP_APP
@@ -127,7 +119,16 @@
 #endif
 
 // Windows ARM/ARM64, and Windows UWP (all), are the only platform that don't do GL at all (until Apple finally removes it)
-#if !PPSSPP_PLATFORM(WINDOWS) || ((!PPSSPP_ARCH(ARM) && !PPSSPP_ARCH(ARM64)) && !PPSSPP_PLATFORM(UWP))
+#if PPSSPP_PLATFORM(WINDOWS)
+#if PPSSPP_ARCH(ARM64) || PPSSPP_ARCH(ARM) || PPSSPP_PLATFORM(UWP)
+// No GL
+#else
+#define PPSSPP_API_ANY_GL 1
+#endif
+#elif PPSSPP_PLATFORM(IOS_APP_STORE)
+// No GL
+#else
+// All other platforms support GL.
 #define PPSSPP_API_ANY_GL 1
 #endif
 

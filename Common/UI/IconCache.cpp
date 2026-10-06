@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstring>
 
 #include "Common/UI/IconCache.h"
 #include "Common/UI/Context.h"
@@ -8,13 +9,19 @@
 #include "Common/GPU/thin3d.h"
 #include "Common/File/FileUtil.h"
 
-#define ICON_CACHE_VERSION 1
+// 3: Entries store a wall-clock expiry time.
+#define ICON_CACHE_VERSION 3
 #define MK_FOURCC(str) (str[0] | ((uint8_t)str[1] << 8) | ((uint8_t)str[2] << 16) | ((uint8_t)str[3] << 24))
 
 #define MAX_RUNTIME_CACHE_SIZE (1024 * 1024 * 4)
 #define MAX_SAVED_CACHE_SIZE (1024 * 1024 * 1)
 
-const uint32_t ICON_CACHE_MAGIC = MK_FOURCC("pICN");
+// Seconds before MarkPending accepts a key whose download failed.
+constexpr double FAILED_RETRY_DELAY = 30.0;
+// Seconds before BindIconTexture tries again to create a texture that failed.
+constexpr double UPLOAD_RETRY_DELAY = 5.0;
+
+constexpr uint32_t ICON_CACHE_MAGIC = MK_FOURCC("pICN");
 
 IconCache g_iconCache;
 
@@ -28,8 +35,24 @@ struct DiskCacheEntry {
 	uint32_t keyLen;
 	uint32_t dataLen;
 	IconFormat format;
-	double insertedTimestamp;
+	uint32_t padding;  // Explicit, so that 32-bit x86 Linux (which aligns double to 4) has the same layout.
+	double expireTimestamp;
 };
+static_assert(sizeof(DiskCacheEntry) == 24, "DiskCacheEntry is written to disk as is");
+
+// Reads the size from the header, so layout can use it before there's a texture. 0x0 if unknown.
+static void PeekIconSize(const std::string &data, IconFormat format, int *width, int *height) {
+	*width = 0;
+	*height = 0;
+	if (format == IconFormat::PNG && data.size() >= sizeof(PNGHeaderPeek)) {
+		PNGHeaderPeek peek;
+		memcpy(&peek, data.data(), sizeof(peek));
+		if (peek.IsValidPNGHeader()) {
+			*width = peek.Width();
+			*height = peek.Height();
+		}
+	}
+}
 
 void IconCache::SaveToFile(FILE *file) {
 	std::unique_lock<std::mutex> lock(lock_);
@@ -47,12 +70,13 @@ void IconCache::SaveToFile(FILE *file) {
 	for (auto &iter : cache_) {
 		DiskCacheEntry entryHeader{};
 		entryHeader.keyLen = (uint32_t)iter.first.size();
-		entryHeader.dataLen = (uint32_t)iter.second.data.size();
-		entryHeader.format = iter.second.format;
-		entryHeader.insertedTimestamp = iter.second.insertedTimeStamp;
+		const auto &entry = iter.second;
+		entryHeader.dataLen = (uint32_t)entry.data.size();
+		entryHeader.format = entry.format;
+		entryHeader.expireTimestamp = entry.expireTimeStamp;
 		fwrite(&entryHeader, 1, sizeof(entryHeader), file);
 		fwrite(iter.first.c_str(), 1, iter.first.size(), file);
-		fwrite(iter.second.data.data(), 1, iter.second.data.size(), file);
+		fwrite(entry.data.data(), 1, entry.data.size(), file);
 	}
 }
 
@@ -68,6 +92,7 @@ bool IconCache::LoadFromFile(FILE *file) {
 	}
 
 	double now = time_now_d();
+	double nowUnix = time_now_unix_utc();
 
 	for (uint32_t i = 0; i < header.entryCount; i++) {
 		DiskCacheEntry entryHeader{};
@@ -75,19 +100,20 @@ bool IconCache::LoadFromFile(FILE *file) {
 			break;
 		}
 
-		std::string key;
-		key.resize(entryHeader.keyLen, 0);
-		if (entryHeader.keyLen > 0x1000) {
-			// Let's say this is invalid, probably a corrupted file.
+		if (entryHeader.keyLen > 0x1000 || entryHeader.dataLen > MAX_SAVED_CACHE_SIZE) {
+			// Let's say this is invalid, probably a corrupted file. Check before allocating.
 			break;
 		}
+
+		std::string key;
+		key.resize(entryHeader.keyLen, 0);
 
 		if (fread(&key[0], 1, entryHeader.keyLen, file) != entryHeader.keyLen) {
 			break;
 		}
 
-		// Check if we already have the entry somehow.
-		if (cache_.find(key) != cache_.end()) {
+		// Skip it if we already have the entry somehow, or it has expired.
+		if (cache_.find(key) != cache_.end() || nowUnix > entryHeader.expireTimestamp) {
 			// Seek past the data and go to the next entry.
 			File::Fseek(file, entryHeader.dataLen, SEEK_CUR);
 			continue;
@@ -104,8 +130,9 @@ bool IconCache::LoadFromFile(FILE *file) {
 		Entry entry{};
 		entry.data = data;
 		entry.format = entryHeader.format;
-		entry.insertedTimeStamp = entryHeader.insertedTimestamp;
+		entry.expireTimeStamp = entryHeader.expireTimestamp;
 		entry.usedTimeStamp = now;
+		PeekIconSize(entry.data, entry.format, &entry.width, &entry.height);
 		cache_.emplace(key, entry);
 	}
 
@@ -126,6 +153,7 @@ void IconCache::ClearData() {
 	ClearTextures();
 	std::unique_lock<std::mutex> lock(lock_);
 	cache_.clear();
+	failed_.clear();
 }
 
 void IconCache::FrameUpdate() {
@@ -134,14 +162,22 @@ void IconCache::FrameUpdate() {
 	double now = time_now_d();
 	if (now > lastUpdate_ + 2.0) {
 		for (auto &iter : cache_) {
-			double useAge = now - iter.second.usedTimeStamp;
+			auto &entry = iter.second;
+			double useAge = now - entry.usedTimeStamp;
 			if (useAge > 5.0) {
 				// Release the texture after a few seconds of no use.
 				// Still, keep the png data loaded, it's small.
-				if (iter.second.texture) {
-					iter.second.texture->Release();
-					iter.second.texture = nullptr;
+				if (entry.texture) {
+					entry.texture->Release();
+					entry.texture = nullptr;
 				}
+			}
+		}
+		for (auto iter = failed_.begin(); iter != failed_.end(); ) {
+			if (now > iter->second + FAILED_RETRY_DELAY) {
+				iter = failed_.erase(iter);  // MarkPending would accept it anyway.
+			} else {
+				++iter;
 			}
 		}
 		lastUpdate_ = now;
@@ -175,7 +211,8 @@ void IconCache::Decimate(int64_t maxSize) {
 	std::vector<SortEntry> sortEntries;
 	sortEntries.reserve(cache_.size());
 	for (const auto &iter : cache_) {
-		sortEntries.push_back({ iter.first, iter.second.usedTimeStamp, iter.second.data.size() });
+		const auto &entry = iter.second;
+		sortEntries.push_back({ iter.first, entry.usedTimeStamp, entry.data.size() });
 	}
 
 	std::sort(sortEntries.begin(), sortEntries.end(), [](const SortEntry &a, const SortEntry &b) {
@@ -204,14 +241,13 @@ bool IconCache::GetDimensions(std::string_view key, int *width, int *height) {
 		return false;
 	}
 
-	if (iter->second.texture) {
-		// TODO: Store the width/height in the cache.
-		*width = iter->second.texture->Width();
-		*height = iter->second.texture->Height();
-		return true;
-	} else {
+	const auto &entry = iter->second;
+	if (entry.width <= 0 || entry.height <= 0) {
 		return false;
 	}
+	*width = entry.width;
+	*height = entry.height;
+	return true;
 }
 
 bool IconCache::Contains(std::string_view key) {
@@ -227,8 +263,24 @@ bool IconCache::MarkPending(std::string_view key) {
 	if (pending_.find(key) != pending_.end()) {
 		return false;
 	}
+	auto failedIter = failed_.find(key);
+	if (failedIter != failed_.end()) {
+		if (time_now_d() < failedIter->second + FAILED_RETRY_DELAY) {
+			return false;
+		}
+		failed_.erase(failedIter);
+	}
 	pending_.emplace(key);
 	return true;
+}
+
+void IconCache::MarkFailed(std::string_view key) {
+	std::unique_lock<std::mutex> lock(lock_);
+	auto iter = pending_.find(key);
+	if (iter != pending_.end()) {
+		pending_.erase(iter);
+	}
+	failed_[std::string(key)] = time_now_d();
 }
 
 void IconCache::CancelPending(std::string_view key) {
@@ -241,7 +293,7 @@ void IconCache::CancelPending(std::string_view key) {
 	pending_.erase(iter);
 }
 
-bool IconCache::InsertIcon(std::string_view key, IconFormat format, std::string &&data) {
+bool IconCache::InsertIcon(std::string_view key, IconFormat format, std::string &&data, double maxAge) {
 	if (key.empty()) {
 		return false;
 	}
@@ -269,7 +321,9 @@ bool IconCache::InsertIcon(std::string_view key, IconFormat format, std::string 
 	}
 
 	double now = time_now_d();
-	cache_.emplace(key, Entry{ std::move(data), format, nullptr, now, now, false });
+	Entry entry{ std::move(data), format, nullptr, time_now_unix_utc() + maxAge, now };
+	PeekIconSize(entry.data, entry.format, &entry.width, &entry.height);
+	cache_.emplace(key, std::move(entry));
 	return true;
 }
 
@@ -286,13 +340,15 @@ Draw::Texture *IconCache::BindIconTexture(UIContext *context, std::string_view k
 		return nullptr;
 	}
 
-	if (iter->second.texture) {
-		context->GetDrawContext()->BindTexture(0, iter->second.texture);
-		iter->second.usedTimeStamp = time_now_d();
-		return iter->second.texture;
+	auto &entry = iter->second;
+
+	if (entry.texture) {
+		context->GetDrawContext()->BindTexture(0, entry.texture);
+		entry.usedTimeStamp = time_now_d();
+		return entry.texture;
 	}
 
-	if (iter->second.badData) {
+	if (entry.uploadFailedTime != 0.0 && time_now_d() < entry.uploadFailedTime + UPLOAD_RETRY_DELAY) {
 		return nullptr;
 	}
 
@@ -302,15 +358,17 @@ Draw::Texture *IconCache::BindIconTexture(UIContext *context, std::string_view k
 	Draw::DataFormat dataFormat;
 	unsigned char *buffer = nullptr;
 
-	switch (iter->second.format) {
+	switch (entry.format) {
 	case IconFormat::PNG:
 	{
-		int result = pngLoadPtr((const unsigned char *)iter->second.data.data(), iter->second.data.size(), &width,
-			&height, &buffer);
+		const std::string &data = entry.data;
+		int result = pngLoadPtr((const unsigned char *)data.data(), data.size(), &width, &height, &buffer, 256, 128);
 
 		if (result != 1) {
-			ERROR_LOG(Log::G3D, "IconCache: Failed to load png (%d bytes) for key %.*s", (int)iter->second.data.size(), STR_VIEW(key));
-			iter->second.badData = true;
+			ERROR_LOG(Log::G3D, "IconCache: Failed to load png (%d bytes) for key %.*s", (int)data.size(), STR_VIEW(key));
+			// Drop it, so it isn't saved to disk, and MarkPending allows downloading it again later.
+			failed_[std::string(key)] = time_now_d();
+			cache_.erase(iter);
 			return nullptr;
 		}
 		dataFormat = Draw::DataFormat::R8G8B8A8_UNORM;
@@ -333,11 +391,16 @@ Draw::Texture *IconCache::BindIconTexture(UIContext *context, std::string_view k
 	iconDesc.type = Draw::TextureType::LINEAR2D;
 
 	Draw::Texture *texture = context->GetDrawContext()->CreateTexture(iconDesc);
-	iter->second.texture = texture;
-	iter->second.usedTimeStamp = time_now_d();
-
 	free(buffer);
-
+	if (!texture) {
+		ERROR_LOG(Log::G3D, "IconCache: Failed to create a %dx%d texture for key %.*s", width, height, STR_VIEW(key));
+		entry.uploadFailedTime = time_now_d();
+		return nullptr;
+	}
+	entry.texture = texture;
+	entry.usedTimeStamp = time_now_d();
+	// The caller draws with it right away, same as with an existing texture.
+	context->GetDrawContext()->BindTexture(0, texture);
 	return texture;
 }
 
@@ -348,9 +411,10 @@ IconCacheStats IconCache::GetStats() {
 
 	for (auto &iter : cache_) {
 		stats.cachedCount++;
-		if (iter.second.texture)
+		const auto &entry = iter.second;
+		if (entry.texture)
 			stats.textureCount++;
-		stats.dataSize += iter.second.data.size();
+		stats.dataSize += entry.data.size();
 	}
 
 	stats.pending = pending_.size();

@@ -44,6 +44,7 @@ void Compatibility::Load(const std::string &gameID) {
 		// This loads from assets.
 		if (compat.LoadFromVFS(g_VFS, "compat.ini")) {
 			CheckSettings(compat, gameID);
+			filesLoaded_.push_back("assets/compat.ini");
 		} else {
 			auto e = GetI18NCategory(I18NCat::ERRORS);
 			std::string msg = ApplySafeSubstitutions(e->T("File not found: %1"), "compat.ini");
@@ -57,6 +58,7 @@ void Compatibility::Load(const std::string &gameID) {
 		Path path = GetSysDirectory(DIRECTORY_SYSTEM) / "compat.ini";
 		if (compat2.Load(path)) {
 			CheckSettings(compat2, gameID);
+			filesLoaded_.push_back(path.ToString());
 		}
 	}
 
@@ -67,6 +69,7 @@ void Compatibility::Load(const std::string &gameID) {
 			// This loads from assets.
 			if (compat.LoadFromVFS(g_VFS, "compatvr.ini")) {
 				CheckVRSettings(compat, gameID);
+				filesLoaded_.push_back("assets/compatvr.ini");
 			}
 		}
 
@@ -76,21 +79,22 @@ void Compatibility::Load(const std::string &gameID) {
 			Path path = GetSysDirectory(DIRECTORY_SYSTEM) / "compatvr.ini";
 			if (compat2.Load(path)) {
 				CheckVRSettings(compat2, gameID);
+				filesLoaded_.push_back(path.ToString());
 			}
 		}
 	}
 }
 
 void Compatibility::Clear() {
-	memset(&flags_, 0, sizeof(flags_));
-	memset(&vrCompat_, 0, sizeof(vrCompat_));
+	flags_ = {};
+	vrCompat_ = {};
 	activeList_.clear();
+	filesLoaded_.clear();
 }
 
 void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "VertexDepthRounding", &flags_.VertexDepthRounding);
 	CheckSetting(iniFile, gameID, "PixelDepthRounding", &flags_.PixelDepthRounding);
-	CheckSetting(iniFile, gameID, "DepthRangeHack", &flags_.DepthRangeHack);
 	CheckSetting(iniFile, gameID, "ClearToRAM", &flags_.ClearToRAM);
 	CheckSetting(iniFile, gameID, "Force04154000Download", &flags_.Force04154000Download);
 	CheckSetting(iniFile, gameID, "DrawSyncEatCycles", &flags_.DrawSyncEatCycles);
@@ -99,7 +103,6 @@ void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "RequireBufferedRendering", &flags_.RequireBufferedRendering);
 	CheckSetting(iniFile, gameID, "RequireBlockTransfer", &flags_.RequireBlockTransfer);
 	CheckSetting(iniFile, gameID, "RequireDefaultCPUClock", &flags_.RequireDefaultCPUClock);
-	CheckSetting(iniFile, gameID, "DisableAccurateDepth", &flags_.DisableAccurateDepth);
 	CheckSetting(iniFile, gameID, "MGS2AcidHack", &flags_.MGS2AcidHack);
 	CheckSetting(iniFile, gameID, "SonicRivalsHack", &flags_.SonicRivalsHack);
 	CheckSetting(iniFile, gameID, "BlockTransferAllowCreateFB", &flags_.BlockTransferAllowCreateFB);
@@ -122,7 +125,6 @@ void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "MpegAvcWarmUp", &flags_.MpegAvcWarmUp);
 	CheckSetting(iniFile, gameID, "BlueToAlpha", &flags_.BlueToAlpha);
 	CheckSetting(iniFile, gameID, "CenteredLines", &flags_.CenteredLines);
-	CheckSetting(iniFile, gameID, "MaliDepthStencilBugWorkaround", &flags_.MaliDepthStencilBugWorkaround);
 	CheckSetting(iniFile, gameID, "ZZT3SelectHack", &flags_.ZZT3SelectHack);
 	CheckSetting(iniFile, gameID, "AllowLargeFBTextureOffsets", &flags_.AllowLargeFBTextureOffsets);
 	CheckSetting(iniFile, gameID, "AtracLoopHack", &flags_.AtracLoopHack);
@@ -132,7 +134,6 @@ void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "ForceLowerResolutionForEffectsOff", &flags_.ForceLowerResolutionForEffectsOff);
 	CheckSetting(iniFile, gameID, "AllowDownloadCLUT", &flags_.AllowDownloadCLUT);
 	CheckSetting(iniFile, gameID, "NearestFilteringOnFramebufferCreate", &flags_.NearestFilteringOnFramebufferCreate);
-	CheckSetting(iniFile, gameID, "SecondaryTextureCache", &flags_.SecondaryTextureCache);
 	CheckSetting(iniFile, gameID, "EnglishOrJapaneseOnly", &flags_.EnglishOrJapaneseOnly);
 	CheckSetting(iniFile, gameID, "OldAdrenoPixelDepthRoundingGL", &flags_.OldAdrenoPixelDepthRoundingGL);
 	CheckSetting(iniFile, gameID, "ForceCircleButtonConfirm", &flags_.ForceCircleButtonConfirm);
@@ -143,7 +144,6 @@ void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "DaxterRotatedAnalogStick", &flags_.DaxterRotatedAnalogStick);
 	CheckSetting(iniFile, gameID, "ForceMaxDepthResolution", &flags_.ForceMaxDepthResolution);
 	CheckSetting(iniFile, gameID, "SOCOMClut8Replacement", &flags_.SOCOMClut8Replacement);
-	CheckSetting(iniFile, gameID, "Fontltn12Hack", &flags_.Fontltn12Hack);
 	CheckSetting(iniFile, gameID, "LoadCLUTFromCurrentFrameOnly", &flags_.LoadCLUTFromCurrentFrameOnly);
 	CheckSetting(iniFile, gameID, "ForceUMDReadSpeed", &flags_.ForceUMDReadSpeed);
 	CheckSetting(iniFile, gameID, "KernelGetSystemTimeLowEatMoreCycles", &flags_.KernelGetSystemTimeLowEatMoreCycles);
@@ -156,7 +156,6 @@ void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "DisableHLESceFont", &flags_.DisableHLESceFont);
 	CheckSetting(iniFile, gameID, "ForceHLEPsmf", &flags_.ForceHLEPsmf);
 	CheckSetting(iniFile, gameID, "SaveStatesNotRecommended", &flags_.SaveStatesNotRecommended);
-	CheckSetting(iniFile, gameID, "IgnoreEnqueue", &flags_.IgnoreEnqueue);
 	CheckSetting(iniFile, gameID, "MsgDialogAutoStatus", &flags_.MsgDialogAutoStatus);
 	CheckSetting(iniFile, gameID, "NullPageValid", &flags_.NullPageValid);
 	CheckSetting(iniFile, gameID, "DetectDestBlendSquared", &flags_.DetectDestBlendSquared);
@@ -164,6 +163,10 @@ void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "PersistentFramebuffers", &flags_.PersistentFramebuffers);
 	CheckSetting(iniFile, gameID, "FileCreatedTimeHack", &flags_.FileCreatedTimeHack);
 	CheckSetting(iniFile, gameID, "FastEmulatedGPU", &flags_.FastEmulatedGPU);
+	CheckSetting(iniFile, gameID, "CorrectCullAfterClip", &flags_.CorrectCullAfterClip);
+	CheckSetting(iniFile, gameID, "SpriteBorderFix", &flags_.SpriteBorderFix);
+	CheckSetting(iniFile, gameID, "TextureCLUTInShader", &flags_.TextureCLUTInShader);
+	CheckSetting(iniFile, gameID, "DisableRangeCulling", &flags_.DisableRangeCulling);
 }
 
 void Compatibility::CheckVRSettings(IniFile &iniFile, const std::string &gameID) {
@@ -192,10 +195,14 @@ void Compatibility::CheckSetting(IniFile &iniFile, const std::string &gameID, co
 		section->Get("ALL", &all);
 		if (all) {
 			*flag = true;
+		}
+
+		if (*flag) {
 			if (!activeList_.empty()) {
 				activeList_ += "\n";
 			}
 			activeList_ += option;
+			activeList_ += ": True";
 		}
 	}
 }
@@ -204,7 +211,18 @@ void Compatibility::CheckSetting(IniFile &iniFile, const std::string &gameID, co
 	std::string value;
 	Section *section = iniFile.GetSection(option);
 	if (section && section->Get(gameID.c_str(), &value)) {
-		*flag = stof(value);
+		// Not stof - it throws on a malformed entry, and compat.ini is user-editable.
+		float parsed;
+		if (sscanf(value.c_str(), "%f", &parsed) != 1) {
+			WARN_LOG(Log::Loader, "compat.ini: [%s] %s is not a number: '%s'", option, gameID.c_str(), value.c_str());
+			return;
+		}
+		*flag = parsed;
+
+		if (!activeList_.empty()) {
+			activeList_ += "\n";
+		}
+		activeList_ += std::string(option) + ": " + std::to_string(*flag);
 	}
 }
 
@@ -212,6 +230,16 @@ void Compatibility::CheckSetting(IniFile &iniFile, const std::string &gameID, co
 	std::string value;
 	Section *section = iniFile.GetSection(option);
 	if (section && section->Get(gameID.c_str(), &value)) {
-		*flag = stof(value);
+		int parsed;
+		if (sscanf(value.c_str(), "%d", &parsed) != 1) {
+			WARN_LOG(Log::Loader, "compat.ini: [%s] %s is not an integer: '%s'", option, gameID.c_str(), value.c_str());
+			return;
+		}
+		*flag = parsed;
+
+		if (!activeList_.empty()) {
+			activeList_ += ":" + std::to_string(*flag) + "\n";
+		}
+		activeList_ += std::string(option) + ": " + std::to_string(*flag);
 	}
 }

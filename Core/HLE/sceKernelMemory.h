@@ -32,8 +32,19 @@ enum MemblockType {
 	PSP_SMEM_HighAligned = 4,
 };
 
+// Memory partition IDs, as passed to sceKernelAllocPartitionMemory() and friends.
+// Per TyRaNiD: 1 = kernel, 2 = user, 3 = me, 4 = kernel mirror. 5 is the "volatile"
+// partition also used by sceKernelVolatileMemLock() - the VSH uses this partition
+// for its own private allocations while it's running.
+enum {
+	KERNEL_PARTITION_ID = 1,
+	USER_PARTITION_ID = 2,
+	VSHELL_PARTITION_ID = 5,
+};
+
 extern BlockAllocator userMemory;
 extern BlockAllocator kernelMemory;
+extern BlockAllocator volatileMemory;
 
 void __KernelMemoryInit();
 void __KernelMemoryDoState(PointerWrap &p);
@@ -211,6 +222,7 @@ int sceKernelGetCompiledSdkVersion();
 SceUID sceKernelCreateTlspl(const char *name, u32 partitionid, u32 attr, u32 size, u32 count, u32 optionsPtr);
 int sceKernelDeleteTlspl(SceUID uid);
 int sceKernelGetTlsAddr(SceUID uid);
+int _sceKernelAllocateTlspl(SceUID uid, u32 addrPtr, u32 timeoutPtr);
 int sceKernelFreeTlspl(SceUID uid);
 int sceKernelReferTlsplStatus(SceUID uid, u32 infoPtr);
 

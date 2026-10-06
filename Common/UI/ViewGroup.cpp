@@ -339,7 +339,7 @@ float GetTargetScore(const Point2D &originPos, int originIndex, const View *orig
 	const float vertOverlap = VerticalOverlap(origin->GetBounds(), destination->GetBounds());
 	if (horizOverlap == 1.0f && vertOverlap == 1.0f) {
 		if (direction != FocusMove::PREV_PAGE && direction != FocusMove::NEXT_PAGE) {
-			INFO_LOG(Log::UI, "Contain overlap: %s, %s", origin->Tag().c_str(), destination->Tag().c_str());
+			// INFO_LOG(Log::UI, "Contain overlap: %s, %s", origin->Tag().c_str(), destination->Tag().c_str());
 			return 0.0f;
 		}
 	}
@@ -486,6 +486,27 @@ NeighborResult ViewGroup::FindNeighbor(View *view, FocusMove direction, Neighbor
 	default:
 		ERROR_LOG(Log::UI, "Bad focus direction %d", (int)direction);
 		return result;
+	}
+}
+
+void ViewGroup::CollectTabOrder(std::vector<View *> *outViews) const {
+	for (View *view : views_) {
+		// Gate on visibility only, like Key/Touch/Axis do - a container being disabled doesn't
+		// stop its children from being interactive elsewhere, so it shouldn't here either.
+		if (view->GetVisibility() != V_VISIBLE) {
+			continue;
+		}
+		if (view->IsViewGroup()) {
+			// A group can be focusable itself (rare), in which case it's a stop and we still
+			// descend into it - same as arrow navigation, which considers both.
+			ViewGroup *vg = static_cast<ViewGroup *>(view);
+			if (vg->CanBeFocused() && vg->IsEnabled()) {
+				outViews->push_back(vg);
+			}
+			vg->CollectTabOrder(outViews);
+		} else if (view->CanBeFocused() && view->IsEnabled()) {
+			outViews->push_back(view);
+		}
 	}
 }
 

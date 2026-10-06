@@ -26,6 +26,7 @@
 #include "sceCcc.h"
 #include "sceChnnlsv.h"
 #include "sceCtrl.h"
+#include "sceChkreg.h"
 #include "sceDeflt.h"
 #include "sceDisplay.h"
 #include "sceDmac.h"
@@ -56,7 +57,9 @@
 #include "sceNetAdhocMatching.h"
 #include "sceNp.h"
 #include "sceMpeg.h"
+#include "sceMpegbase.h"
 #include "sceOpenPSID.h"
+#include "sceResmgr.h"
 #include "sceP3da.h"
 #include "sceParseHttp.h"
 #include "sceParseUri.h"
@@ -77,6 +80,7 @@
 #include "sceUsbMic.h"
 #include "sceUtility.h"
 #include "sceVaudio.h"
+#include "sceVshBridge.h"
 #include "sceMt19937.h"
 #include "sceSha256.h"
 #include "sceAdler.h"
@@ -87,17 +91,9 @@
 #include "sceNetResolver.h"
 // #include "sceNp2.h"
 #include "sceNet_lib.h"
+#include "sceVideocodec.h"
 
-#define N(s) s
-
-//\*\*\ found\:\ {[a-zA-Z]*}\ {0x[a-zA-Z0-9]*}\ \*\*
-//{FID(\2),0,N("\1")},
-
-//Metal Gear Acid modules:
-//kjfs
-//sound
-//zlibdec
-const HLEFunction FakeSysCalls[] = {
+static const HLEFunction FakeSysCalls[] = {
 	{NID_THREADRETURN, __KernelReturnFromThread, "__KernelReturnFromThread", 'x', ""},
 	{NID_CALLBACKRETURN, __KernelReturnFromMipsCall, "__KernelReturnFromMipsCall", 'x', ""},
 	{NID_INTERRUPTRETURN, __KernelReturnFromInterrupt, "__KernelReturnFromInterrupt", 'x', ""},
@@ -108,8 +104,7 @@ const HLEFunction FakeSysCalls[] = {
 	{NID_HLECALLRETURN, HLEReturnFromMipsCall, "HLEReturnFromMipsCall", 'x', ""},
 };
 
-const HLEFunction UtilsForUser[] = 
-{
+static const HLEFunction UtilsForUser[] = {
 	{0X91E4F6A7, &WrapU_V<sceKernelLibcClock>,                       "sceKernelLibcClock",                      'x', ""   },
 	{0X27CC57F0, &WrapU_U<sceKernelLibcTime>,                        "sceKernelLibcTime",                       'x', "x"  },
 	{0X71EC4271, &WrapU_UU<sceKernelLibcGettimeofday>,               "sceKernelLibcGettimeofday",               'x', "xx" },
@@ -138,8 +133,7 @@ const HLEFunction UtilsForUser[] =
 	{0X920F104A, &WrapU_V<sceKernelIcacheInvalidateAll>,             "sceKernelIcacheInvalidateAll",            'x', ""   }
 };				   
 
-const HLEFunction LoadCoreForKernel[] = 
-{
+static const HLEFunction LoadCoreForKernel[] = {
 	{0XACE23476, nullptr,                                            "sceKernelCheckPspConfig",                 '?', ""   },
 	{0X7BE1421C, nullptr,                                            "sceKernelCheckExecFile",                  '?', ""   },
 	{0XBF983EF2, nullptr,                                            "sceKernelProbeExecutableObject",          '?', ""   },
@@ -174,14 +168,38 @@ const HLEFunction LoadCoreForKernel[] =
 };
 
 
-const HLEFunction KDebugForKernel[] = 
-{
+// sceKernelSm1ReferOperations() returns a pointer to a driver-registered "SM1 operations"
+// table (set up via the sibling sceKernelSm1RegisterOperations(), also unimplemented here),
+// or NULL if nothing has registered one.
+static u32 sceKernelSm1ReferOperations() {
+	return hleLogDebug(Log::sceKernel, 0);
+}
+
+// The kernel's debug printf. On hardware it formats the string and hands it to whatever
+// sceKernelRegisterKprintfHandler() installed, which on a retail PSP means the serial port -
+// so nothing a player ever sees, and games that call it are just leaving debug output in.
+// We format it and put it in the log, which is the useful thing to do with it.
+// Declared void in the SDK headers, so the return value doesn't matter, but 0 is what the
+// firmware leaves in v0.
+static u32 Kprintf(u32 fmtAddr) {
+	std::string formatted;
+	if (!HLEFormatPrintf(fmtAddr, 1, &formatted)) {
+		return hleLogError(Log::Printf, 0, "bad format string or args");
+	}
+	// Each log line is already a line, so don't double space.
+	if (!formatted.empty() && formatted.back() == '\n') {
+		formatted.pop_back();
+	}
+	return hleLogInfo(Log::Printf, 0, "\"%s\"", formatted.c_str());
+}
+
+static const HLEFunction KDebugForKernel[] = {
 	{0XE7A3874D, nullptr,                                            "sceKernelRegisterAssertHandler",          '?', ""   },
 	{0X2FF4E9F9, nullptr,                                            "sceKernelAssert",                         '?', ""   },
 	{0X9B868276, nullptr,                                            "sceKernelGetDebugPutchar",                '?', ""   },
 	{0XE146606D, nullptr,                                            "sceKernelRegisterDebugPutchar",           '?', ""   },
 	{0X7CEB2C09, &WrapU_V<sceKernelRegisterKprintfHandler>,          "sceKernelRegisterKprintfHandler",         'x', "",       HLE_KERNEL_SYSCALL },
-	{0X84F370BC, nullptr,                                            "Kprintf",                                 '?', ""   },
+	{0X84F370BC, &WrapU_U<Kprintf>,                                  "Kprintf",                                 'x', "x",      HLE_KERNEL_SYSCALL },
 	{0X5CE9838B, nullptr,                                            "sceKernelDebugWrite",                     '?', ""   },
 	{0X66253C4E, nullptr,                                            "sceKernelRegisterDebugWrite",             '?', ""   },
 	{0XDBB5597F, nullptr,                                            "sceKernelDebugRead",                      '?', ""   },
@@ -193,19 +211,16 @@ const HLEFunction KDebugForKernel[] =
 	{0X5282DD5E, nullptr,                                            "sceKernelDipswSet",                       '?', ""   },
 	{0X9F8703E4, nullptr,                                            "sceKernelDipswCpTime",                    '?', ""   },
 	{0X333DCEC7, nullptr,                                            "sceKernelSm1RegisterOperations",          '?', ""   },
-	{0XE892D9A1, nullptr,                                            "sceKernelSm1ReferOperations",             '?', ""   },
+	{0XE892D9A1, &WrapU_V<sceKernelSm1ReferOperations>,              "sceKernelSm1ReferOperations",             'x', ""   },
 	{0XA126F497, nullptr,                                            "KDebugForKernel_A126F497",                '?', ""   },
 	{0XB7251823, nullptr,                                            "sceKernelAcceptMbogoSig",                 '?', ""   },
 };
 
-const HLEFunction pspeDebug[] = 
-{
+static const HLEFunction pspeDebug[] = {
 	{0XDEADBEAF, nullptr,                                            "pspeDebugWrite",                          '?', ""   },
 };
 
-
-const HLEModule moduleList[] = 
-{
+static const HLEModule moduleList[] = {
 	{"FakeSysCalls", ARRAY_SIZE(FakeSysCalls), FakeSysCalls},
 	{"UtilsForUser", ARRAY_SIZE(UtilsForUser), UtilsForUser},
 	{"KDebugForKernel", ARRAY_SIZE(KDebugForKernel), KDebugForKernel},
@@ -325,9 +340,18 @@ void RegisterAllModules() {
 	Register_sceSircs();
 	Register_sceNet_lib();
 	Register_sceReg();
-	// Not ready to enable this due to apparent softlocks in Patapon 3.
-	// Register_sceNpMatching2();
+	Register_sceRtc_driver();
+	Register_scePower_driver();
+	Register_sceImpose_driver();
+	Register_sceHprm_driver();
+	Register_sceChkreg();
+	Register_sceVshBridge();
+	Register_sceResmgr();
+	Register_sceVideocodec();
 
 	// add new modules here.
-}
+	Register_SystemCtrlForKernel();
 
+	// Not ready to enable this due to apparent softlocks in Patapon 3.
+	// Register_sceNpMatching2();
+}

@@ -219,6 +219,7 @@ bool TabHolder::SetCurrentTab(int tab, bool skipTween) {
 	tabs_[tab]->SetVisibility(V_VISIBLE);
 
 	currentTab_ = tab;
+	tabStrip_->SetSelection(tab, false);
 	UI::EventParams e{};
 	e.v = this;
 	e.a = currentTab_;
@@ -362,8 +363,8 @@ bool ChoiceStrip::Key(const KeyInput &input) {
 		}
 
 		// Support Ctrl+Tab / Ctrl+Shift+Tab as well, as these are common shortcuts for tab switching even outside of browsers.
-		if (input.keyCode == NKCODE_TAB && (input.flags & KeyInputFlags::MOD_CTRL)) {
-			if (input.flags & KeyInputFlags::MOD_SHIFT) {
+		if (input.keyCode == NKCODE_TAB && (input.flags & KeyInputFlags::ModCtrl)) {
+			if (input.flags & KeyInputFlags::ModShift) {
 				if (selected_ > 0) {
 					SetSelection(selected_ - 1, true);
 				} else if (!choices_.empty()) {

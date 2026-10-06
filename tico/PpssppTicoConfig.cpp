@@ -51,7 +51,6 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "ppsspp_memstick_inserted": "enabled",
     "ppsspp_cropto16x9": "disabled",
     "ppsspp_block_transfer_gpu": "enabled",
-    "ppsspp_disable_range_culling": "disabled",
     "display_mode": "Display",
     "display_size": "16:9",
     "integer_scale": "Auto"
@@ -85,14 +84,10 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 	applyBool("ppsspp_auto_frameskip", g_Config.bAutoFrameSkip);
 	applyBool("ppsspp_frame_duplication", g_Config.bRenderDuplicateFrames);
 	applyBool("ppsspp_skip_buffer_effects", g_Config.bSkipBufferEffects);
-	applyBool("ppsspp_disable_range_culling", g_Config.bDisableRangeCulling);
 	applyBool("ppsspp_gpu_hardware_transform", g_Config.bHardwareTransform);
-	applyBool("ppsspp_software_skinning", g_Config.bSoftwareSkinning);
-	applyBool("ppsspp_hardware_tesselation", g_Config.bHardwareTessellation);
 	applyBool("ppsspp_texture_deposterize", g_Config.bTexDeposterize);
 	applyBool("ppsspp_texture_replacement", g_Config.bReplaceTextures);
 	applyBool("ppsspp_smart_2d_texture_filtering", g_Config.bSmart2DTexFiltering);
-	applyBool("ppsspp_lazy_texture_caching", g_Config.bTextureBackoffCache);
 	if (const std::string *value = FindOption(options, "ppsspp_io_timing_method")) {
 		if (*value == "Fast") {
 			g_Config.iIOTimingMethod = IOTIMING_FAST;
@@ -377,7 +372,8 @@ void ApplySwitchRequiredConfig(bool audioReady) {
 	g_Config.saveStateDirectory = Path(Paths::PpssppSaveStates);
 	g_Config.iSaveStateSlotCount = Ppsspp::SaveStateSlotCount;
 	g_Config.iCurrentStateSlot = std::clamp(g_Config.iCurrentStateSlot, 0, Ppsspp::SaveStateSlotCount - 1);
-	g_Config.flash0Directory = Path(kPpssppDataRoot) / "flash0";
+	// flash0 (and flash1) are mounted from <nand root>/flash0, where the asset installer puts them
+	g_Config.nandRootDirectory = Path(kPpssppDataRoot);
 }
 
 }  // namespace

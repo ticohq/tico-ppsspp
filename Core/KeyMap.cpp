@@ -185,7 +185,8 @@ void UpdateNativeMenuKeys() {
 		InsertIntoVector(&cancelKeys, hardcodedCancelKeys[i]);
 	}
 	if (!HasMainButtonMapping(cancelKeys)) {
-		confirmKeys.push_back(InputMapping(DEVICE_ID_ANY, confirmWithCross ? NKCODE_BUTTON_A : NKCODE_BUTTON_B));
+		// This used to push the confirm button into confirmKeys - wrong list, wrong button.
+		cancelKeys.push_back(InputMapping(DEVICE_ID_ANY, confirmWithCross ? NKCODE_BUTTON_B : NKCODE_BUTTON_A));
 	}
 
 	const InputMapping hardcodedInfoKeys[] = {
@@ -611,6 +612,17 @@ bool InputMappingToPspButton(const InputMapping &mapping, std::vector<int> *pspB
 		}
 	}
 	return found;
+}
+
+void GetAllComboMappingsNoLock(std::vector<MultiInputMapping> *combos) {
+	combos->clear();
+	for (const auto &iter : g_controllerMap) {
+		for (const auto &mapping : iter.second) {
+			if (mapping.mappings.size() > 1) {
+				combos->push_back(mapping);
+			}
+		}
+	}
 }
 
 // This is the main workhorse of the ControlMapper.

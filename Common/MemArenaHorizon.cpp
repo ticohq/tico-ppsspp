@@ -48,16 +48,18 @@ void MemArena::ReleaseSpace() {
 }
 
 void *MemArena::CreateView(s64 offset, size_t size, void *base) {
-  Result rc = svcMapProcessMemory(base, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size);
-  if (R_FAILED(rc)) {
-    printf("Fatal error creating the view... base: %p offset: %p size: %p src: %p err: %d\n",
-      (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
-  } else {
-    printf("Created the view... base: %p offset: %p size: %p src: %p err: %d\n",
-      (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
-  }
+	Result rc = svcMapProcessMemory(base, envGetOwnProcessHandle(), (u64)(memoryCodeBase + offset), size);
+	if (R_FAILED(rc)) {
+		printf("Fatal error creating the view... base: %p offset: %p size: %p src: %p err: %d\n",
+			   (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
+		// Returning base here reports success, so the caller happily uses an unmapped address
+		// and we take a fault later with nothing pointing back at this.
+		return nullptr;
+	}
 
-  return base;
+	printf("Created the view... base: %p offset: %p size: %p src: %p err: %d\n",
+		   (void *)base, (void *)offset, (void *)size, (void *)(memoryCodeBase + offset), rc);
+	return base;
 }
 
 void MemArena::ReleaseView(s64 offset, void *view, size_t size) {

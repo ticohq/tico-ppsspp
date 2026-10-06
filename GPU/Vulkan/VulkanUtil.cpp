@@ -27,9 +27,9 @@
 // Disable this on x64 android, causes problems.
 
 #if defined(_DEBUG) && !(PPSSPP_PLATFORM(ANDROID) && PPSSPP_ARCH(AMD64))
-static const bool g_Validate = true;
+static constexpr bool g_Validate = true;
 #else
-static const bool g_Validate = false;
+static constexpr bool g_Validate = false;
 #endif
 
 using namespace PPSSPP_VK;
@@ -39,7 +39,7 @@ const VkComponentMapping VULKAN_1555_SWIZZLE = { VK_COMPONENT_SWIZZLE_B, VK_COMP
 const VkComponentMapping VULKAN_565_SWIZZLE = { VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_IDENTITY };
 const VkComponentMapping VULKAN_8888_SWIZZLE = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
 
-static const BindingType g_bindingTypes[] = {
+static constexpr BindingType g_bindingTypes[] = {
 	BindingType::STORAGE_IMAGE_COMPUTE,
 	BindingType::STORAGE_BUFFER_COMPUTE,
 	BindingType::STORAGE_BUFFER_COMPUTE,
@@ -84,7 +84,7 @@ void InitVulkanCreateInfoFromConfig(VulkanContext::CreateInfo *info) {
 
 VkShaderModule CompileShaderModule(VulkanContext *vulkan, VkShaderStageFlagBits stage, const char *code, std::string *error) {
 	std::vector<uint32_t> spirv;
-	bool success = GLSLtoSPV(stage, code, GLSLVariant::VULKAN, spirv, error);
+	bool success = GLSLtoSPV(stage, code, GLSLVariant::VULKAN, spirv, error, &g_spirvCache);
 	if (!error->empty()) {
 		if (success) {
 			ERROR_LOG(Log::G3D, "Warnings in shader compilation!");
@@ -174,7 +174,10 @@ void VulkanComputeShaderManager::DestroyDeviceObjects() {
 		vulkan_->Delete().QueueDeleteDescriptorSetLayout(descriptorSetLayout_);
 	}
 	pipelines_.Iterate([&](const PipelineKey &key, VkPipeline pipeline) {
-		vulkan_->Delete().QueueDeletePipeline(pipeline);
+		// Can be null if pipeline creation failed - we cache those too, to avoid retrying.
+		if (pipeline != VK_NULL_HANDLE) {
+			vulkan_->Delete().QueueDeletePipeline(pipeline);
+		}
 	});
 	pipelines_.Clear();
 
@@ -262,9 +265,9 @@ VkDescriptorSet VulkanComputeShaderManager::GetDescriptorSet(VkImageView image, 
 	return desc;
 }
 
-VkPipeline VulkanComputeShaderManager::GetPipeline(VkShaderModule cs) {
+VkPipeline VulkanComputeShaderManager::GetPipeline(VkShaderModule cs, const char *tag) {
 	PipelineKey key{ cs };
-	VkPipeline pipeline;
+	VkPipeline pipeline = VK_NULL_HANDLE;
 	if (pipelines_.Get(key, &pipeline)) {
 		return pipeline;
 	}
@@ -278,7 +281,14 @@ VkPipeline VulkanComputeShaderManager::GetPipeline(VkShaderModule cs) {
 	pci.flags = 0;
 
 	VkResult res = vkCreateComputePipelines(vulkan_->GetDevice(), pipelineCache_, 1, &pci, nullptr, &pipeline);
-	_assert_(res == VK_SUCCESS);
+	if (res != VK_SUCCESS) {
+		ERROR_LOG(Log::G3D, "Failed to create compute pipeline from shader module (%s)", tag);
+		_dbg_assert_msg_(false, "Failed to create compute pipeline from shader module (%s)", tag);
+		// Insert a null pipeline so we don't retry every time, and don't fall through to the
+		// insert below - inserting the same key twice asserts in DenseHashMap.
+		pipelines_.Insert(key, VK_NULL_HANDLE);
+		return VK_NULL_HANDLE;
+	}
 
 	pipelines_.Insert(key, pipeline);
 	return pipeline;
@@ -286,7 +296,10 @@ VkPipeline VulkanComputeShaderManager::GetPipeline(VkShaderModule cs) {
 
 void VulkanComputeShaderManager::ClearPipelines() {
 	pipelines_.Iterate([&](const PipelineKey &key, VkPipeline pipeline) {
-		vulkan_->Delete().QueueDeletePipeline(pipeline);
+		// Can be null if pipeline creation failed - we cache those too, to avoid retrying.
+		if (pipeline != VK_NULL_HANDLE) {
+			vulkan_->Delete().QueueDeletePipeline(pipeline);
+		}
 	});
 	pipelines_.Clear();
 }

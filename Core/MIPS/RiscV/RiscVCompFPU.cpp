@@ -83,6 +83,13 @@ void RiscVJitBackend::CompIR_FCondAssign(IRInst inst) {
 
 	// FMin and FMax are used by VFPU and handle NAN/INF as just a larger exponent.
 	regs_.Map(inst);
+
+	// Allocate this before the branch below. Allocating can spill a register, and that store
+	// would then sit on the NAN-only path while the regcache believes it always ran.
+	RiscVReg isSrc1LowerReg = INVALID_REG;
+	if (!cpu_info.RiscV_Zbb)
+		isSrc1LowerReg = regs_.GetAndLockTempGPR();
+
 	FCLASS(32, SCRATCH1, regs_.F(inst.src1));
 	FCLASS(32, SCRATCH2, regs_.F(inst.src2));
 
@@ -115,7 +122,6 @@ void RiscVJitBackend::CompIR_FCondAssign(IRInst inst) {
 			MAX(SCRATCH1, SCRATCH1, SCRATCH2);
 		SetJumpTarget(skipSwapCompare);
 	} else {
-		RiscVReg isSrc1LowerReg = regs_.GetAndLockTempGPR();
 		SLT(isSrc1LowerReg, SCRATCH1, SCRATCH2);
 		// Flip the flag (to reverse the min/max) based on if both were negative.
 		XOR(isSrc1LowerReg, isSrc1LowerReg, R_RA);
@@ -158,9 +164,9 @@ void RiscVJitBackend::CompIR_FAssign(IRInst inst) {
 	case IROp::FSign:
 	{
 		regs_.Map(inst);
-		// Check if it's negative zero, either 0x10/0x08 is zero.
+		// Zero or a denormal signs as zero: 0x10/0x08 are the zeros, 0x20/0x04 the subnormals.
 		FCLASS(32, SCRATCH1, regs_.F(inst.src1));
-		ANDI(SCRATCH1, SCRATCH1, 0x18);
+		ANDI(SCRATCH1, SCRATCH1, 0x3C);
 		SEQZ(SCRATCH1, SCRATCH1);
 		// Okay, it's zero if zero, 1 otherwise.  Convert 1 to a constant 1.0.
 		// Probably non-zero is the common case, so we make that the straight line.
@@ -222,7 +228,11 @@ void RiscVJitBackend::CompIR_FCvt(IRInst inst) {
 	RiscVReg tempReg = INVALID_REG;
 	switch (inst.op) {
 	case IROp::FCvtWS:
-		CompIR_Generic(inst);
+		// The dynamic rounding mode is the game's (ApplyRoundingMode). FCVT saturates and gives
+		// INT_MAX for NaN, like the PSP.
+		regs_.Map(inst);
+		FCVT(FConv::W, FConv::S, SCRATCH1, regs_.F(inst.src1), Round::DYNAMIC);
+		FMV(FMv::W, FMv::X, regs_.F(inst.dest), SCRATCH1);
 		break;
 
 	case IROp::FCvtSW:
@@ -579,7 +589,7 @@ void RiscVJitBackend::CompIR_FSpecial(IRInst inst) {
 #error Currently hard float is required.
 #endif
 
-	auto callFuncF_F = [&](float (*func)(float)) {
+	auto callWithF10 = [&](const u8 *func) {
 		regs_.FlushBeforeCall();
 		WriteDebugProfilerStatus(IRProfilerStatus::MATH_HELPER);
 
@@ -592,6 +602,10 @@ void RiscVJitBackend::CompIR_FSpecial(IRInst inst) {
 			FL(32, F10, CTXREG, offset);
 		}
 		QuickCallFunction(func, SCRATCH1);
+	};
+
+	auto callFuncF_F = [&](float (*func)(float)) {
+		callWithF10((const u8 *)func);
 
 		regs_.MapFPR(inst.dest, MIPSMap::NOINIT);
 		// If it's already F10, we're done - MapReg doesn't actually overwrite the reg in that case.
@@ -602,7 +616,6 @@ void RiscVJitBackend::CompIR_FSpecial(IRInst inst) {
 		WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 	};
 
-	RiscVReg tempReg = INVALID_REG;
 	switch (inst.op) {
 	case IROp::FSin:
 		callFuncF_F(&vfpu_sin);
@@ -613,30 +626,45 @@ void RiscVJitBackend::CompIR_FSpecial(IRInst inst) {
 		break;
 
 	case IROp::FRSqrt:
-		tempReg = regs_.MapWithFPRTemp(inst);
-		FSQRT(32, regs_.F(inst.dest), regs_.F(inst.src1));
-
-		// Ugh, we can't really avoid a temp here.  Probably not worth a permanent one.
-		QuickFLI(32, tempReg, 1.0f, SCRATCH1);
-		FDIV(32, regs_.F(inst.dest), tempReg, regs_.F(inst.dest));
+		callFuncF_F(&vfpu_rsqrt);
 		break;
 
 	case IROp::FRecip:
-		if (inst.dest != inst.src1) {
-			// This is the easy case.
-			regs_.Map(inst);
-			LI(SCRATCH1, 1.0f);
-			FMV(FMv::W, FMv::X, regs_.F(inst.dest), SCRATCH1);
-			FDIV(32, regs_.F(inst.dest), regs_.F(inst.dest), regs_.F(inst.src1));
-		} else {
-			tempReg = regs_.MapWithFPRTemp(inst);
-			QuickFLI(32, tempReg, 1.0f, SCRATCH1);
-			FDIV(32, regs_.F(inst.dest), tempReg, regs_.F(inst.src1));
-		}
+		callFuncF_F(&vfpu_rcp);
 		break;
 
 	case IROp::FAsin:
 		callFuncF_F(&vfpu_asin);
+		break;
+
+	case IROp::FVSqrt:
+		callFuncF_F(&vfpu_sqrt);
+		break;
+
+	case IROp::FExp2:
+		callFuncF_F(&vfpu_exp2);
+		break;
+
+	case IROp::FLog2:
+		callFuncF_F(&vfpu_log2);
+		break;
+
+	case IROp::FHalfToFloat:
+		callFuncF_F(inst.src2 ? &vfpu_h2f_upper : &vfpu_h2f_lower);
+		break;
+
+	case IROp::FSinCos:
+		// The sine comes back in the low 32 bits of F10, the cosine in the high.
+		callWithF10((const u8 *)&vfpu_sincos_packed);
+		FMV(FMv::X, FMv::D, SCRATCH1, F10);
+		regs_.SpillLockFPR(inst.dest, inst.dest + 1);
+		regs_.MapFPR(inst.dest, MIPSMap::NOINIT);
+		regs_.MapFPR(inst.dest + 1, MIPSMap::NOINIT);
+		regs_.ReleaseSpillLockFPR(inst.dest, inst.dest + 1);
+		FMV(FMv::W, FMv::X, regs_.F(inst.dest), SCRATCH1);
+		SRLI(SCRATCH1, SCRATCH1, 32);
+		FMV(FMv::W, FMv::X, regs_.F(inst.dest + 1), SCRATCH1);
+		WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 		break;
 
 	default:

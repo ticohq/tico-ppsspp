@@ -78,6 +78,9 @@ void RiscVJitBackend::GenerateFixedCode(MIPSState *mipsState) {
 	{
 		// Not sure if RISC-V has any flush to zero capability?  Leaving it off for now...
 		LWU(SCRATCH2, CTXREG, offsetof(MIPSState, fcr31));
+		// FSRM only takes the low three bits, and fcr31 has plenty of other bits set (the flags
+		// at 2-6, for one) - without this we'd hand it a reserved rounding mode.
+		ANDI(SCRATCH2, SCRATCH2, 3);
 
 		// We can skip if the rounding mode is nearest (0) and flush is not set.
 		// (as restoreRoundingMode cleared it out anyway)
@@ -143,7 +146,7 @@ void RiscVJitBackend::GenerateFixedCode(MIPSState *mipsState) {
 	SaveStaticRegisters();
 	RestoreRoundingMode(true);
 	WriteDebugProfilerStatus(IRProfilerStatus::TIMER_ADVANCE);
-	QuickCallFunction(&CoreTiming::Advance, X7);
+	QuickCallFunctionR(&CoreTiming::Advance, CTXREG, X7);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 	ApplyRoundingMode(true);
 	LoadStaticRegisters();
@@ -195,7 +198,7 @@ void RiscVJitBackend::GenerateFixedCode(MIPSState *mipsState) {
 	// No block found, let's jit.  We don't need to save static regs, they're all callee saved.
 	RestoreRoundingMode(true);
 	WriteDebugProfilerStatus(IRProfilerStatus::COMPILING);
-	QuickCallFunction(&MIPSComp::JitAt, X7);
+	QuickCallFunctionR(&MIPSComp::JitAt, CTXREG, X7);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 	ApplyRoundingMode(true);
 

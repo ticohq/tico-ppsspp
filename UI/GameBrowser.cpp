@@ -25,6 +25,7 @@
 #include "Common/UI/View.h"
 #include "Common/UI/ViewGroup.h"
 #include "Common/UI/Root.h"
+#include "Common/UI/ScreenManager.h"
 
 #include "Common/Math/curves.h"
 #include "Common/Net/URL.h"
@@ -107,6 +108,16 @@ public:
 
 	void Draw(UIContext &dc) override;
 	std::string DescribeText() const override;
+	std::string SearchAlias() const override {
+		// Without the extension, or searching for "iso" would match every ISO. Only three or more
+		// letters counts as one, so a folder like "Game v1.2" keeps its version number.
+		std::string filename = gamePath_.GetFilename();
+		const std::string ext = gamePath_.GetFileExtension();
+		if (ext.size() >= 4 && ext.size() <= filename.size() && std::all_of(ext.begin() + 1, ext.end(), [](char c) { return c >= 'a' && c <= 'z'; })) {
+			filename.resize(filename.size() - ext.size());
+		}
+		return filename;
+	}
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override {
 		if (gridStyle_) {
 			w = 144 * g_Config.fGameGridScale;
@@ -238,6 +249,7 @@ void GameButton::Draw(UIContext &dc) {
 	case IdentifiedFileType::ARCHIVE_ZIP: imageIcon = ImageID("I_ARCHIVE_ZIP"); drawBackground = false; break;
 	case IdentifiedFileType::ARCHIVE_7Z: imageIcon = ImageID("I_ARCHIVE_7Z"); drawBackground = false; break;
 	case IdentifiedFileType::ARCHIVE_RAR: imageIcon = ImageID("I_ARCHIVE_RAR"); drawBackground = false; break;
+	case IdentifiedFileType::PSP_PKG: imageIcon = ImageID("I_FOLDER_UPLOAD"); drawBackground = false; break;
 	default: break;
 	}
 
@@ -461,7 +473,8 @@ void GameButton::Draw(UIContext &dc) {
 }
 
 std::string GameButton::DescribeText() const {
-	std::shared_ptr<GameInfo> ginfo = g_gameInfoCache->GetInfo(nullptr, gamePath_, GameInfoFlags::PARAM_SFO);
+	// LOW: search calls this for every game in the list, which mustn't hold up the visible ones.
+	std::shared_ptr<GameInfo> ginfo = g_gameInfoCache->GetInfo(nullptr, gamePath_, GameInfoFlags::PARAM_SFO, nullptr, GameInfoFlags::EMPTY, TaskPriority::LOW);
 	if (!ginfo->Ready(GameInfoFlags::PARAM_SFO))
 		return "...";
 	auto u = GetI18NCategory(I18NCat::UI_ELEMENTS);
@@ -578,7 +591,7 @@ void GameBrowser::LastClick(UI::EventParams &e) {
 
 void GameBrowser::BrowseClick(UI::EventParams &e) {
 	auto mm = GetI18NCategory(I18NCat::MAINMENU);
-	System_BrowseForFolder(token_, mm->T("Choose folder"), path_.GetPath(), [this](const std::string &filename, int) {
+	System_BrowseForFolder(token_, mm->T("Choose folder"), path_.GetPath(), [this](std::string_view filename, int) {
 		SetPath(Path(filename));
 	});
 }
@@ -620,7 +633,7 @@ Path GameBrowser::HomePath() {
 	if (!homePath_.empty()) {
 		return homePath_;
 	}
-#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(SWITCH) || defined(USING_WIN_UI) || PPSSPP_PLATFORM(UWP) || PPSSPP_PLATFORM(IOS)
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(SWITCH) || PPSSPP_PLATFORM(WINDOWS) || PPSSPP_PLATFORM(UWP) || PPSSPP_PLATFORM(IOS)
 	return g_Config.memStickDirectory;
 #else
 	return Path(getenv("HOME"));
@@ -783,7 +796,7 @@ void GameBrowser::Refresh() {
 			if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_TV) {
 				topBar->Add(new Choice(mm->T("Enter Path"), new LayoutParams(WRAP_CONTENT, 64.0f)))->OnClick.Add([=](UI::EventParams &) {
 					auto mm = GetI18NCategory(I18NCat::MAINMENU);
-					System_InputBoxGetString(token_, mm->T("Enter Path"), path_.GetPath().ToString(), false, [=](const char *responseString, int responseValue) {
+					System_InputBoxGetString(token_, mm->T("Enter Path"), path_.GetPath().ToString(), false, [=](std::string_view responseString, int responseValue) {
 						this->SetPath(Path(responseString));
 						});
 					});
@@ -879,11 +892,12 @@ void GameBrowser::Refresh() {
 			}
 		}
 
-		// Put RAR/ZIP files at the end to get them out of the way.
+		// Put RAR/ZIP files at the end to get them out of the way. Game update packages go here
+		// too - they're not something to boot, they're something to install.
 		// We do support unpacking some of them automatically.
 		if (browseFlags_ & BrowseFlags::ARCHIVES) {
 			fileInfo.clear();
-			path_.GetListing(fileInfo, "zip:rar:r00:r01:7z:");
+			path_.GetListing(fileInfo, "zip:rar:r00:r01:7z:pkg:");
 			if (!fileInfo.empty()) {
 				for (size_t i = 0; i < fileInfo.size(); i++) {
 					if (!fileInfo[i].isDirectory) {

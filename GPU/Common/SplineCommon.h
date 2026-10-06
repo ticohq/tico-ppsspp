@@ -27,7 +27,7 @@
 
 #include "Core/Config.h"
 
-#define HALF_CEIL(x) (x + 1) / 2 // Integer ceil = (int)ceil((float)x / 2.0f)
+inline int half_ceil(int x) { return (x + 1) / 2; } // Integer ceil = (int)ceil((float)x / 2.0f)
 
 class SimpleBufferManager;
 
@@ -61,11 +61,20 @@ struct SurfaceInfo {
 			break;
 		case SplineQuality::MEDIUM_QUALITY:
 			// Don't cut below 2, though.
-			if (tess_u > 2) tess_u = HALF_CEIL(tess_u);
-			if (tess_v > 2) tess_v = HALF_CEIL(tess_v);
+			if (tess_u > 2) tess_u = half_ceil(tess_u);
+			if (tess_v > 2) tess_v = half_ceil(tess_v);
 			break;
 		default:
 			break;
+		}
+	}
+
+	// Only the larger factor, so a lopsided patch keeps at least one step along its short axis.
+	void ReduceLargerTess() {
+		if (tess_u >= tess_v) {
+			tess_u--;
+		} else {
+			tess_v--;
 		}
 	}
 };
@@ -74,13 +83,14 @@ struct BezierSurface : public SurfaceInfo {
 	using WeightType = Bezier3DWeight;
 
 	int num_verts_per_patch;
+	// Evaluate as the GE does, bit exact but slower (the software renderer).
+	bool geExact = false;
 
 	void Init(int maxVertices) {
 		SurfaceInfo::BaseInit();
 		// Downsample until it fits, in case crazy tessellation factors are sent.
-		while ((tess_u + 1) * (tess_v + 1) * num_patches_u * num_patches_v > maxVertices) {
-			tess_u--;
-			tess_v--;
+		while ((tess_u + 1) * (tess_v + 1) * num_patches_u * num_patches_v > maxVertices && (tess_u > 1 || tess_v > 1)) {
+			ReduceLargerTess();
 		}
 		num_verts_per_patch = (tess_u + 1) * (tess_v + 1);
 	}
@@ -112,13 +122,14 @@ struct SplineSurface : public SurfaceInfo {
 	using WeightType = Spline3DWeight;
 
 	int num_vertices_u;
+	// Evaluate as the GE does, bit exact but slower (the software renderer).
+	bool geExact = false;
 
 	void Init(int maxVertices) {
 		SurfaceInfo::BaseInit();
 		// Downsample until it fits, in case crazy tessellation factors are sent.
-		while ((num_patches_u * tess_u + 1) * (num_patches_v * tess_v + 1) > maxVertices) {
-			tess_u--;
-			tess_v--;
+		while ((num_patches_u * tess_u + 1) * (num_patches_v * tess_v + 1) > maxVertices && (tess_u > 1 || tess_v > 1)) {
+			ReduceLargerTess();
 		}
 		num_vertices_u = num_patches_u * tess_u + 1;
 	}
@@ -140,7 +151,8 @@ struct SplineSurface : public SurfaceInfo {
 };
 
 struct Weight {
-	float basis[4], deriv[4];
+	float basis[4];
+	float deriv[4];
 };
 
 template<class T>
@@ -207,10 +219,10 @@ struct NAME { \
 	} \
 };
 
-template<typename Func, int NumParams, class Dispatcher> 
+template<typename Func, int NumParams, class Dispatcher>
 class TemplateParameterDispatcher {
 
-	/* Store all combinations of template functions into an array */
+	// Store all combinations of template functions into an array
 	template<int LoopCount, int Index = 0, bool ...Params>
 	struct Initializer {
 		static void Init(Func funcs[]) {
@@ -218,7 +230,7 @@ class TemplateParameterDispatcher {
 			Initializer<LoopCount - 1, (Index << 1) + 0, false, Params...>::Init(funcs); // false
 		}
 	};
- 	/* Specialized for terminates the recursive loop */
+	// Specialized for terminates the recursive loop
 	template<int Index, bool ...Params>
 	struct Initializer<0, Index, Params...> {
 		static void Init(Func funcs[]) {
@@ -226,19 +238,19 @@ class TemplateParameterDispatcher {
 		}
 	};
 
-private: 
-	Func funcs[1 << NumParams]; /* Function pointers array */ 
-public: 
-	TemplateParameterDispatcher() { 
-		Initializer<NumParams>::Init(funcs); 
-	} 
- 
-	Func GetFunc(const bool params[]) const { 
- 		/* Convert bool parameters to index of the array */ 
-		int index = 0; 
-		for (int i = 0; i < NumParams; ++i) 
-			index |= params[i] << i; 
- 
-		return funcs[index]; 
-	} 
+private:
+	Func funcs[1 << NumParams]; /* Function pointers array */
+public:
+	TemplateParameterDispatcher() {
+		Initializer<NumParams>::Init(funcs);
+	}
+
+	Func GetFunc(const bool params[]) const {
+		// Convert bool parameters to index of the array
+		int index = 0;
+		for (int i = 0; i < NumParams; ++i) {
+			index |= params[i] << i;
+		}
+		return funcs[index];
+	}
 };

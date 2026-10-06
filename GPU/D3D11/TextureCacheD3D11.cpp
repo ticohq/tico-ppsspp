@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cfloat>
 
+#include "Common/CommonWindows.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 
@@ -56,7 +57,7 @@ static Draw::DataFormat FromD3D11Format(u32 fmt) {
 	case DXGI_FORMAT_B5G5R5A1_UNORM: return Draw::DataFormat::A1R5G5B5_UNORM_PACK16;
 	case DXGI_FORMAT_B5G6R5_UNORM: return Draw::DataFormat::R5G6B5_UNORM_PACK16;
 	case DXGI_FORMAT_R8_UNORM: return Draw::DataFormat::R8_UNORM;
-	case DXGI_FORMAT_B8G8R8A8_UNORM: default: return Draw::DataFormat::R8G8B8A8_UNORM;
+	case DXGI_FORMAT_R8G8B8A8_UNORM: default: return Draw::DataFormat::R8G8B8A8_UNORM;
 	}
 }
 
@@ -68,7 +69,7 @@ static DXGI_FORMAT ToDXGIFormat(Draw::DataFormat fmt) {
 	case Draw::DataFormat::BC4_UNORM_BLOCK: return DXGI_FORMAT_BC4_UNORM;
 	case Draw::DataFormat::BC5_UNORM_BLOCK: return DXGI_FORMAT_BC5_UNORM;
 	case Draw::DataFormat::BC7_UNORM_BLOCK: return DXGI_FORMAT_BC7_UNORM;
-	case Draw::DataFormat::R8G8B8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
+	case Draw::DataFormat::R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
 	default: _dbg_assert_(false); return DXGI_FORMAT_UNKNOWN;
 	}
 }
@@ -89,7 +90,7 @@ HRESULT SamplerCacheD3D11::GetOrCreateSampler(ID3D11Device *device, const Sample
 	samp.AddressV = key.tClamp ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
 	samp.AddressW = samp.AddressU;  // Mali benefits from all clamps being the same, and this one is irrelevant.
 	if (key.aniso) {
-		samp.MaxAnisotropy = (float)(1 << g_Config.iAnisotropyLevel);
+		samp.MaxAnisotropy = (float)(1 << key.anisoLevel);
 	} else {
 		samp.MaxAnisotropy = 1.0f;
 	}
@@ -174,13 +175,18 @@ void TextureCacheD3D11::DestroyDeviceObjects() {
 }
 
 void TextureCacheD3D11::DeviceLost() {
-	Clear(false);
+	TextureCacheCommon::DeviceLost();
 	DestroyDeviceObjects();
 	draw_ = nullptr;
+	device_ = nullptr;
+	context_ = nullptr;
 }
 
-void TextureCacheD3D11::DeviceRestore(Draw::DrawContext *draw) { 
-	draw_ = draw;
+void TextureCacheD3D11::DeviceRestore(Draw::DrawContext *draw) {
+	// The restored context can be a new device, so don't keep the old pointers.
+	device_ = (ID3D11Device *)draw->GetNativeObject(Draw::NativeObject::DEVICE);
+	context_ = (ID3D11DeviceContext *)draw->GetNativeObject(Draw::NativeObject::CONTEXT);
+	TextureCacheCommon::DeviceRestore(draw);
 	InitDeviceObjects();
 }
 
@@ -208,42 +214,6 @@ void TextureCacheD3D11::ForgetLastTexture() {
 	context_->PSSetShaderResources(0, 4, nullTex);
 }
 
-void TextureCacheD3D11::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBase, bool clutIndexIsSimple) {
-	const u32 clutBaseBytes = clutBase * (clutFormat == GE_CMODE_32BIT_ABGR8888 ? sizeof(u32) : sizeof(u16));
-	// Technically, these extra bytes weren't loaded, but hopefully it was loaded earlier.
-	// If not, we're going to hash random data, which hopefully doesn't cause a performance issue.
-	//
-	// TODO: Actually, this seems like a hack.  The game can upload part of a CLUT and reference other data.
-	// clutTotalBytes_ is the last amount uploaded.  We should hash clutMaxBytes_, but this will often hash
-	// unrelated old entries for small palettes.
-	// Adding clutBaseBytes may just be mitigating this for some usage patterns.
-	const u32 clutExtendedBytes = std::min(clutTotalBytes_ + clutBaseBytes, clutMaxBytes_);
-
-	if (replacer_.Enabled())
-		clutHash_ = XXH32((const char *)clutBufRaw_, clutExtendedBytes, 0xC0108888);
-	else
-		clutHash_ = XXH3_64bits((const char *)clutBufRaw_, clutExtendedBytes) & 0xFFFFFFFF;
-	clutBuf_ = clutBufRaw_;
-
-	// Special optimization: fonts typically draw clut4 with just alpha values in a single color.
-	clutAlphaLinear_ = false;
-	clutAlphaLinearColor_ = 0;
-	if (clutFormat == GE_CMODE_16BIT_ABGR4444 && clutIndexIsSimple) {
-		const u16_le *clut = GetCurrentClut<u16_le>();
-		clutAlphaLinear_ = true;
-		clutAlphaLinearColor_ = clut[15] & 0x0FFF;
-		for (int i = 0; i < 16; ++i) {
-			u16 step = clutAlphaLinearColor_ | (i << 12);
-			if (clut[i] != step) {
-				clutAlphaLinear_ = false;
-				break;
-			}
-		}
-	}
-
-	clutLastFormat_ = gstate.clutformat;
-}
-
 void TextureCacheD3D11::BindTexture(TexCacheEntry *entry) {
 	if (!entry) {
 		ID3D11ShaderResourceView *textureView = nullptr;
@@ -255,15 +225,9 @@ void TextureCacheD3D11::BindTexture(TexCacheEntry *entry) {
 		context_->PSSetShaderResources(0, 1, &textureView);
 		lastBoundTexture_ = textureView;
 	}
-	int maxLevel = (entry->status & TexCacheEntry::STATUS_NO_MIPS) ? 0 : entry->maxLevel;
-	SamplerCacheKey samplerKey = GetSamplingParams(maxLevel, entry);
-	ComPtr<ID3D11SamplerState> state;
-	samplerCache_.GetOrCreateSampler(device_, samplerKey, &state);
-	context_->PSSetSamplers(0, 1, state.GetAddressOf());
-	gstate_c.SetUseShaderDepal(ShaderDepalMode::OFF);
 }
 
-void TextureCacheD3D11::ApplySamplingParams(const SamplerCacheKey &key) {
+void TextureCacheD3D11::ApplySamplerByKey(const SamplerCacheKey &key) {
 	ComPtr<ID3D11SamplerState> state;
 	samplerCache_.GetOrCreateSampler(device_, key, &state);
 	context_->PSSetSamplers(0, 1, state.GetAddressOf());
@@ -290,7 +254,7 @@ void TextureCacheD3D11::BuildTexture(TexCacheEntry *const entry) {
 	if (plan.doReplace) {
 		dstFmt = ToDXGIFormat(plan.replaced->Format());
 	} else if (plan.scaleFactor > 1 || plan.saveTexture) {
-		dstFmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+		dstFmt = DXGI_FORMAT_R8G8B8A8_UNORM;
 	} else if (plan.decodeToClut8) {
 		dstFmt = DXGI_FORMAT_R8_UNORM;
 	}
@@ -301,12 +265,24 @@ void TextureCacheD3D11::BuildTexture(TexCacheEntry *const entry) {
 	ID3D11Resource *texture = DxTex(entry);
 	_assert_(texture == nullptr);
 
-	// The PSP only supports 8 mip levels, but we support more in the texture replacer. 20 will never run out.
-	D3D11_SUBRESOURCE_DATA subresData[20]{};
+	// The PSP only supports 8 mip levels, but we support more in the texture replacer. 16 will never run out,
+	// D3D11 caps textures at 16384 pixels anyway.
+	D3D11_SUBRESOURCE_DATA subresData[16]{};
+
+	auto freeSubresData = [&subresData]() {
+		for (size_t i = 0; i < ARRAY_SIZE(subresData); i++) {
+			if (subresData[i].pSysMem) {
+				FreeAlignedMemory((void *)subresData[i].pSysMem);
+				subresData[i].pSysMem = nullptr;
+			}
+		}
+	};
 
 	if (plan.depth == 1) {
 		// We don't yet have mip generation, so clamp the number of levels to the ones we can load directly.
 		levels = std::min(plan.levelsToCreate, plan.levelsToLoad);
+		// Only the 2D path indexes subresData per level - the 3D path puts everything in slot 0.
+		_dbg_assert_(levels <= (int)ARRAY_SIZE(subresData));
 	} else {
 		levels = plan.depth;
 	}
@@ -339,7 +315,7 @@ void TextureCacheD3D11::BuildTexture(TexCacheEntry *const entry) {
 			if (plan.scaleFactor > 1) {
 				bpp = 4;
 			} else {
-				bpp = dstFmt == DXGI_FORMAT_B8G8R8A8_UNORM ? 4 : 2;
+				bpp = dstFmt == DXGI_FORMAT_R8G8B8A8_UNORM ? 4 : 2;
 			}
 			stride = std::max(mipWidth * bpp, 16);
 			dataSize = stride * mipHeight;
@@ -361,6 +337,7 @@ void TextureCacheD3D11::BuildTexture(TexCacheEntry *const entry) {
 
 		if (!data) {
 			ERROR_LOG(Log::G3D, "Ran out of RAM trying to allocate a temporary texture upload buffer (%dx%d)", mipWidth, mipHeight);
+			freeSubresData();
 			return;
 		}
 
@@ -421,31 +398,21 @@ void TextureCacheD3D11::BuildTexture(TexCacheEntry *const entry) {
 	entry->texturePtr = texture;
 	entry->textureView = view;
 
-	for (int i = 0; i < 12; i++) {
-		if (subresData[i].pSysMem) {
-			FreeAlignedMemory((void *)subresData[i].pSysMem);
-		}
-	}
+	freeSubresData();
 
 	// Signal that we support depth textures so use it as one.
 	if (plan.depth > 1) {
-		entry->status |= TexCacheEntry::STATUS_3D;
+		entry->status |= TexStatus::IS_3D;
 	}
 
 	if (levels == 1) {
-		entry->status |= TexCacheEntry::STATUS_NO_MIPS;
+		entry->status |= TexStatus::NO_MIPS;
 	} else {
-		entry->status &= ~TexCacheEntry::STATUS_NO_MIPS;
+		entry->status &= ~TexStatus::NO_MIPS;
 	}
 
 	if (plan.doReplace) {
-		entry->SetAlphaStatus(TexCacheEntry::TexStatus(plan.replaced->AlphaStatus()));
-
-		if (!Draw::DataFormatIsBlockCompressed(plan.replaced->Format(), nullptr)) {
-			entry->status |= TexCacheEntry::STATUS_BGRA;
-		}
-	} else {
-		entry->status |= TexCacheEntry::STATUS_BGRA;
+		entry->SetAlphaStatus(plan.replaced->AlphaStatus());
 	}
 }
 
@@ -458,15 +425,15 @@ DXGI_FORMAT GetClutDestFormatD3D11(GEPaletteFormat format) {
 	case GE_CMODE_16BIT_BGR5650:
 		return DXGI_FORMAT_B5G6R5_UNORM;
 	case GE_CMODE_32BIT_ABGR8888:
-		return DXGI_FORMAT_B8G8R8A8_UNORM;
+		return DXGI_FORMAT_R8G8B8A8_UNORM;
 	}
 	// Should never be here !
-	return DXGI_FORMAT_B8G8R8A8_UNORM;
+	return DXGI_FORMAT_R8G8B8A8_UNORM;
 }
 
 DXGI_FORMAT TextureCacheD3D11::GetDestFormat(GETextureFormat format, GEPaletteFormat clutFormat) const {
 	if (!gstate_c.Use(GPU_USE_16BIT_FORMATS)) {
-		return DXGI_FORMAT_B8G8R8A8_UNORM;
+		return DXGI_FORMAT_R8G8B8A8_UNORM;
 	}
 
 	switch (format) {
@@ -486,23 +453,28 @@ DXGI_FORMAT TextureCacheD3D11::GetDestFormat(GETextureFormat format, GEPaletteFo
 	case GE_TFMT_DXT3:
 	case GE_TFMT_DXT5:
 	default:
-		return DXGI_FORMAT_B8G8R8A8_UNORM;
+		return DXGI_FORMAT_R8G8B8A8_UNORM;
 	}
 }
 
 bool TextureCacheD3D11::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level, bool *isFramebuffer) {
-	SetTexture();
-	if (!nextTexture_) {
-		return GetCurrentFramebufferTextureDebug(buffer, isFramebuffer);
+	// Apply texture may need to rebuild the texture if we're about to render, or bind a framebuffer.
+	TextureApplyResult textureResult = ApplyTexture(true);
+	if (textureResult.framebuffer) {
+		*isFramebuffer = true;
+		return GetFramebufferTextureDebug(textureResult.framebuffer, textureResult.framebufferTextureChannel, buffer);
 	}
 
-	// Apply texture may need to rebuild the texture if we're about to render, or bind a framebuffer.
-	TexCacheEntry *entry = nextTexture_;
-	ApplyTexture();
+	const TexCacheEntry *entry = textureResult.texCacheEntry;
+	if (!entry) {
+		return false;
+	}
 
 	ID3D11Texture2D *texture = (ID3D11Texture2D *)entry->texturePtr;
-	if (!texture)
+	if (!texture) {
+		// Hm.
 		return false;
+	}
 
 	D3D11_TEXTURE2D_DESC desc;
 	texture->GetDesc(&desc);
@@ -511,7 +483,7 @@ bool TextureCacheD3D11::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level
 	int height = desc.Height >> level;
 
 	switch (desc.Format) {
-	case DXGI_FORMAT_B8G8R8A8_UNORM:
+	case DXGI_FORMAT_R8G8B8A8_UNORM:
 		buffer.Allocate(width, height, GPU_DBG_FORMAT_8888);
 		break;
 

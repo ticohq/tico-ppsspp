@@ -211,6 +211,8 @@ void RiscVJitBackend::OverwriteExit(int srcOffset, int len, int block_num) {
 		RiscVEmitter emitter(GetBasePtr() + srcOffset, writable);
 		emitter.QuickJ(SCRATCH1, GetBasePtr() + nativeBlock->checkedOffset);
 		int bytesWritten = (int)(emitter.GetWritableCodePtr() - writable);
+		// QuickJ is 4, 8 or 12 bytes depending on the distance, and the hole is only 8.
+		_dbg_assert_(bytesWritten <= MIN_BLOCK_EXIT_LEN);
 		if (bytesWritten < len)
 			emitter.ReserveCodeSpace(len - bytesWritten);
 		emitter.FlushIcache();
@@ -260,7 +262,7 @@ void RiscVJitBackend::CompIR_Interpret(IRInst inst) {
 		QuickCallFunction(&NotifyMIPSInterpret, SCRATCH2);
 	}
 	LI(X10, (int32_t)inst.constant);
-	QuickCallFunction((const u8 *)MIPSGetInterpretFunc(op), SCRATCH2);
+	QuickCallFunction((const u8 *)&MIPSInterpretTrampoline, SCRATCH2);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 	LoadStaticRegisters();
 }

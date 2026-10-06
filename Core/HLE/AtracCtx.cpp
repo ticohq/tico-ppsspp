@@ -141,7 +141,7 @@ void Atrac::DoState(PointerWrap &p) {
 
 	// Make sure to do this late; it depends on track parameters.
 	if (p.mode == p.MODE_READ && bufferState_ != ATRAC_STATUS_NO_DATA) {
-		CreateDecoder(track_.codecType, track_.bytesPerFrame, track_.channels);
+		CreateDecoder(track_.codecType, track_.bytesPerFrame, track_.channels, track_.jointStereo != 0);
 	}
 
 	if (s >= 2 && s < 9) {
@@ -165,7 +165,7 @@ void Atrac::ResetData() {
 }
 
 u8 *Atrac::BufferStart() {
-	return ignoreDataBuf_ ? Memory::GetPointerWrite(first_.addr) : dataBuf_;
+	return ignoreDataBuf_ ? Memory::GetPointerWriteOrException(first_.addr) : dataBuf_;
 }
 
 AtracBase::~AtracBase() {
@@ -301,26 +301,27 @@ void Atrac::CalculateStreamInfo(u32 *outReadOffset) {
 	}
 }
 
-void AtracBase::CreateDecoder(int codecType, int bytesPerFrame, int channels) {
+void AtracBase::CreateDecoder(int codecType, int bytesPerFrame, int channels, bool jointStereo) {
 	if (decoder_) {
 		delete decoder_;
 	}
 
 	// First, init the standalone decoder.
 	if (codecType == PSP_CODEC_AT3) {
-		// TODO: This is maybe not entirely reliable? Mui Mui house in LocoRoco 2 fails. Although also fails
-		// when I override this, so maybe the issue is something different...
-		bool jointStereo = IsAtrac3StreamJointStereo(codecType, bytesPerFrame, channels);
-
-		// We don't pull this from the RIFF so that we can support OMA also.
+		// The layout comes from the frame size and the joint stereo flag, as on hardware. A mono
+		// decoder still fills both output channels when the track says stereo.
+		int decoderChannels = channels;
+		if (!Atrac3DecoderChannels(bytesPerFrame, jointStereo, &decoderChannels)) {
+			WARN_LOG(Log::ME, "Atrac3: %d-byte frames with joint stereo %d aren't in libatrac3plus's table, decoding as %d channels", bytesPerFrame, (int)jointStereo, channels);
+		}
+		// Built here rather than taken from the RIFF, so that OMA works too.
 		uint8_t extraData[14]{};
-		// The only thing that changes are the jointStereo_ values.
 		extraData[0] = 1;
-		extraData[3] = channels << 3;
+		extraData[3] = decoderChannels << 3;
 		extraData[6] = jointStereo;
 		extraData[8] = jointStereo;
 		extraData[10] = 1;
-		decoder_ = CreateAtrac3Audio(channels, bytesPerFrame, extraData, sizeof(extraData));
+		decoder_ = CreateAtrac3Audio(decoderChannels, bytesPerFrame, extraData, sizeof(extraData));
 	} else {
 		decoder_ = CreateAtrac3PlusAudio(channels, bytesPerFrame);
 	}
@@ -465,7 +466,7 @@ int Atrac::SetData(const Track &track, u32 buffer, u32 readSize, u32 bufferSize,
 		u32 copybytes = std::min(bufferSize, track_.fileSize);
 		Memory::Memcpy(dataBuf_, buffer, copybytes, "AtracSetData");
 	}
-	CreateDecoder(track.codecType, track.bytesPerFrame, track.channels);
+	CreateDecoder(track.codecType, track.bytesPerFrame, track.channels, track.jointStereo != 0);
 	INFO_LOG(Log::Atrac, "Atrac::SetData (buffer=%08x, readSize=%d, bufferSize=%d): %s %s (%d channels) audio", buffer, readSize, bufferSize, codecName, channelName, track_.channels);
 	INFO_LOG(Log::Atrac, "BufferState: %s", AtracStatusToString(bufferState_));
 	INFO_LOG(Log::Atrac,
@@ -942,7 +943,7 @@ void Atrac::InitLowLevel(const Atrac3LowLevelParams &params, int codecType) {
 	track_.fileSize = track_.bytesPerFrame;  // not really meaningful
 	bufferState_ = ATRAC_STATUS_LOW_LEVEL;
 	currentSample_ = 0;
-	CreateDecoder(codecType, track_.bytesPerFrame, track_.channels);
+	CreateDecoder(codecType, track_.bytesPerFrame, track_.channels, track_.jointStereo != 0);
 	WriteContextToPSPMem();
 }
 
@@ -960,15 +961,24 @@ void Atrac::CheckForSas() {
 }
 
 int Atrac::EnqueueForSas(u32 bufPtr, u32 bytesToAdd) {
-	int addbytes = std::min(bytesToAdd, track_.fileSize - first_.fileoffset - track_.FirstOffsetExtra());
-	Memory::Memcpy(dataBuf_ + first_.fileoffset + track_.FirstOffsetExtra(), bufPtr, addbytes, "AtracAddStreamData");
+	// Compute in signed 64-bit so an attacker-controlled fileoffset /
+	// FirstOffsetExtra can't underflow the space-left clamp and leave
+	// addbytes unclamped.
+	const s64 destOffset = (s64)first_.fileoffset + track_.FirstOffsetExtra();
+	const s64 spaceLeft = (s64)track_.fileSize - destOffset;
+	s64 addbytes = std::min<s64>((s64)bytesToAdd, spaceLeft);
+	if (addbytes < 0)
+		addbytes = 0;
+	if (addbytes > 0) {
+		Memory::Memcpy(dataBuf_ + destOffset, bufPtr, (u32)addbytes, "AtracAddStreamData");
+	}
 	first_.size += bytesToAdd;
 	if (first_.size >= track_.fileSize) {
 		first_.size = track_.fileSize;
 		if (bufferState_ == ATRAC_STATUS_HALFWAY_BUFFER)
 			bufferState_ = ATRAC_STATUS_ALL_DATA_LOADED;
 	}
-	first_.fileoffset += addbytes;
+	first_.fileoffset += (u32)addbytes;
 	// refresh context_
 	WriteContextToPSPMem();
 	return 0;

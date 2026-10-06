@@ -31,6 +31,7 @@
 #include "Common/UI/PopupScreens.h"
 #include "Common/UI/ViewGroup.h"
 #include "Common/UI/AsyncImageFileView.h"
+#include "Common/UI/ScreenManager.h"
 #include "UI/SavedataScreen.h"
 #include "UI/MainScreen.h"
 #include "UI/GameInfoCache.h"
@@ -85,8 +86,8 @@ SavedataView::SavedataView(UIContext &dc, const Path &savePath, IdentifiedFileTy
 		Add(new Spacer(3.0));
 	} else {
 		_dbg_assert_(type == IdentifiedFileType::PPSSPP_SAVESTATE);
-		Path image_path = savePath.WithReplacedExtension(".ppst", ".jpg");
-		if (File::Exists(image_path)) {
+		Path image_path;
+		if (savePath.WithReplacedExtension(".ppst", ".jpg", &image_path) && File::Exists(image_path)) {
 			toprow->Add(new AsyncImageFileView(image_path, IS_KEEP_ASPECT, new LinearLayoutParams(480, 272, Margins(10, 0))));
 		} else {
 			auto sa = GetI18NCategory(I18NCat::SAVEDATA);
@@ -672,7 +673,7 @@ void SavedataScreen::CreateExtraButtons(UI::ViewGroup *verticalLayout, int margi
 void SavedataScreen::OnSearch(UI::EventParams &e) {
 	if (System_GetPropertyBool(SYSPROP_HAS_TEXT_INPUT_DIALOG)) {
 		auto di = GetI18NCategory(I18NCat::DIALOG);
-		System_InputBoxGetString(GetRequesterToken(), di->T("Filter"), searchFilter_, false, [](const std::string &value, int ivalue) {
+		System_InputBoxGetString(GetRequesterToken(), di->T("Filter"), searchFilter_, false, [](std::string_view value, int ivalue) {
 			System_PostUIMessage(UIMessage::SAVEDATA_SEARCH, value);
 		});
 	}

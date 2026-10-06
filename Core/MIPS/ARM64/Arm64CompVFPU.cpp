@@ -18,6 +18,7 @@
 #include "ppsspp_config.h"
 #if PPSSPP_ARCH(ARM64)
 
+#include <cfloat>
 #include <cmath>
 #include "Common/Arm64Emitter.h"
 #include "Common/CPUDetect.h"
@@ -61,6 +62,34 @@ namespace MIPSComp {
 
 	// Vector regs can overlap in all sorts of swizzled ways.
 	// This does allow a single overlap in sregs[i].
+	// True if the prefix only touches lanes the op has. A position past the size may only be the
+	// identity, and a position within it may not name a lane past it (which zeroes the result lane
+	// on hardware, see cpu/vfpu/prefix_ctrl - the interpreter handles that).
+	static bool IsPrefixWithinSize(u32 prefix, VectorSize sz) {
+		int n = GetNumVectorElements(sz);
+		for (int i = 0; i < 4; i++) {
+			int regnum = (prefix >> (i * 2)) & 3;
+			int abs = (prefix >> (8 + i)) & 1;
+			int negate = (prefix >> (16 + i)) & 1;
+			int constants = (prefix >> (12 + i)) & 1;
+			if (constants) {
+				continue;
+			}
+			if (i >= n) {
+				if (abs || negate || regnum != i)
+					return false;
+			} else if (regnum >= n) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static bool IsPrefixWithinSize(u32 prefix, MIPSOpcode op) {
+		return IsPrefixWithinSize(prefix, GetVecSize(op));
+	}
+
 	static bool IsOverlapSafeAllowS(int dreg, int di, int sn, u8 sregs[], int tn = 0, u8 tregs[] = NULL)
 	{
 		for (int i = 0; i < sn; ++i) {
@@ -206,13 +235,21 @@ namespace MIPSComp {
 		CONDITIONAL_DISABLE(LSU_VFPU);
 		CheckMemoryBreakpoint();
 
+		if (js.kernelMode) {
+			// Send all memory accesses to the interpreter in kernel mode.
+			// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+			// NOTE: This should be done before the $zr check in case there are reads with side effects.
+			DISABLE;
+			return;
+		}
+
 		s32 offset = (signed short)(op & 0xFFFC);
 		int vt = ((op >> 16) & 0x1f) | ((op & 3) << 5);
 		MIPSGPReg rs = _RS;
 
 		std::vector<FixupBranch> skips;
 		switch (op >> 26) {
-		case 50: //lv.s  // VI(vt) = Memory::Read_U32(addr);
+		case 50: // lv.s
 		{
 			if (!gpr.IsImm(rs) && jo.cachePointers && g_Config.bFastMemory && (offset & 3) == 0 && offset >= 0 && offset < 16384) {
 				gpr.MapRegAsPointer(rs);
@@ -245,7 +282,7 @@ namespace MIPSComp {
 		}
 			break;
 
-		case 58: //sv.s   // Memory::Write_U32(VI(vt), addr);
+		case 58: // sv.s
 		{
 			if (!gpr.IsImm(rs) && jo.cachePointers && g_Config.bFastMemory && (offset & 3) == 0 && offset >= 0 && offset < 16384) {
 				gpr.MapRegAsPointer(rs);
@@ -287,6 +324,13 @@ namespace MIPSComp {
 	void Arm64Jit::Comp_SVQ(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(LSU_VFPU);
 		CheckMemoryBreakpoint();
+
+		if (js.kernelMode) {
+			// Send all memory accesses to the interpreter in kernel mode.
+			// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+			DISABLE;
+			return;
+		}
 
 		int imm = (signed short)(op&0xFFFC);
 		int vt = (((op >> 16) & 0x1f)) | ((op&1) << 5);
@@ -377,8 +421,8 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_VVectorInit(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(VFPU_XFER);
-		// WARNING: No prefix support!
-		if (js.HasUnknownPrefix()) {
+		// vzero/vone are vmov with a constant forced into the S prefix, so a pending one changes them.
+		if (js.HasUnknownPrefix() || js.HasSPrefix()) {
 			DISABLE;
 		}
 
@@ -411,7 +455,8 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_VIdt(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(VFPU_XFER);
-		if (js.HasUnknownPrefix()) {
+		// Like vone, a pending S prefix changes the result.
+		if (js.HasUnknownPrefix() || js.HasSPrefix()) {
 			DISABLE;
 		}
 
@@ -535,7 +580,7 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_Vhoriz(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(VFPU_VEC);
-		if (js.HasUnknownPrefix()) {
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix()) {
 			DISABLE;
 		}
 
@@ -613,7 +658,11 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_VecDo3(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(VFPU_VEC);
-		if (js.HasUnknownPrefix()) {
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || !IsPrefixWithinSize(js.prefixT, op)) {
+			DISABLE;
+		}
+		// vdiv applies the prefixes to its last lane only, from position 0.
+		if (((op >> 23) & 7) == 7 && GetVecSize(op) != V_Single && !js.HasNoPrefix()) {
 			DISABLE;
 		}
 
@@ -736,10 +785,14 @@ namespace MIPSComp {
 					break;
 				}
 				case 6:  // vsge
-					DISABLE;  // pending testing
-					break;
 				case 7:  // vslt
-					DISABLE;  // pending testing
+					if (i == 0) {
+						fp.MOVI2F(S0, 1.0f, SCRATCH1);
+						fp.MOVI2F(S1, 0.0f, SCRATCH1);
+					}
+					// GE and MI are both false for unordered, so NaN gives 0 either way.
+					fp.FCMP(fpr.V(sregs[i]), fpr.V(tregs[i]));
+					fp.FCSEL(fpr.V(tempregs[i]), S0, S1, ((op >> 23) & 7) == 6 ? CC_GE : CC_MI);
 					break;
 				}
 				break;
@@ -766,32 +819,53 @@ namespace MIPSComp {
 			DISABLE;
 		}
 
+		// The prefix rules here follow the IR frontend, which follows the interpreter and the
+		// prefix tests in pspautotests. What's not handled goes to the interpreter.
+		int optype = (op >> 16) & 0x1f;
+		if (optype == 0) {
+			if (!IsPrefixWithinSize(js.prefixS, op))
+				DISABLE;
+		} else if (optype == 1 || optype == 2) {
+			// vabs and vneg are vmov with the abs/negate bit forced on, so a negate in the S prefix
+			// doesn't negate twice. D prefix is fine for these, and used sometimes.
+			if (js.HasSPrefix())
+				DISABLE;
+		} else if (optype == 5 && js.HasDPrefix()) {
+			// vsat1 doesn't apply the D saturation.
+			DISABLE;
+		}
+		if (optype >= 16 && !js.HasNoPrefix()) {
+			// These apply the S and D prefixes to their last lane only, from prefix position 0.
+			// That's the whole vector for a single, so only that case is handled here.
+			if (GetVecSize(op) != V_Single)
+				DISABLE;
+			if (!IsPrefixWithinSize(js.prefixS, op))
+				DISABLE;
+			// The negative ones seem to use negate flags as a prefix hack.
+			if (optype >= 24 && (js.prefixS & 0x000F0000) != 0)
+				DISABLE;
+		}
+
 		// Pre-processing: Eliminate silly no-op VMOVs, common in Wipeout Pure
-		if (((op >> 16) & 0x1f) == 0 && _VS == _VD && js.HasNoPrefix()) {
+		if (optype == 0 && _VS == _VD && js.HasNoPrefix()) {
 			return;
 		}
 
-		// Catch the disabled operations immediately so we don't map registers unnecessarily later.
-		// Move these down to the big switch below as they are implemented.
+		// The special functions call the exact C versions.
 		switch ((op >> 16) & 0x1f) {
-		case 18: // d[i] = sinf((float)M_PI_2 * s[i]); break; //vsin
-			DISABLE;
-			break;
-		case 19: // d[i] = cosf((float)M_PI_2 * s[i]); break; //vcos
-			DISABLE;
-			break;
-		case 20: // d[i] = powf(2.0f, s[i]); break; //vexp2
-			DISABLE;
-			break;
-		case 21: // d[i] = logf(s[i])/log(2.0f); break; //vlog2
-			DISABLE;
-			break;
-		case 26: // d[i] = -sinf((float)M_PI_2 * s[i]); break; // vnsin
-			DISABLE;
-			break;
-		case 28: // d[i] = 1.0f / expf(s[i] * (float)M_LOG2E); break; // vrexp2
-			DISABLE;
-			break;
+		case 16: // vrcp
+		case 17: // vrsq
+		case 18: // vsin
+		case 19: // vcos
+		case 20: // vexp2
+		case 21: // vlog2
+		case 22: // vsqrt
+		case 23: // vasin
+		case 24: // vnrcp
+		case 26: // vnsin
+		case 28: // vrexp2
+			CompVV2OpCall(op);
+			return;
 		default:
 			;
 		}
@@ -855,32 +929,6 @@ namespace MIPSComp {
 				fp.FMAX(fpr.V(tempregs[i]), fpr.V(tempregs[i]), S0);
 				fp.FMIN(fpr.V(tempregs[i]), fpr.V(tempregs[i]), S1);
 				break;
-			case 16: // d[i] = 1.0f / s[i]; break; //vrcp
-				if (i == 0) {
-					fp.MOVI2F(S0, 1.0f, SCRATCH1);
-				}
-				fp.FDIV(fpr.V(tempregs[i]), S0, fpr.V(sregs[i]));
-				break;
-			case 17: // d[i] = 1.0f / sqrtf(s[i]); break; //vrsq
-				if (i == 0) {
-					fp.MOVI2F(S0, 1.0f, SCRATCH1);
-				}
-				fp.FSQRT(S1, fpr.V(sregs[i]));
-				fp.FDIV(fpr.V(tempregs[i]), S0, S1);
-				break;
-			case 22: // d[i] = sqrtf(s[i]); break; //vsqrt
-				fp.FSQRT(fpr.V(tempregs[i]), fpr.V(sregs[i]));
-				fp.FABS(fpr.V(tempregs[i]), fpr.V(tempregs[i]));
-				break;
-			case 23: // d[i] = asinf(s[i] * (float)M_2_PI); break; //vasin
-				DISABLE;
-				break;
-			case 24: // d[i] = -1.0f / s[i]; break; // vnrcp
-				if (i == 0) {
-					fp.MOVI2F(S0, -1.0f, SCRATCH1);
-				}
-				fp.FDIV(fpr.V(tempregs[i]), S0, fpr.V(sregs[i]));
-				break;
 			default:
 				ERROR_LOG(Log::JIT, "case missing in vfpu vv2op");
 				DISABLE;
@@ -897,6 +945,85 @@ namespace MIPSComp {
 
 		ApplyPrefixD(dregs, sz);
 
+		fpr.ReleaseSpillLocksAndDiscardTemps();
+	}
+
+	// The VFPU special functions call the exact C versions. The lanes stay in S8-S11 across the
+	// calls (callee-saved), and the results are stored to the destinations' homes.
+	// After fpr.FlushBeforeCall(), a VFPU register is either still mapped (in S8-S15) or its value is
+	// in memory. Loads it into dest either way.
+	void Arm64Jit::LoadVAfterCallFlush(ARM64Reg dest, u8 vreg) {
+		if (fpr.IsMappedV(vreg)) {
+			fp.FMOV(dest, fpr.V(vreg));
+		} else {
+			fp.LDR(32, INDEX_UNSIGNED, dest, CTXREG, fpr.GetMipsRegOffsetV(vreg));
+		}
+	}
+
+	void Arm64Jit::CompVV2OpCall(MIPSOpcode op) {
+		if (js.HasSPrefix()) {
+			DISABLE;
+		}
+
+		const int optype = (op >> 16) & 0x1f;
+		// vnrcp and vnsin negate the result.
+		const bool negate = optype == 24 || optype == 26;
+		float (*func)(float) = nullptr;
+		switch (optype) {
+		case 16: case 24: func = &vfpu_rcp; break;
+		case 17: func = &vfpu_rsqrt; break;
+		case 18: case 26: func = &vfpu_sin; break;
+		case 19: func = &vfpu_cos; break;
+		case 20: func = &vfpu_exp2; break;
+		case 21: func = &vfpu_log2; break;
+		case 22: func = &vfpu_sqrt; break;
+		case 23: func = &vfpu_asin; break;
+		case 28: func = &vfpu_rexp2; break;
+		default: DISABLE;
+		}
+
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		u8 sregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(dregs, sz, _VD);
+
+		// Values in S8-S15 survive the calls, so only the rest is flushed.
+		gpr.FlushBeforeCall();
+		fpr.FlushBeforeCall();
+
+		if (n == 1) {
+			LoadVAfterCallFlush(S0, sregs[0]);
+			QuickCallFunction(SCRATCH2_64, func);
+		} else {
+			// The lanes wait in S8 and up between the calls, so free those too.
+			for (int i = 0; i < n; i++) {
+				fpr.FlushArmReg((ARM64Reg)(S8 + i));
+			}
+			for (int i = 0; i < n; i++) {
+				LoadVAfterCallFlush((ARM64Reg)(S8 + i), sregs[i]);
+			}
+			for (int i = 0; i < n; i++) {
+				fp.FMOV(S0, (ARM64Reg)(S8 + i));
+				QuickCallFunction(SCRATCH2_64, func);
+				fp.FMOV((ARM64Reg)(S8 + i), S0);
+			}
+			// Into S0-S3, which the cache never allocates, before mapping the destinations.
+			for (int i = 0; i < n; i++) {
+				fp.FMOV((ARM64Reg)(S0 + i), (ARM64Reg)(S8 + i));
+			}
+		}
+
+		for (int i = 0; i < n; i++) {
+			fpr.MapRegV(dregs[i], MAP_DIRTY | MAP_NOINIT);
+			if (negate) {
+				fp.FNEG(fpr.V(dregs[i]), (ARM64Reg)(S0 + i));
+			} else {
+				fp.FMOV(fpr.V(dregs[i]), (ARM64Reg)(S0 + i));
+			}
+		}
+
+		ApplyPrefixD(dregs, sz);
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
@@ -948,56 +1075,110 @@ namespace MIPSComp {
 	}
 
 	void Arm64Jit::Comp_Vh2f(MIPSOpcode op) {
-		// TODO: Fix by porting the general SSE solution to NEON
-		// FCVTL doesn't provide identical results to the PSP hardware, according to the unit test:
-		// O vh2f: 00000000,400c0000,00000000,7ff00000
-		// E vh2f: 00000000,400c0000,00000000,7f800380
-		DISABLE;
-
 		CONDITIONAL_DISABLE(VFPU_VEC);
-		if (js.HasUnknownPrefix()) {
+		if (js.HasUnknownPrefix() || js.HasSPrefix()) {
 			DISABLE;
 		}
+
+		// Half to float, by calling vfpu_h2f: FCVTL neither flushes subnormal halves nor keeps inf/NaN
+		// mantissa bits unshifted. Sizes above pair act like pair.
+		VectorSize sz = GetVecSize(op);
+		const int nIn = sz == V_Single ? 1 : 2;
+		const int nOut = nIn * 2;
+		const VectorSize outSz = sz == V_Single ? V_Pair : V_Quad;
 
 		u8 sregs[4], dregs[4];
-		VectorSize sz = GetVecSize(op);
-		VectorSize outSz;
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(dregs, outSz, _VD);
 
-		switch (sz) {
-		case V_Single:
-			outSz = V_Pair;
-			break;
-		case V_Pair:
-			outSz = V_Quad;
-			break;
-		default:
-			DISABLE;
+		// The inputs wait in S8-S9 and the results in S10-S13 between the calls (callee-saved), so
+		// those are flushed along with the registers a call clobbers.
+		gpr.FlushBeforeCall();
+		fpr.FlushBeforeCall();
+		for (int i = 0; i < 6; i++) {
+			fpr.FlushArmReg((ARM64Reg)(S8 + i));
 		}
-
-		int n = GetNumVectorElements(sz);
-		int nOut = n * 2;
-		GetVectorRegsPrefixS(sregs, sz, _VS);
-		GetVectorRegsPrefixD(dregs, outSz, _VD);
-
-		// Take the single registers and combine them to a D register.
-		for (int i = 0; i < n; i++) {
-			fpr.MapRegV(sregs[i], sz);
-			fp.INS(32, Q0, i, fpr.V(sregs[i]), 0);
+		for (int i = 0; i < nIn; i++) {
+			LoadVAfterCallFlush((ARM64Reg)(S8 + i), sregs[i]);
 		}
-		// Convert four 16-bit floats in D0 to four 32-bit floats in Q0 (even if we only have two...)
-		fp.FCVTL(32, Q0, D0);
-		// Split apart again.
+		for (int i = 0; i < nOut; i++) {
+			fp.FMOV(S0, (ARM64Reg)(S8 + i / 2));
+			QuickCallFunction(SCRATCH2_64, (i & 1) ? &vfpu_h2f_upper : &vfpu_h2f_lower);
+			fp.FMOV((ARM64Reg)(S10 + i), S0);
+		}
+		// Into S0-S3, which the cache never allocates, before mapping the destinations.
+		for (int i = 0; i < nOut; i++) {
+			fp.FMOV((ARM64Reg)(S0 + i), (ARM64Reg)(S10 + i));
+		}
 		for (int i = 0; i < nOut; i++) {
 			fpr.MapRegV(dregs[i], MAP_DIRTY | MAP_NOINIT);
-			fp.INS(32, fpr.V(dregs[i]), 0, Q0, i);
+			fp.FMOV(fpr.V(dregs[i]), (ARM64Reg)(S0 + i));
 		}
 
-		ApplyPrefixD(dregs, sz);
+		ApplyPrefixD(dregs, outSz);
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Arm64Jit::Comp_Vf2i(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE(VFPU_VEC);
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || (js.prefixD & 0xFF) != 0) {
+			DISABLE;
+		}
+		if (((op >> 21) & 0x1C) != 0x10) {
+			DISABLE;
+		}
+
+		// Vector float to integer, d[N] = int(s[N] * 2^imm) in the rounding mode from the opcode.
+		// FCVT saturates like the PSP, but gives 0 for NaN where the PSP gives 0x7FFFFFFF.
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		const int imm = (op >> 16) & 0x1f;
+		static const RoundingMode modes[4] = { ROUND_N, ROUND_Z, ROUND_P, ROUND_M };
+		const RoundingMode rm = modes[(op >> 21) & 3];
+
+		u8 sregs[4], dregs[4];
+		GetVectorRegsPrefixS(sregs, sz, _VS);
+		GetVectorRegsPrefixD(dregs, sz, _VD);
+
+		MIPSReg tempregs[4];
+		for (int i = 0; i < n; ++i) {
+			if (!IsOverlapSafe(dregs[i], i, n, sregs)) {
+				tempregs[i] = fpr.GetTempV();
+			} else {
+				tempregs[i] = dregs[i];
+			}
+		}
+
+		// Invert 0x80000000 -> 0x7FFFFFFF for the NaN result.
+		fp.MVNI(32, EncodeRegToDouble(S1), 0x80, 24);
+		// Only the truncating conversion takes a scale, the others multiply first (exact).
+		if (imm != 0 && rm != ROUND_Z) {
+			fp.MOVI2F(S2, (float)(1UL << imm), SCRATCH1);
+		}
+
+		for (int i = 0; i < n; i++) {
+			fpr.MapDirtyInV(tempregs[i], sregs[i]);
+			fp.FCMP(fpr.V(sregs[i]), fpr.V(sregs[i]));
+			if (imm == 0) {
+				fp.FCVTS(fpr.V(tempregs[i]), fpr.V(sregs[i]), rm);
+			} else if (rm == ROUND_Z) {
+				fp.FCVTZS(fpr.V(tempregs[i]), fpr.V(sregs[i]), imm);
+			} else {
+				fp.FMUL(S0, fpr.V(sregs[i]), S2);
+				fp.FCVTS(fpr.V(tempregs[i]), S0, rm);
+			}
+			fp.FCSEL(fpr.V(tempregs[i]), fpr.V(tempregs[i]), S1, CC_VC);
+		}
+
+		for (int i = 0; i < n; ++i) {
+			if (dregs[i] != tempregs[i]) {
+				fpr.MapDirtyInV(dregs[i], tempregs[i]);
+				fp.FMOV(fpr.V(dregs[i]), fpr.V(tempregs[i]));
+			}
+		}
+
+		ApplyPrefixD(dregs, sz);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Arm64Jit::Comp_Mftv(MIPSOpcode op) {
@@ -1053,15 +1234,29 @@ namespace MIPSComp {
 				}
 			} else if (imm < 128 + VFPU_CTRL_MAX) { //mtvc //currentMIPS->vfpuCtrl[imm - 128] = R(rt);
 				if (imm - 128 == VFPU_CTRL_CC) {
+					// Six condition bits, the rest don't stick (cpu/vfpu/vbranch).
 					if (gpr.IsImm(rt)) {
-						gpr.SetImm(MIPS_REG_VFPUCC, gpr.GetImm(rt));
+						gpr.SetImm(MIPS_REG_VFPUCC, gpr.GetImm(rt) & 0x3F);
 					} else {
 						gpr.MapDirtyIn(MIPS_REG_VFPUCC, rt);
-						MOV(gpr.R(MIPS_REG_VFPUCC), gpr.R(rt));
+						ANDI2R(gpr.R(MIPS_REG_VFPUCC), gpr.R(rt), 0x3F, SCRATCH1);
 					}
 				} else {
-					gpr.MapReg(rt);
-					STR(INDEX_UNSIGNED, gpr.R(rt), CTXREG, offsetof(MIPSState, vfpuCtrl) + 4 * (imm - 128));
+					// Only some of the bits stick (the low 20 of a prefix, say), same as the IR does it.
+					u32 mask;
+					u32 setBits = GetVFPUCtrlSetBits(imm - 128);
+					if (!GetVFPUCtrlMask(imm - 128, &mask)) {
+						// Read-only or unknown register: nothing is written.
+					} else if (mask != 0xFFFFFFFF || setBits != 0) {
+						gpr.MapReg(rt);
+						ANDI2R(SCRATCH1, gpr.R(rt), mask, SCRATCH2);
+						if (setBits != 0)
+							ORRI2R(SCRATCH1, SCRATCH1, setBits, SCRATCH2);
+						STR(INDEX_UNSIGNED, SCRATCH1, CTXREG, offsetof(MIPSState, vfpuCtrl) + 4 * (imm - 128));
+					} else {
+						gpr.MapReg(rt);
+						STR(INDEX_UNSIGNED, gpr.R(rt), CTXREG, offsetof(MIPSState, vfpuCtrl) + 4 * (imm - 128));
+					}
 				}
 
 				// TODO: Optimization if rt is Imm?
@@ -1095,11 +1290,13 @@ namespace MIPSComp {
 		int vd = _VD;
 		int imm = (op >> 8) & 0x7F;
 		if (imm < VFPU_CTRL_MAX) {
-			fpr.MapRegV(vd);
+			fpr.MapRegV(vd, MAP_DIRTY | MAP_NOINIT);
 			if (imm == VFPU_CTRL_CC) {
 				gpr.MapReg(MIPS_REG_VFPUCC, 0);
 				fp.FMOV(fpr.V(vd), gpr.R(MIPS_REG_VFPUCC));
 			} else {
+				// In case we have a saved prefix.
+				FlushPrefixV();
 				ADDI2R(SCRATCH1_64, CTXREG, offsetof(MIPSState, vfpuCtrl[0]) + imm * 4, SCRATCH2);
 				fp.LDR(32, INDEX_UNSIGNED, fpr.V(vd), SCRATCH1_64, 0);
 			}
@@ -1179,7 +1376,8 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_VScl(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(VFPU_VEC);
-		if (js.HasUnknownPrefix()) {
+		// The T prefix is applied oddly here, the interpreter knows how.
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix()) {
 			DISABLE;
 		}
 
@@ -1268,7 +1466,34 @@ namespace MIPSComp {
 	}
 
 	void Arm64Jit::Comp_Vmscl(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE(VFPU_MTX_VMSCL);
+		if (!js.HasNoPrefix()) {
+			DISABLE;
+		}
+
+		// Matrix scale: d[N,M] = s[N,M] * t[0]. Element-wise, so transposition doesn't matter, but a
+		// source that partly overlaps the destination would be read after it's written.
+		MatrixSize sz = GetMtxSize(op);
+		int n = GetMatrixSide(sz);
+		if (_VS != _VD && GetMatrixOverlap(_VS, _VD, sz) != OVERLAP_NONE) {
+			DISABLE;
+		}
+
+		u8 sregs[16], dregs[16], treg;
+		GetMatrixRegs(sregs, sz, _VS);
+		GetMatrixRegs(dregs, sz, _VD);
+		GetVectorRegs(&treg, V_Single, _VT);
+
+		// The scale can be part of the destination, so keep a copy.
+		fpr.MapRegV(treg);
+		fp.FMOV(S0, fpr.V(treg));
+		for (int a = 0; a < n; a++) {
+			for (int b = 0; b < n; b++) {
+				fpr.MapDirtyInV(dregs[a * 4 + b], sregs[a * 4 + b]);
+				fp.FMUL(fpr.V(dregs[a * 4 + b]), fpr.V(sregs[a * 4 + b]), S0);
+			}
+		}
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Arm64Jit::Comp_Vtfm(MIPSOpcode op) {
@@ -1337,11 +1562,66 @@ namespace MIPSComp {
 	}
 
 	void Arm64Jit::Comp_VCrs(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE(VFPU_VEC);
+		if (js.HasUnknownPrefix() || js.HasSPrefix() || js.HasTPrefix()) {
+			DISABLE;
+		}
+
+		// Half a cross product: d[0] = s[y]*t[z], d[1] = s[z]*t[x], d[2] = s[x]*t[y].
+		VectorSize sz = GetVecSize(op);
+		if (sz != V_Triple) {
+			DISABLE;
+		}
+
+		u8 sregs[4], tregs[4], dregs[4];
+		GetVectorRegsPrefixS(sregs, sz, _VS);
+		GetVectorRegsPrefixT(tregs, sz, _VT);
+		GetVectorRegsPrefixD(dregs, sz, _VD);
+
+		// Into S0-S2 first, since d may overlap s or t.
+		fpr.MapRegsAndSpillLockV(sregs, sz, 0);
+		fpr.MapRegsAndSpillLockV(tregs, sz, 0);
+		fp.FMUL(S0, fpr.V(sregs[1]), fpr.V(tregs[2]));
+		fp.FMUL(S1, fpr.V(sregs[2]), fpr.V(tregs[0]));
+		fp.FMUL(S2, fpr.V(sregs[0]), fpr.V(tregs[1]));
+
+		fpr.MapRegsAndSpillLockV(dregs, sz, MAP_NOINIT);
+		for (int i = 0; i < 3; i++) {
+			fp.FMOV(fpr.V(dregs[i]), (ARM64Reg)(S0 + i));
+		}
+
+		ApplyPrefixD(dregs, sz);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Arm64Jit::Comp_VDet(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE(VFPU_VEC);
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix()) {
+			DISABLE;
+		}
+
+		// 2D determinant of two vectors: d[0] = s[0]*t[1] - s[1]*t[0].
+		VectorSize sz = GetVecSize(op);
+		if (sz != V_Pair) {
+			DISABLE;
+		}
+
+		u8 sregs[4], tregs[4], dregs[4];
+		GetVectorRegsPrefixS(sregs, sz, _VS);
+		GetVectorRegsPrefixT(tregs, sz, _VT);
+		GetVectorRegsPrefixD(dregs, V_Single, _VD);
+
+		fpr.MapRegsAndSpillLockV(sregs, sz, 0);
+		fpr.MapRegsAndSpillLockV(tregs, sz, 0);
+		fp.FMUL(S1, fpr.V(sregs[1]), fpr.V(tregs[0]));
+		fp.FMUL(S0, fpr.V(sregs[0]), fpr.V(tregs[1]));
+		fp.FSUB(S0, S0, S1);
+
+		fpr.MapRegV(dregs[0], MAP_DIRTY | MAP_NOINIT);
+		fp.FMOV(fpr.V(dregs[0]), S0);
+
+		ApplyPrefixD(dregs, V_Single);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Arm64Jit::Comp_Vi2x(MIPSOpcode op) {
@@ -1415,7 +1695,7 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_Vx2i(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(VFPU_VEC);
-		if (js.HasUnknownPrefix())
+		if (js.HasUnknownPrefix() || js.HasSPrefix())
 			DISABLE;
 
 		int bits = ((op >> 16) & 2) == 0 ? 8 : 16; // vuc2i/vc2i (0/1), vus2i/vs2i (2/3)
@@ -1611,17 +1891,6 @@ namespace MIPSComp {
 		// ES is just really equivalent to (value & 0x7F800000) == 0x7F800000.
 
 		switch (cond) {
-		case VC_EI: // c = my_isinf(s[i]); break;
-		case VC_NI: // c = !my_isinf(s[i]); break;
-			DISABLE;
-		case VC_ES: // c = my_isnan(s[i]) || my_isinf(s[i]); break;   // Tekken Dark Resurrection
-		case VC_NS: // c = !my_isnan(s[i]) && !my_isinf(s[i]); break;
-		case VC_EN: // c = my_isnan(s[i]); break;
-		case VC_NN: // c = !my_isnan(s[i]); break;
-			if (_VS != _VT)
-				DISABLE;
-			break;
-
 		case VC_EZ:
 		case VC_NZ:
 			break;
@@ -1667,18 +1936,25 @@ namespace MIPSComp {
 				LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, offsetof(MIPSState, temp));
 				break;
 
-			case VC_EN: // c = my_isnan(s[i]); break;  // Tekken 6
-				// Should we involve T? Where I found this used, it compared a register with itself so should be fine.
-				fpr.MapInInV(sregs[i], tregs[i]);
-				fp.FCMP(fpr.V(sregs[i]), fpr.V(tregs[i]));
-				flag = CC_VS;  // overflow = unordered : http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0204j/Chdhcfbc.html
+			case VC_EI: // c = my_isinf(s[i]); break;
+			case VC_NI: // c = !my_isinf(s[i]); break;
+				// |s| == inf, in the integer ALU like ES above.
+				STR(INDEX_UNSIGNED, SCRATCH1, CTXREG, offsetof(MIPSState, temp));
+				fpr.MapRegV(sregs[i], 0);
+				fp.FMOV(SCRATCH2, fpr.V(sregs[i]));
+				ANDI2R(SCRATCH2, SCRATCH2, 0x7FFFFFFF);
+				MOVI2R(SCRATCH1, 0x7F800000);
+				CMP(SCRATCH2, SCRATCH1);
+				flag = cond == VC_EI ? CC_EQ : CC_NEQ;
+				LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, offsetof(MIPSState, temp));
 				break;
 
+			case VC_EN: // c = my_isnan(s[i]); break;  // Tekken 6
 			case VC_NN: // c = !my_isnan(s[i]); break;
-				// Should we involve T? Where I found this used, it compared a register with itself so should be fine.
-				fpr.MapInInV(sregs[i], tregs[i]);
-				fp.FCMP(fpr.V(sregs[i]), fpr.V(tregs[i]));
-				flag = CC_VC;  // !overflow = !unordered : http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0204j/Chdhcfbc.html
+				// Only s counts: comparing it with itself is unordered exactly when it's NaN.
+				fpr.MapRegV(sregs[i]);
+				fp.FCMP(fpr.V(sregs[i]), fpr.V(sregs[i]));
+				flag = cond == VC_EN ? CC_VS : CC_VC;  // overflow = unordered
 				break;
 
 			case VC_EQ: // c = s[i] == t[i]
@@ -1927,7 +2203,8 @@ namespace MIPSComp {
 	void Arm64Jit::Comp_VRot(MIPSOpcode op) {
 		// VRot probably doesn't accept prefixes anyway.
 		CONDITIONAL_DISABLE(VFPU_VEC);
-		if (js.HasUnknownPrefix()) {
+		// The prefixes apply to the sine but never to the cosine; leave that to the interpreter.
+		if (!js.HasNoPrefix()) {
 			DISABLE;
 		}
 
@@ -1954,18 +2231,28 @@ namespace MIPSComp {
 		if (vd2 >= 0)
 			GetVectorRegs(dregs2, sz, vd2);
 		GetVectorRegs(&sreg, V_Single, vs);
+		// With the angle in a destination lane, the cosine is taken of what was written there.
+		// The assembler refuses that, so leave it to the interpreter, and don't pair such a vrot.
+		for (int i = 0; i < n; i++) {
+			if (dregs[i] == sreg) {
+				DISABLE;
+			}
+			if (vd2 >= 0 && dregs2[i] == sreg) {
+				vd2 = -1;
+			}
+		}
 
 		int imm = (op >> 16) & 0x1f;
 
+		// Values in S8-S15 survive the call, so only the rest is flushed.
 		gpr.FlushBeforeCall();
-		fpr.FlushAll();
+		fpr.FlushBeforeCall();
 
 		// Don't need to SaveStaticRegs here as long as they are all in callee-save regs - this callee won't read them.
 
 		bool negSin1 = (imm & 0x10) ? true : false;
 
-		fpr.MapRegV(sreg);
-		fp.FMOV(S0, fpr.V(sreg));
+		LoadVAfterCallFlush(S0, sreg);
 		QuickCallFunction(SCRATCH2_64, negSin1 ? (void *)&SinCosNegSin : (void *)&SinCos);
 		// Here, sin and cos are stored together in Q0.d. On ARM32 we could use it directly
 		// but with ARM64's register organization, we need to split it up.
@@ -1983,7 +2270,52 @@ namespace MIPSComp {
 	}
 
 	void Arm64Jit::Comp_Vsgn(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE(VFPU_VEC);
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix()) {
+			DISABLE;
+		}
+
+		// Vector extract sign: +1 or -1 with the sign of s, or 0 when s is zero or denormal. NaN
+		// keeps its sign bit, like the rest.
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+
+		u8 sregs[4], dregs[4];
+		GetVectorRegsPrefixS(sregs, sz, _VS);
+		GetVectorRegsPrefixD(dregs, sz, _VD);
+
+		MIPSReg tempregs[4];
+		for (int i = 0; i < n; ++i) {
+			if (!IsOverlapSafe(dregs[i], i, n, sregs)) {
+				tempregs[i] = fpr.GetTempV();
+			} else {
+				tempregs[i] = dregs[i];
+			}
+		}
+
+		fp.MOVI2F(S1, FLT_MIN, SCRATCH1);
+		fp.MOVI2F(S2, 0.0f, SCRATCH1);
+		for (int i = 0; i < n; i++) {
+			fpr.MapDirtyInV(tempregs[i], sregs[i]);
+			// MI (below the smallest normal) is false for NaN.
+			fp.FABS(S0, fpr.V(sregs[i]));
+			fp.FCMP(S0, S1);
+			fp.FMOV(SCRATCH1, fpr.V(sregs[i]));
+			ANDI2R(SCRATCH1, SCRATCH1, 0x80000000);
+			ORRI2R(SCRATCH1, SCRATCH1, 0x3F800000);
+			fp.FMOV(S3, SCRATCH1);
+			fp.FCSEL(fpr.V(tempregs[i]), S2, S3, CC_MI);
+		}
+
+		for (int i = 0; i < n; ++i) {
+			if (dregs[i] != tempregs[i]) {
+				fpr.MapDirtyInV(dregs[i], tempregs[i]);
+				fp.FMOV(fpr.V(dregs[i]), fpr.V(tempregs[i]));
+			}
+		}
+
+		ApplyPrefixD(dregs, sz);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Arm64Jit::Comp_Vocp(MIPSOpcode op) {
@@ -2035,11 +2367,119 @@ namespace MIPSComp {
 	}
 
 	void Arm64Jit::Comp_ColorConv(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE(VFPU_VEC);
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix()) {
+			DISABLE;
+		}
+
+		// vt4444, vt5551, vt5650: four 8888 colors from a quad, whatever the size, into 16 bits each,
+		// two to a word.
+		const int type = (op >> 16) & 3;
+		if (type == 0) {
+			DISABLE;
+		}
+		VectorSize isz = GetVecSize(op);
+		VectorSize outSz = isz == V_Single ? V_Single : V_Pair;
+
+		u8 sregs[4], dregs[4];
+		GetVectorRegsPrefixS(sregs, V_Quad, _VS);
+		GetVectorRegsPrefixD(dregs, outSz, _VD);
+
+		const ARM64Reg t = gpr.GetAndLockTempR();
+		const ARM64Reg word = gpr.GetAndLockTempR();
+		const ARM64Reg in = SCRATCH1, col = SCRATCH2;
+		// Into S0-S1 first, since d may overlap s.
+		for (int i = 0; i < 4; i++) {
+			fpr.MapRegV(sregs[i]);
+			fp.FMOV(in, fpr.V(sregs[i]));
+			switch (type) {
+			case 1:  // 4444: the top four bits of each channel.
+				UBFX(col, in, 4, 4);
+				UBFX(t, in, 12, 4);
+				BFI(col, t, 4, 4);
+				UBFX(t, in, 20, 4);
+				BFI(col, t, 8, 4);
+				UBFX(t, in, 28, 4);
+				BFI(col, t, 12, 4);
+				break;
+			case 2:  // 5551
+				UBFX(col, in, 3, 5);
+				UBFX(t, in, 11, 5);
+				BFI(col, t, 5, 5);
+				UBFX(t, in, 19, 5);
+				BFI(col, t, 10, 5);
+				UBFX(t, in, 31, 1);
+				BFI(col, t, 15, 1);
+				break;
+			case 3:  // 565, no alpha.
+				UBFX(col, in, 3, 5);
+				UBFX(t, in, 10, 6);
+				BFI(col, t, 5, 6);
+				UBFX(t, in, 19, 5);
+				BFI(col, t, 11, 5);
+				break;
+			}
+			if ((i & 1) == 0) {
+				MOV(word, col);
+			} else {
+				BFI(word, col, 16, 16);
+				fp.FMOV((ARM64Reg)(S0 + i / 2), word);
+			}
+		}
+
+		const int nOut = outSz == V_Single ? 1 : 2;
+		for (int i = 0; i < nOut; i++) {
+			fpr.MapRegV(dregs[i], MAP_DIRTY | MAP_NOINIT);
+			fp.FMOV(fpr.V(dregs[i]), (ARM64Reg)(S0 + i));
+		}
+
+		ApplyPrefixD(dregs, outSz);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
+		gpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Arm64Jit::Comp_Vbfy(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE(VFPU_VEC);
+		if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix() || (js.prefixS & VFPU_NEGATE(1, 1, 1, 1)) != 0) {
+			DISABLE;
+		}
+
+		// Butterfly. vbfy1: d[2N] = s[2N] + s[2N+1], d[2N+1] = s[2N] - s[2N+1].
+		// vbfy2: d[0] = s[0] + s[2], d[1] = s[1] + s[3], d[2] = s[0] - s[2], d[3] = s[1] - s[3].
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		const int subop = (op >> 16) & 0x1F;
+		if (!(subop == 3 && n == 4) && !(subop == 2 && (n == 2 || n == 4))) {
+			DISABLE;
+		}
+
+		u8 sregs[4], dregs[4];
+		GetVectorRegsPrefixS(sregs, sz, _VS);
+		GetVectorRegsPrefixD(dregs, sz, _VD);
+
+		// Into S0-S3 first, since d may overlap s.
+		fpr.MapRegsAndSpillLockV(sregs, sz, 0);
+		if (subop == 3) {
+			fp.FADD(S0, fpr.V(sregs[0]), fpr.V(sregs[2]));
+			fp.FADD(S1, fpr.V(sregs[1]), fpr.V(sregs[3]));
+			fp.FSUB(S2, fpr.V(sregs[0]), fpr.V(sregs[2]));
+			fp.FSUB(S3, fpr.V(sregs[1]), fpr.V(sregs[3]));
+		} else {
+			fp.FADD(S0, fpr.V(sregs[0]), fpr.V(sregs[1]));
+			fp.FSUB(S1, fpr.V(sregs[0]), fpr.V(sregs[1]));
+			if (n == 4) {
+				fp.FADD(S2, fpr.V(sregs[2]), fpr.V(sregs[3]));
+				fp.FSUB(S3, fpr.V(sregs[2]), fpr.V(sregs[3]));
+			}
+		}
+
+		fpr.MapRegsAndSpillLockV(dregs, sz, MAP_NOINIT);
+		for (int i = 0; i < n; i++) {
+			fp.FMOV(fpr.V(dregs[i]), (ARM64Reg)(S0 + i));
+		}
+
+		ApplyPrefixD(dregs, sz);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 }
 

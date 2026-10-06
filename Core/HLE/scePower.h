@@ -23,6 +23,7 @@ void __PowerInit();
 void __PowerDoState(PointerWrap &p);
 
 void Register_scePower();
+void Register_scePower_driver();
 void Register_sceSuspendForUser();
 
 int KernelVolatileMemLock(int type, u32 paddr, u32 psize);
@@ -30,3 +31,7 @@ int KernelVolatileMemUnlock(int type);
 
 // Returns 0 for default.
 int GetLockedCPUSpeedMhz();
+
+// Scales a duration measured at the default 222MHz to the current clock. The whole system runs
+// from the one PLL - CPU, bus, the Media Engine and the GE - so hardware work speeds up with it.
+int PowerScaleFromDefaultClock(int us);

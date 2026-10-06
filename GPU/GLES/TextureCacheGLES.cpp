@@ -26,6 +26,8 @@
 #include "Common/GPU/OpenGL/GLRenderManager.h"
 #include "Common/TimeUtil.h"
 
+#include "Core/Config.h"
+
 #include "GPU/ge_constants.h"
 #include "GPU/GPUState.h"
 #include "GPU/GPUDefinitions.h"
@@ -37,8 +39,6 @@
 TextureCacheGLES::TextureCacheGLES(Draw::DrawContext *draw, Draw2D *draw2D)
 	: TextureCacheCommon(draw, draw2D) {
 	render_ = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
-
-	nextTexture_ = nullptr;
 }
 
 TextureCacheGLES::~TextureCacheGLES() {
@@ -51,10 +51,10 @@ void TextureCacheGLES::SetFramebufferManager(FramebufferManagerGLES *fbManager) 
 }
 
 void TextureCacheGLES::ReleaseTexture(TexCacheEntry *entry, bool delete_them) {
-	if (delete_them) {
-		if (entry->textureName) {
-			render_->DeleteTexture(entry->textureName);
-		}
+	// Delete even when !delete_them (device lost): the GLRTexture is a heap object that only the deleter
+	// frees, and the deleter skips the GL calls itself once the context is gone.
+	if (entry->textureName && render_) {
+		render_->DeleteTexture(entry->textureName);
 	}
 	entry->textureName = nullptr;
 }
@@ -77,7 +77,7 @@ static Draw::DataFormat getClutDestFormat(GEPaletteFormat format) {
 	return Draw::DataFormat::UNDEFINED;
 }
 
-static const GLuint MinFiltGL[8] = {
+static constexpr GLuint MinFiltGL[8] = {
 	GL_NEAREST,
 	GL_LINEAR,
 	GL_NEAREST,
@@ -88,20 +88,21 @@ static const GLuint MinFiltGL[8] = {
 	GL_LINEAR_MIPMAP_LINEAR,
 };
 
-static const GLuint MagFiltGL[2] = {
+static constexpr GLuint MagFiltGL[2] = {
 	GL_NEAREST,
 	GL_LINEAR
 };
 
-void TextureCacheGLES::ApplySamplingParams(const SamplerCacheKey &key) {
-	if (gstate_c.Use(GPU_USE_TEXTURE_LOD_CONTROL)) {
+void TextureCacheGLES::ApplySamplerByKey(const SamplerCacheKey &key) {
+	if (gstate_c.Use(GPU_USE_SAMPLER_LOD_CONTROL)) {
 		float minLod = (float)key.minLevel / 256.0f;
 		float maxLod = (float)key.maxLevel / 256.0f;
 		float lodBias = (float)key.lodBias / 256.0f;
 		render_->SetTextureLod(0, minLod, maxLod, lodBias);
 	}
 
-	float aniso = 0.0f;
+	// 1.0 means no anisotropic filtering. The queue runner clamps to the device maximum.
+	float aniso = key.aniso ? (float)(1 << g_Config.iAnisotropyLevel) : 1.0f;
 	int minKey = ((int)key.mipEnable << 2) | ((int)key.mipFilt << 1) | ((int)key.minFilt);
 	render_->SetTextureSampler(0,
 		key.sClamp ? GL_CLAMP_TO_EDGE : GL_REPEAT, key.tClamp ? GL_CLAMP_TO_EDGE : GL_REPEAT,
@@ -130,23 +131,7 @@ static void ConvertColors(void *dstBuf, const void *srcBuf, Draw::DataFormat dst
 	}
 }
 
-void TextureCacheGLES::StartFrame() {
-	TextureCacheCommon::StartFrame();
-
-	GLRenderManager *renderManager = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
-	if (!lowMemoryMode_ && renderManager->SawOutOfMemory()) {
-		lowMemoryMode_ = true;
-		decimationCounter_ = 0;
-
-		auto err = GetI18NCategory(I18NCat::ERRORS);
-		if (standardScaleFactor_ > 1) {
-			g_OSD.Show(OSDType::MESSAGE_WARNING, err->T("Warning: Video memory FULL, reducing upscaling and switching to slow caching mode"), 2.0f);
-		} else {
-			g_OSD.Show(OSDType::MESSAGE_WARNING, err->T("Warning: Video memory FULL, switching to slow caching mode"), 2.0f);
-		}
-	}
-}
-
+// TODO: This is almost the same as the Common one, just with some extra color conversion. Should merge.
 void TextureCacheGLES::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBase, bool clutIndexIsSimple) {
 	const u32 clutBaseBytes = clutFormat == GE_CMODE_32BIT_ABGR8888 ? (clutBase * sizeof(u32)) : (clutBase * sizeof(u16));
 	// Technically, these extra bytes weren't loaded, but hopefully it was loaded earlier.
@@ -173,20 +158,22 @@ void TextureCacheGLES::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBas
 	}
 
 	// Special optimization: fonts typically draw clut4 with just alpha values in a single color.
-	clutAlphaLinear_ = false;
-	clutAlphaLinearColor_ = 0;
+	bool alphaLinear = false;
+	u16 alphaLinearColor = 0;
 	if (clutFormat == GE_CMODE_16BIT_ABGR4444 && clutIndexIsSimple) {
-		const u16_le *clut = GetCurrentClut<u16_le>();
-		clutAlphaLinear_ = true;
-		clutAlphaLinearColor_ = clut[15] & 0xFFF0;
+		const u16 *clut = (const u16 *)(clutBuf_);
+		alphaLinear = true;
+		alphaLinearColor = clut[15] & 0xFFF0;
 		for (int i = 0; i < 16; ++i) {
-			u16 step = clutAlphaLinearColor_ | i;
+			u16 step = alphaLinearColor | i;
 			if (clut[i] != step) {
-				clutAlphaLinear_ = false;
+				alphaLinear = false;
 				break;
 			}
 		}
 	}
+	clutProperties_.clutAlphaLinear = alphaLinear;
+	clutProperties_.clutAlphaLinearColor = alphaLinearColor;
 
 	clutLastFormat_ = gstate.clutformat;
 }
@@ -194,17 +181,13 @@ void TextureCacheGLES::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBas
 void TextureCacheGLES::BindTexture(TexCacheEntry *entry) {
 	if (!entry) {
 		render_->BindTexture(0, nullptr);
-		lastBoundTexture = nullptr;
+		lastBoundTexture_ = nullptr;
 		return;
 	}
-	if (entry->textureName != lastBoundTexture) {
+	if (entry->textureName != lastBoundTexture_) {
 		render_->BindTexture(0, entry->textureName);
-		lastBoundTexture = entry->textureName;
+		lastBoundTexture_ = entry->textureName;
 	}
-	int maxLevel = (entry->status & TexCacheEntry::STATUS_NO_MIPS) ? 0 : entry->maxLevel;
-	SamplerCacheKey samplerKey = GetSamplingParams(maxLevel, entry);
-	ApplySamplingParams(samplerKey);
-	gstate_c.SetUseShaderDepal(ShaderDepalMode::OFF);
 }
 
 void TextureCacheGLES::Unbind() {
@@ -250,6 +233,10 @@ void TextureCacheGLES::BuildTexture(TexCacheEntry *const entry) {
 	} else {
 		_dbg_assert_(draw_->GetDeviceCaps().texture3DSupported);
 		entry->textureName = render_->CreateTexture(GL_TEXTURE_3D, tw, th, plan.depth, 1);
+		// Set this together with creating the texture - it has to match the target of the object we
+		// just created even if we bail out below, or the shader gets generated with a 2D sampler
+		// for a 3D texture.
+		entry->status |= TexStatus::IS_3D;
 	}
 
 	// Apply some additional compatibility checks.
@@ -262,14 +249,14 @@ void TextureCacheGLES::BuildTexture(TexCacheEntry *const entry) {
 		}
 	} 
 
-	if (!gstate_c.Use(GPU_USE_TEXTURE_LOD_CONTROL)) {
+	if (!gstate_c.Use(GPU_USE_SAMPLER_LOD_CONTROL)) {
 		// If the mip chain is not full..
 		if (plan.levelsToCreate != plan.maxPossibleLevels) {
 			// We need to avoid creating mips at all, or generate them all - can't be incomplete
 			// on this hardware (strict OpenGL rules).
 			plan.levelsToCreate = 1;
 			plan.levelsToLoad = 1;
-			entry->status |= TexCacheEntry::STATUS_NO_MIPS;
+			entry->status |= TexStatus::NO_MIPS;
 		}
 	}
 
@@ -334,6 +321,11 @@ void TextureCacheGLES::BuildTexture(TexCacheEntry *const entry) {
 		size_t dataSize = levelStride * plan.depth;
 		u8 *data = (u8 *)AllocateAlignedMemory(dataSize, 16);
 		_assert_msg_(data != nullptr, "Failed to allocate aligned memory for 3d texture: %d bytes", (int)dataSize);
+		if (!data) {
+			ERROR_LOG(Log::G3D, "Ran out of RAM trying to allocate a temporary 3D texture upload buffer (%dx%dx%d)", plan.w, plan.h, plan.depth);
+			return;
+		}
+
 		memset(data, 0, levelStride * plan.depth);
 		u8 *p = data;
 
@@ -344,14 +336,11 @@ void TextureCacheGLES::BuildTexture(TexCacheEntry *const entry) {
 
 		render_->TextureImage(entry->textureName, 0, plan.w * plan.scaleFactor, plan.h * plan.scaleFactor, plan.depth, dstFmt, data, GLRAllocType::ALIGNED);
 
-		// Signal that we support depth textures so use it as one.
-		entry->status |= TexCacheEntry::STATUS_3D;
-
 		render_->FinalizeTexture(entry->textureName, 1, false);
 	}
 
 	if (plan.doReplace) {
-		entry->SetAlphaStatus(TexCacheEntry::TexStatus(plan.replaced->AlphaStatus()));
+		entry->SetAlphaStatus(plan.replaced->AlphaStatus());
 	}
 }
 
@@ -379,16 +368,20 @@ Draw::DataFormat TextureCacheGLES::GetDestFormat(GETextureFormat format, GEPalet
 
 bool TextureCacheGLES::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level, bool *isFramebuffer) {
 	ForgetLastTexture();
-	SetTexture();
-	if (!nextTexture_) {
-		return GetCurrentFramebufferTextureDebug(buffer, isFramebuffer);
-	}
 
 	// Apply texture may need to rebuild the texture if we're about to render, or bind a framebuffer.
-	TexCacheEntry *entry = nextTexture_;
 	// We might need a render pass to set the sampling params, unfortunately.  Otherwise BuildTexture may crash.
 	framebufferManagerGL_->RebindFramebuffer("RebindFramebuffer - GetCurrentTextureDebug");
-	ApplyTexture(false);
+	TextureApplyResult textureResult = ApplyTexture(false);
+	if (textureResult.framebuffer) {
+		*isFramebuffer = true;
+		return GetFramebufferTextureDebug(textureResult.framebuffer, textureResult.framebufferTextureChannel, buffer);
+	}
+
+	TexCacheEntry *entry = textureResult.texCacheEntry;
+	if (!entry) {
+		return false;
+	}
 
 	GLRenderManager *renderManager = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 
@@ -412,16 +405,14 @@ bool TextureCacheGLES::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level,
 }
 
 void TextureCacheGLES::DeviceLost() {
-	textureShaderCache_->DeviceLost();
-	Clear(false);
+	TextureCacheCommon::DeviceLost();
 	draw_ = nullptr;
 	render_ = nullptr;
 }
 
 void TextureCacheGLES::DeviceRestore(Draw::DrawContext *draw) {
-	draw_ = draw;
+	TextureCacheCommon::DeviceRestore(draw);
 	render_ = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
-	textureShaderCache_->DeviceRestore(draw);
 }
 
 void *TextureCacheGLES::GetNativeTextureView(const TexCacheEntry *entry, bool flat) const {

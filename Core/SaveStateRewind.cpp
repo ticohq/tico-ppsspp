@@ -1,4 +1,6 @@
 #include "Common/Thread/ThreadUtil.h"
+#include "Common/Data/Text/I18n.h"
+#include "Common/StringUtils.h"
 #include "Core/SaveState.h"
 #include "Core/SaveStateRewind.h"
 #include "Core/Core.h"
@@ -27,22 +29,25 @@ CChunkFileReader::Error StateRingbuffer::Save() {
 	{
 		base_ = (base_ + 1) % ARRAY_SIZE(bases_);
 		baseUsage_ = 0;
+		baseGeneration_[base_] = nextBaseGeneration_++;
 		err = SaveToRam(bases_[base_]);
 		// Let's not bother savestating twice.
 		compressBuffer = &bases_[base_];
 	} else
 		err = SaveToRam(buffer_);
 
-	if (err == CChunkFileReader::ERROR_NONE)
-		ScheduleCompress(&states_[n], compressBuffer, &bases_[base_]);
-	else
+	if (err == CChunkFileReader::ERROR_NONE) {
+		ScheduleCompress(&states_[n].stateBuffer, compressBuffer, &bases_[base_]);
+		states_[n].savedTime = time_now_d();
+	} else {
 		states_[n].clear();
+	}
 
-	baseMapping_[n] = base_;
+	baseMapping_[n] = baseGeneration_[base_];
 	return err;
 }
 
-CChunkFileReader::Error StateRingbuffer::Restore(std::string *errorString) {
+CChunkFileReader::Error StateRingbuffer::Restore(std::string *errorString, std::string *metadata) {
 	std::lock_guard<std::mutex> guard(lock_);
 
 	// No valid states left.
@@ -53,9 +58,29 @@ CChunkFileReader::Error StateRingbuffer::Restore(std::string *errorString) {
 	if (states_[n].empty())
 		return CChunkFileReader::ERROR_BAD_FILE;
 
+	auto pa = GetI18NCategory(I18NCat::PAUSE);
+
+	const int generation = baseMapping_[n];
+	const int baseSlot = generation < 0 ? -1 : generation % (int)ARRAY_SIZE(bases_);
+	if (baseSlot < 0 || baseGeneration_[baseSlot] != generation) {
+		// The base this state was compressed against has since been overwritten, so it can't be
+		// decoded any more. Only two bases are kept, but the state ring is longer.
+		WARN_LOG(Log::SaveState, "Rewind: state %d was compressed against a base that's gone", n);
+		return CChunkFileReader::ERROR_BAD_FILE;
+	}
+
 	static std::vector<u8> buffer;
-	LockedDecompress(buffer, states_[n], bases_[baseMapping_[n]]);
+	LockedDecompress(buffer, states_[n].stateBuffer, bases_[baseSlot]);
 	CChunkFileReader::Error error = LoadFromRam(buffer, errorString);
+	*metadata = pa->T("Rewind");
+
+	if (states_[n].savedTime) {
+		auto di = GetI18NCategory(I18NCat::DIALOG);
+		metadata->append(" (");
+		metadata->append(ApplySafeSubstitutions(di->T("%1 seconds ago"), static_cast<int>(time_now_d() - states_[n].savedTime)));
+		metadata->append(")");
+	}
+
 	rewindLastTime_ = time_now_d();
 	return error;
 }
@@ -99,16 +124,18 @@ void StateRingbuffer::LockedDecompress(std::vector<u8> &result, const std::vecto
 	result.clear();
 	result.reserve(base.size());
 	auto basePos = base.begin();
-	for (size_t i = 0; i < compressed.size(); )
-	{
-		if (compressed[i] == 0)
-		{
+	for (size_t i = 0; i < compressed.size(); ) {
+		if (compressed[i] == 0) {
 			++i;
-			int blockSize = std::min(BLOCK_SIZE, (int)(base.size() - result.size()));
+			// Bound against what's actually left of the base: the subtraction this used to do
+			// (base.size() - result.size()) wraps once the output is longer than the base.
+			const int blockSize = (int)std::min((size_t)BLOCK_SIZE, (size_t)(base.end() - basePos));
+			if (blockSize <= 0) {
+				break;
+			}
 			result.insert(result.end(), basePos, basePos + blockSize);
 			basePos += blockSize;
-		} else
-		{
+		} else {
 			++i;
 			int blockSize = std::min(BLOCK_SIZE, (int)(compressed.size() - i));
 			result.insert(result.end(), compressed.begin() + i, compressed.begin() + i + blockSize);
@@ -133,6 +160,10 @@ void StateRingbuffer::Clear() {
 	for (auto &b : bases_) {
 		b.clear();
 	}
+	for (int &g : baseGeneration_) {
+		g = -1;
+	}
+	nextBaseGeneration_ = 0;
 	baseMapping_.clear();
 	baseMapping_.resize(size_);
 	for (auto &s : states_) {
@@ -165,6 +196,10 @@ void StateRingbuffer::Process() {
 void StateRingbuffer::NotifyState() {
 	// Prevent saving snapshots immediately after loading or saving a state.
 	rewindLastTime_ = time_now_d();
+}
+
+double StateRingbuffer::NextStateTimestamp() const {
+	return rewindLastTime_ + g_Config.iRewindSnapshotInterval;
 }
 
 }  // namespace SaveState

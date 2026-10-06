@@ -20,6 +20,7 @@
 #if PPSSPP_ARCH(ARM64) || (PPSSPP_PLATFORM(WINDOWS) && !defined(__LIBRETRO__))
 
 #ifndef offsetof
+#include <cfloat>
 #include <cstddef>
 #endif
 
@@ -99,8 +100,11 @@ void Arm64JitBackend::CompIR_FAssign(IRInst inst) {
 
 	case IROp::FSign:
 		regs_.Map(inst);
-		// We'll need this flag later.  Vector could use a temp and FCMEQ.
-		fp_.FCMP(regs_.F(inst.src1));
+		// Zero and denormals both sign as zero on the hardware, so compare the magnitude against
+		// the smallest normal. We'll need this flag later.
+		fp_.FABS(SCRATCHF1, regs_.F(inst.src1));
+		fp_.MOVI2FDUP(EncodeRegToDouble(SCRATCHF2), FLT_MIN);
+		fp_.FCMP(SCRATCHF1, SCRATCHF2);
 
 		fp_.MOVI2FDUP(EncodeRegToDouble(SCRATCHF1), 1.0f);
 		// Invert 0x80000000 -> 0x7FFFFFFF as a mask for sign.
@@ -110,9 +114,9 @@ void Arm64JitBackend::CompIR_FAssign(IRInst inst) {
 			fp_.FMOV(regs_.FD(inst.dest), regs_.FD(inst.src1));
 		fp_.BIT(regs_.FD(inst.dest), EncodeRegToDouble(SCRATCHF1), EncodeRegToDouble(SCRATCHF2));
 
-		// It's later now, let's replace with zero if that FCmp was EQ to zero.
+		// It's later now, let's replace with zero if that FCmp said below (MI is false for a NaN.)
 		fp_.MOVI2FDUP(EncodeRegToDouble(SCRATCHF1), 0.0f);
-		fp_.FCSEL(regs_.F(inst.dest), SCRATCHF1, regs_.F(inst.dest), CC_EQ);
+		fp_.FCSEL(regs_.F(inst.dest), SCRATCHF1, regs_.F(inst.dest), CC_MI);
 		break;
 
 	default:
@@ -544,20 +548,50 @@ void Arm64JitBackend::CompIR_FSpecial(IRInst inst) {
 		break;
 
 	case IROp::FRSqrt:
-		regs_.Map(inst);
-		fp_.MOVI2F(SCRATCHF1, 1.0f);
-		fp_.FSQRT(regs_.F(inst.dest), regs_.F(inst.src1));
-		fp_.FDIV(regs_.F(inst.dest), SCRATCHF1, regs_.F(inst.dest));
+		callFuncF_F(&vfpu_rsqrt);
 		break;
 
 	case IROp::FRecip:
-		regs_.Map(inst);
-		fp_.MOVI2F(SCRATCHF1, 1.0f);
-		fp_.FDIV(regs_.F(inst.dest), SCRATCHF1, regs_.F(inst.src1));
+		callFuncF_F(&vfpu_rcp);
 		break;
 
 	case IROp::FAsin:
 		callFuncF_F(&vfpu_asin);
+		break;
+
+	case IROp::FVSqrt:
+		callFuncF_F(&vfpu_sqrt);
+		break;
+
+	case IROp::FExp2:
+		callFuncF_F(&vfpu_exp2);
+		break;
+
+	case IROp::FLog2:
+		callFuncF_F(&vfpu_log2);
+		break;
+
+	case IROp::FHalfToFloat:
+		callFuncF_F(inst.src2 ? &vfpu_h2f_upper : &vfpu_h2f_lower);
+		break;
+
+	case IROp::FSinCos:
+		// The helper returns the sine and cosine packed into D0, which the cache never allocates.
+		regs_.FlushBeforeCall();
+		WriteDebugProfilerStatus(IRProfilerStatus::MATH_HELPER);
+		if (regs_.IsFPRMapped(inst.src1)) {
+			int lane = regs_.GetFPRLane(inst.src1);
+			if (lane == 0)
+				fp_.FMOV(S0, regs_.F(inst.src1));
+			else
+				fp_.DUP(32, Q0, regs_.F(inst.src1), lane);
+		} else {
+			fp_.LDR(32, INDEX_UNSIGNED, S0, CTXREG, offsetof(MIPSState, f) + inst.src1 * 4);
+		}
+		QuickCallFunction(SCRATCH2_64, &vfpu_sincos_packed);
+		regs_.MapVec2(inst.dest, MIPSMap::NOINIT);
+		fp_.FMOV(regs_.FD(inst.dest), D0);
+		WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 		break;
 
 	default:

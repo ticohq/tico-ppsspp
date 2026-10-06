@@ -46,7 +46,11 @@ public:
 		nextMapDiscard_ = true;
 	}
 
+	// Returns null if the buffer can't be mapped (after device removal, for example). Skip the draw then.
 	uint8_t *BeginPush(ID3D11DeviceContext *context, UINT *offset, size_t size, int align = 16) {
+		if (!buffer_) {
+			return nullptr;
+		}
 		D3D11_MAPPED_SUBRESOURCE map;
 		pos_ = (pos_ + align - 1) & ~(align - 1);
 		if (pos_ + size > size_) {
@@ -55,7 +59,10 @@ public:
 			pos_ = 0;
 			nextMapDiscard_ = true;
 		}
-		context->Map(buffer_.Get(), 0, nextMapDiscard_ ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &map);
+		if (FAILED(context->Map(buffer_.Get(), 0, nextMapDiscard_ ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &map))) {
+			return nullptr;
+		}
+		mapped_ = true;
 		nextMapDiscard_ = false;
 		*offset = (UINT)pos_;
 		uint8_t *retval = (uint8_t *)map.pData + pos_;
@@ -63,7 +70,10 @@ public:
 		return retval;
 	}
 	void EndPush(ID3D11DeviceContext *context) {
-		context->Unmap(buffer_.Get(), 0);
+		if (mapped_) {
+			context->Unmap(buffer_.Get(), 0);
+			mapped_ = false;
+		}
 	}
 
 private:
@@ -71,14 +81,14 @@ private:
 	size_t pos_ = 0;
 	size_t size_;
 	bool nextMapDiscard_ = false;
+	bool mapped_ = false;
 };
 
-std::vector<uint8_t> CompileShaderToBytecodeD3D11(const char *code, size_t codeSize, const char *target, UINT flags);
+std::vector<uint8_t> CompileShaderToBytecodeD3D11(const char *code, size_t codeSize, const char *target, UINT flags, std::string *errorMessage = nullptr);
 
 HRESULT CreateVertexShaderD3D11(ID3D11Device *device, const char *code, size_t codeSize, std::vector<uint8_t> *byteCodeOut, D3D_FEATURE_LEVEL featureLevel, UINT flags, ID3D11VertexShader **);
 HRESULT CreatePixelShaderD3D11(ID3D11Device *device, const char *code, size_t codeSize, D3D_FEATURE_LEVEL featureLevel, UINT flags, ID3D11PixelShader **);
 HRESULT CreateComputeShaderD3D11(ID3D11Device *device, const char *code, size_t codeSize, D3D_FEATURE_LEVEL featureLevel, UINT flags, ID3D11ComputeShader **);
-HRESULT CreateGeometryShaderD3D11(ID3D11Device *device, const char *code, size_t codeSize, D3D_FEATURE_LEVEL featureLevel, UINT flags, ID3D11GeometryShader **);
 
 #define ASSERT_SUCCESS(x) \
 	if (!SUCCEEDED((x))) \

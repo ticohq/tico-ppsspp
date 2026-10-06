@@ -28,6 +28,7 @@
 #endif
 
 #include "Common/Data/Text/I18n.h"
+#include "Common/Data/Text/StringWriter.h"
 #include "Common/Profiler/Profiler.h"
 #include "Common/System/System.h"
 #include "Common/System/OSD.h"
@@ -92,6 +93,9 @@ static bool framebufIsLatched;
 
 static int enterVblankEvent = -1;
 static int leaveVblankEvent = -1;
+// Threads whose vblank wait is over, released a little after the vblank (see hleEnterVblank).
+static int vblankWakeEvent = -1;
+static std::vector<SceUID> vblankWakePending;
 static int afterFlipEvent = -1;
 static int lagSyncEvent = -1;
 
@@ -119,6 +123,11 @@ static double curFrameTime;
 static double lastFrameTime;
 static double nextFrameTime;
 static int numVBlanksSinceFlip;
+// Host timestamp of the last flip we let through, for the fast-forward flip limiter in
+// __DisplayFlip. Up here with the rest of them so a boot resets it - as a static inside the
+// function it kept a timestamp from whatever ran before, and the first flip of a new game was
+// compared against it.
+static double lastFlipHostTime;
 
 const int PSP_DISPLAY_MODE_LCD = 0;
 
@@ -129,8 +138,10 @@ std::map<SceUID, int> vblankPausedWaits;
 
 // STATE END
 
-// The vblank period is 731.5 us (0.7315 ms)
-const double vblankMs = 0.7315;
+// tests/display/vblanklen measures 730-770us from sceDisplayWaitVblankStart returning until
+// vblank ends, and an hcount of up to 14 inside it. The wait's own latency is in that, so this is
+// the upper end.
+const double vblankMs = 0.770;
 // These are guesses based on tests.
 const double vsyncStartMs = 0.5925;
 const double vsyncEndMs = 0.7265;
@@ -148,6 +159,7 @@ static u64 nextFlipCycles = 0;
 
 void hleEnterVblank(u64 userdata, int cyclesLate);
 void hleLeaveVblank(u64 userdata, int cyclesLate);
+static void hleVblankWake(u64 userdata, int cyclesLate);
 void hleAfterFlip(u64 userdata, int cyclesLate);
 void hleLagSync(u64 userdata, int cyclesLate);
 
@@ -202,6 +214,8 @@ void __DisplayInit() {
 
 	enterVblankEvent = CoreTiming::RegisterEvent("EnterVBlank", &hleEnterVblank);
 	leaveVblankEvent = CoreTiming::RegisterEvent("LeaveVBlank", &hleLeaveVblank);
+	vblankWakeEvent = CoreTiming::RegisterEvent("VBlankWake", &hleVblankWake);
+	vblankWakePending.clear();
 	afterFlipEvent = CoreTiming::RegisterEvent("AfterFlip", &hleAfterFlip);
 
 	lagSyncEvent = CoreTiming::RegisterEvent("LagSync", &hleLagSync);
@@ -211,6 +225,7 @@ void __DisplayInit() {
 	curFrameTime = 0.0;
 	nextFrameTime = 0.0;
 	lastFrameTime = 0.0;
+	lastFlipHostTime = 0.0;
 
 	__KernelRegisterWaitTypeFuncs(WAITTYPE_VBLANK, __DisplayVblankBeginCallback, __DisplayVblankEndCallback);
 }
@@ -222,7 +237,7 @@ struct GPUStatistics_v0 {
 };
 
 void __DisplayDoState(PointerWrap &p) {
-	auto s = p.Section("sceDisplay", 1, 7);
+	auto s = p.Section("sceDisplay", 1, 8);
 	if (!s)
 		return;
 
@@ -249,14 +264,24 @@ void __DisplayDoState(PointerWrap &p) {
 	CoreTiming::RestoreRegisterEvent(leaveVblankEvent, "LeaveVBlank", &hleLeaveVblank);
 	Do(p, afterFlipEvent);
 	CoreTiming::RestoreRegisterEvent(afterFlipEvent, "AfterFlip", &hleAfterFlip);
+	if (s >= 8) {
+		Do(p, vblankWakeEvent);
+		Do(p, vblankWakePending);
+	} else {
+		vblankWakeEvent = -1;
+		vblankWakePending.clear();
+	}
+	CoreTiming::RestoreRegisterEvent(vblankWakeEvent, "VBlankWake", &hleVblankWake);
 
 	if (s >= 5) {
 		Do(p, lagSyncEvent);
 		Do(p, lagSyncScheduled);
 		CoreTiming::RestoreRegisterEvent(lagSyncEvent, "LagSync", &hleLagSync);
-		lastLagSync = time_now_d();
-		if (lagSyncScheduled != UseLagSync()) {
-			ScheduleLagSync();
+		if (p.mode == p.MODE_READ) {
+			lastLagSync = time_now_d();
+			if (lagSyncScheduled != UseLagSync()) {
+				ScheduleLagSync();
+			}
 		}
 	} else {
 		lagSyncEvent = -1;
@@ -273,7 +298,7 @@ void __DisplayDoState(PointerWrap &p) {
 	gstate_c.DoState(p);
 	if (s < 2) {
 		// This shouldn't have been savestated anyway, but it was.
-		// It's unlikely to overlap with the first value in gpuStats.
+		// It's unlikely to overlap with the first value in gpuStats.perFrame.
 		int gpuVendorTemp = 0;
 		p.ExpectVoid(&gpuVendorTemp, sizeof(gpuVendorTemp));
 	}
@@ -283,12 +308,16 @@ void __DisplayDoState(PointerWrap &p) {
 	}
 
 	if (s < 7) {
-		u64 now = CoreTiming::GetTicks();
+		u64 now = CoreTiming::GetTicks(currentMIPS);
 		lastFlipCycles = now;
 		nextFlipCycles = now;
 	} else {
 		Do(p, lastFlipCycles);
 		Do(p, nextFlipCycles);
+	}
+	if (p.mode == p.MODE_READ) {
+		// Not saved. Start counting again rather than carry over the session before the load.
+		lastFlipsTooFrequent = 0;
 	}
 
 	gpu->DoState(p);
@@ -301,13 +330,14 @@ void __DisplayDoState(PointerWrap &p) {
 
 void __DisplayShutdown() {
 	vblankWaitingThreads.clear();
+	vblankWakePending.clear();
 }
 
 void __DisplayVblankBeginCallback(SceUID threadID, SceUID prevCallbackId) {
 	SceUID pauseKey = prevCallbackId == 0 ? threadID : prevCallbackId;
 
-	// This means two callbacks in a row.  PSP crashes if the same callback waits inside itself (may need more testing.)
-	// TODO: Handle this better?
+	// Shouldn't happen: each nesting level pauses under its own key, and on hardware a callback can
+	// nest only one level (a CB wait that would go deeper never returns.)
 	if (vblankPausedWaits.find(pauseKey) != vblankPausedWaits.end()) {
 		return;
 	}
@@ -356,7 +386,7 @@ void __DisplaySetWasPaused() {
 	wasPaused = true;
 }
 
-// TOOD: Should return 59.997?
+// TODO: Should return 59.997?
 static int FrameTimingLimit() {
 	if (!NetworkAllowSpeedControl()) {
 		return 60;
@@ -383,7 +413,13 @@ static int FrameTimingLimit() {
 		return fixRate(g_Config.iFpsLimit2);
 	if (PSP_CoreParameter().fpsLimit == FPSLimit::ANALOG)
 		return fixRate(PSP_CoreParameter().analogFpsLimit);
+	if (PSP_CoreParameter().fpsLimit == FPSLimit::DEBUGGER)
+		return fixRate(PSP_CoreParameter().debuggerFpsLimit);
 	return framerate;
+}
+
+int __DisplayGetFrameTimingLimit() {
+	return FrameTimingLimit();
 }
 
 static bool FrameTimingThrottled() {
@@ -395,7 +431,8 @@ static void DoFrameDropLogging(float scaledTimestep) {
 		const double actualTimestep = curFrameTime - lastFrameTime;
 
 		char stats[4096];
-		__DisplayGetDebugStats(stats, sizeof(stats));
+		StringWriter w(stats);
+		__DisplayGetDebugStats(w);
 		NOTICE_LOG(Log::sceDisplay, "Dropping frames - budget = %.2fms / %.1ffps, actual = %.2fms (+%.2fms) / %.1ffps\n%s", scaledTimestep * 1000.0, 1.0 / scaledTimestep, actualTimestep * 1000.0, (actualTimestep - scaledTimestep) * 1000.0, 1.0 / actualTimestep, stats);
 	}
 }
@@ -505,7 +542,7 @@ static void DoFrameIdleTiming() {
 #endif
 		}
 
-		if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || coreCollectDebugStats) {
+		if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || g_coreCollectDebugStats) {
 			DisplayNotifySleep(time_now_d() - before);
 		}
 	}
@@ -520,26 +557,28 @@ void hleEnterVblank(u64 userdata, int cyclesLate) {
 
 	CoreTiming::ScheduleEvent(msToCycles(vblankMs) - cyclesLate, leaveVblankEvent, vbCount + 1);
 
-	// Trigger VBlank interrupt handlers.
-	__TriggerInterrupt(PSP_INTR_IMMEDIATE | PSP_INTR_ONLY_IF_ENABLED | PSP_INTR_ALWAYS_RESCHED, PSP_VBLANK_INTR, PSP_INTR_SUB_ALL);
-
-	// Wake up threads waiting for VBlank
-	u32 error;
-	bool wokeThreads = false;
+	// Threads waiting for this vblank are released about 48us after it, plus ~9us for each one
+	// beyond the first: on hardware a lone waiter returns ~53us after a vblank handler would run,
+	// and with four the first to run does so ~85us after the handler (pspautotests
+	// threads/scheduling/vblankwake). Which vblank a wait is for is still decided here, so a
+	// thread that starts waiting in between waits for the next one.
+	// TODO: The vblank itself takes ~62us of CPU on hardware (~70us with a handler, which runs
+	// ~28us in), and a waiter back ~90us after it still reads hcount 1. Both fit only if the
+	// interrupt comes ~40us before the line count wraps, which we don't model yet, so that cost
+	// isn't charged either.
 	for (size_t i = 0; i < vblankWaitingThreads.size(); i++) {
 		if (--vblankWaitingThreads[i].vcountUnblock == 0) {
-			// Only wake it if it wasn't already released by someone else.
-			SceUID waitID = __KernelGetWaitID(vblankWaitingThreads[i].threadID, WAITTYPE_VBLANK, error);
-			if (waitID == 1) {
-				__KernelResumeThreadFromWait(vblankWaitingThreads[i].threadID, 0);
-				wokeThreads = true;
-			}
+			vblankWakePending.push_back(vblankWaitingThreads[i].threadID);
 			vblankWaitingThreads.erase(vblankWaitingThreads.begin() + i--);
 		}
 	}
-	if (wokeThreads) {
-		__KernelReSchedule("entered vblank");
+	if (!vblankWakePending.empty()) {
+		const int releaseUs = 48 + 9 * ((int)vblankWakePending.size() - 1);
+		CoreTiming::ScheduleEvent(usToCycles(releaseUs) - cyclesLate, vblankWakeEvent, 0);
 	}
+
+	// Trigger VBlank interrupt handlers.
+	__TriggerInterrupt(PSP_INTR_IMMEDIATE | PSP_INTR_ONLY_IF_ENABLED | PSP_INTR_ALWAYS_RESCHED, PSP_VBLANK_INTR, PSP_INTR_SUB_ALL);
 
 	// We use the emulation timebase here, for auto movements to be smooth as seen from the game.
 	g_controlMapper.UpdateAutoMovements(CoreTiming::GetGlobalTimeUs() / 1000000.0);
@@ -643,12 +682,11 @@ void __DisplayFlip(int cyclesLate) {
 	// Alternative to frameskip fast-forward, where we draw everything.
 	// Useful if skipping a frame breaks graphics or for checking drawing speed.
 	if (g_frameTiming.FastForwardNeedsSkipFlip() && (!FrameTimingThrottled() || refreshRateNeedsSkip)) {
-		static double lastFlip = 0;
 		double now = time_now_d();
-		if ((now - lastFlip) < 1.0f / refreshRate) {
+		if ((now - lastFlipHostTime) < 1.0f / refreshRate) {
 			forceNoFlip = true;
 		} else {
-			lastFlip = now;
+			lastFlipHostTime = now;
 		}
 	}
 
@@ -674,7 +712,7 @@ void __DisplayFlip(int cyclesLate) {
 	}
 
 	if (fbDirty) {
-		gpuStats.numFlips++;
+		gpuStats.totals.numFlips++;
 	}
 
 	float scaledTimestep = (float)numVBlanksSinceFlip * timePerVblank;
@@ -690,7 +728,7 @@ void __DisplayFlip(int cyclesLate) {
 		// 4 here means 1 drawn, 4 skipped - so 12 fps minimum.
 		maxFrameskip = frameSkipNum;
 	}
-	if (numSkippedFrames >= maxFrameskip || gpuDebug->GetRecorder()->IsActivePending()) {
+	if (numSkippedFrames >= maxFrameskip || gpu->GetRecorder()->IsActivePending()) {
 		skipFrame = false;
 	}
 
@@ -718,7 +756,7 @@ void __DisplayFlip(int cyclesLate) {
 	CoreTiming::ScheduleEvent(0 - cyclesLate, afterFlipEvent, 0);
 	numVBlanksSinceFlip = 0;
 
-	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || coreCollectDebugStats) {
+	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || g_coreCollectDebugStats) {
 		// Track how long we sleep (whether vsync or sleep_ms.)
 		DisplayNotifySleep(time_now_d() - frameSleepStart, frameSleepPos);
 	}
@@ -732,6 +770,23 @@ void hleAfterFlip(u64 userdata, int cyclesLate) {
 	// This seems like as good a time as any to check if the config changed.
 	if (lagSyncScheduled != UseLagSync()) {
 		ScheduleLagSync();
+	}
+}
+
+static void hleVblankWake(u64 userdata, int cyclesLate) {
+	u32 error;
+	bool wokeThreads = false;
+	for (SceUID threadID : vblankWakePending) {
+		// Only wake it if it wasn't already released by someone else.
+		SceUID waitID = __KernelGetWaitID(threadID, WAITTYPE_VBLANK, error);
+		if (waitID == 1) {
+			__KernelResumeThreadFromWait(threadID, 0);
+			wokeThreads = true;
+		}
+	}
+	vblankWakePending.clear();
+	if (wokeThreads) {
+		__KernelReSchedule("vblank waiters released");
 	}
 }
 
@@ -784,7 +839,7 @@ void hleLagSync(u64 userdata, int cyclesLate) {
 	const int over = (int)((now - goal) * 1000000);
 	ScheduleLagSync(over - emuOver);
 
-	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || coreCollectDebugStats) {
+	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || g_coreCollectDebugStats) {
 		DisplayNotifySleep(now - before);
 	}
 }
@@ -794,7 +849,15 @@ static u32 sceDisplayIsVblank() {
 }
 
 void __DisplayWaitForVblanks(const char *reason, int vblanks, bool callbacks) {
-	const s64 ticksIntoFrame = CoreTiming::GetTicks() - DisplayFrameStartTicks();
+	// Nothing can wait in an interrupt handler or with dispatch disabled, and sceDisplaySetMode
+	// then returns 0 without waiting (pspautotests intr/waits). Gods Eater Burst calls it from its
+	// vblank handler, and the wait went to the idle thread the handler runs on. Once both idle
+	// threads were waiting there was nothing left to schedule.
+	if (__IsInInterrupt() || !__KernelIsDispatchEnabled()) {
+		return;
+	}
+
+	const s64 ticksIntoFrame = CoreTiming::GetTicks(currentMIPS) - DisplayFrameStartTicks();
 	const s64 cyclesToNextVblank = msToCycles(frameMs) - ticksIntoFrame;
 
 	// These syscalls take about 115 us, so if the next vblank is before then, we're waiting extra.
@@ -844,9 +907,9 @@ void __DisplaySetFramebuf(u32 topaddr, int linesize, int pixelFormat, int sync) 
 		// Doing it in non-buffered though creates problems (black screen) on occasion though
 		// so let's not.
 		if (!flippedThisFrame && !g_Config.bSkipBufferEffects) {
-			double before_flip = time_now_d();
+			const double before_flip = time_now_d();
 			__DisplayFlip(0);
-			double after_flip = time_now_d();
+			const double after_flip = time_now_d();
 			// Ignore for debug stats.
 			hleSetFlipTime(after_flip - before_flip);
 		}
@@ -903,7 +966,7 @@ int sceDisplaySetFramebuf(u32 topaddr, int linesize, int pixelformat, int sync) 
 		// Otherwise it'll always be ahead if the game messes up even once.
 		const s64 LEEWAY_CYCLES_PER_FLIP = usToCycles(10);
 
-		u64 now = CoreTiming::GetTicks();
+		u64 now = CoreTiming::GetTicks(currentMIPS);
 		s64 cyclesAhead = nextFlipCycles - now;
 		if (cyclesAhead > FLIP_DELAY_CYCLES_MIN) {
 			if (lastFlipsTooFrequent >= FLIP_DELAY_MIN_FLIPS) {
@@ -938,7 +1001,7 @@ int sceDisplaySetFramebuf(u32 topaddr, int linesize, int pixelformat, int sync) 
 	}
 }
 
-bool __DisplayGetFramebuf(PSPPointer<u8> *topaddr, u32 *linesize, u32 *pixelFormat, int latchedMode) {
+bool __DisplayGetFramebuf(PSPPointer<u8> *topaddr, u32 *linesize, GEBufferFormat *pixelFormat, int latchedMode) {
 	const FrameBufferState &fbState = latchedMode == PSP_DISPLAY_SETBUF_NEXTFRAME ? latchedFramebuf : framebuf;
 	if (topaddr != nullptr)
 		(*topaddr).ptr = fbState.topaddr;
@@ -953,12 +1016,12 @@ bool __DisplayGetFramebuf(PSPPointer<u8> *topaddr, u32 *linesize, u32 *pixelForm
 static u32 sceDisplayGetFramebuf(u32 topaddrPtr, u32 linesizePtr, u32 pixelFormatPtr, int latchedMode) {
 	const FrameBufferState &fbState = latchedMode == PSP_DISPLAY_SETBUF_NEXTFRAME ? latchedFramebuf : framebuf;
 
-	if (Memory::IsValidAddress(topaddrPtr))
-		Memory::Write_U32(fbState.topaddr, topaddrPtr);
-	if (Memory::IsValidAddress(linesizePtr))
-		Memory::Write_U32(fbState.stride, linesizePtr);
-	if (Memory::IsValidAddress(pixelFormatPtr))
-		Memory::Write_U32(fbState.fmt, pixelFormatPtr);
+	if (Memory::IsValid4AlignedAddress(topaddrPtr))
+		Memory::WriteUnchecked_U32(fbState.topaddr, topaddrPtr);
+	if (Memory::IsValid4AlignedAddress(linesizePtr))
+		Memory::WriteUnchecked_U32(fbState.stride, linesizePtr);
+	if (Memory::IsValid4AlignedAddress(pixelFormatPtr))
+		Memory::WriteUnchecked_U32(fbState.fmt, pixelFormatPtr);
 
 	return hleLogDebug(Log::sceDisplay, 0);
 }
@@ -1066,17 +1129,17 @@ static u32 sceDisplayIsForeground() {
 }
 
 static u32 sceDisplayGetMode(u32 modeAddr, u32 widthAddr, u32 heightAddr) {
-	if (Memory::IsValidAddress(modeAddr))
-		Memory::Write_U32(mode, modeAddr);
-	if (Memory::IsValidAddress(widthAddr))
-		Memory::Write_U32(width, widthAddr);
-	if (Memory::IsValidAddress(heightAddr))
-		Memory::Write_U32(height, heightAddr);
+	if (Memory::IsValid4AlignedAddress(modeAddr))
+		Memory::WriteUnchecked_U32(mode, modeAddr);
+	if (Memory::IsValid4AlignedAddress(widthAddr))
+		Memory::WriteUnchecked_U32(width, widthAddr);
+	if (Memory::IsValid4AlignedAddress(heightAddr))
+		Memory::WriteUnchecked_U32(height, heightAddr);
 	return hleLogDebug(Log::sceDisplay, 0);
 }
 
 static u32 sceDisplayIsVsync() {
-	u64 now = CoreTiming::GetTicks();
+	u64 now = CoreTiming::GetTicks(currentMIPS);
 	u64 start = DisplayFrameStartTicks() + msToCycles(vsyncStartMs);
 	u64 end = DisplayFrameStartTicks() + msToCycles(vsyncEndMs);
 
@@ -1084,8 +1147,8 @@ static u32 sceDisplayIsVsync() {
 }
 
 static u32 sceDisplayGetResumeMode(u32 resumeModeAddr) {
-	if (Memory::IsValidAddress(resumeModeAddr))
-		Memory::Write_U32(resumeMode, resumeModeAddr);
+	if (Memory::IsValid4AlignedAddress(resumeModeAddr))
+		Memory::WriteUnchecked_U32(resumeMode, resumeModeAddr);
 	return hleLogDebug(Log::sceDisplay, 0);
 }
 
@@ -1098,12 +1161,12 @@ static u32 sceDisplaySetResumeMode(u32 rMode) {
 static u32 sceDisplayGetBrightness(u32 levelAddr, u32 otherAddr) {
 	// Standard levels on a PSP: 44, 60, 72, 84 (AC only)
 
-	if (Memory::IsValidAddress(levelAddr)) {
-		Memory::Write_U32(brightnessLevel, levelAddr);
+	if (Memory::IsValid4AlignedAddress(levelAddr)) {
+		Memory::WriteUnchecked_U32(brightnessLevel, levelAddr);
 	}
 	// Always seems to write zero?
-	if (Memory::IsValidAddress(otherAddr)) {
-		Memory::Write_U32(0, otherAddr);
+	if (Memory::IsValid4AlignedAddress(otherAddr)) {
+		Memory::WriteUnchecked_U32(0, otherAddr);
 	}
 	return hleLogWarning(Log::sceDisplay, 0);
 }

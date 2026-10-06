@@ -18,6 +18,7 @@
 #include "Common/Net/Resolve.h"
 #include "Common/UI/Root.h"
 #include "Common/UI/PopupScreens.h"
+#include "Common/UI/ScreenManager.h"
 #include "Common/Data/Text/Parsers.h"
 #include "Common/StringUtils.h"
 #include "Common/Net/HTTPClient.h"
@@ -861,7 +862,7 @@ void AskToEditCurrentServer(int requestToken, ScreenManager *screenManager) {
 
 	// Choose method depending on platform capabilities.
 	if (System_GetPropertyBool(SYSPROP_HAS_TEXT_INPUT_DIALOG)) {
-		System_InputBoxGetString(requestToken, n->T("Ad hoc server address"), g_Config.sProAdhocServer, false, [](const std::string &enteredValue, int) {
+		System_InputBoxGetString(requestToken, n->T("Ad hoc server address"), g_Config.sProAdhocServer, false, [](std::string_view enteredValue, int) {
 			EditServerName(enteredValue);
 		});
 		return;

@@ -219,6 +219,33 @@ void Jit::ApplyPrefixD(const u8 *vregs, VectorSize sz) {
 
 // Vector regs can overlap in all sorts of swizzled ways.
 // This does allow a single overlap in sregs[i].
+// True if the prefix only touches lanes the op has. A position past the size may only be the
+// identity, and a position within it may not name a lane past it (which zeroes the result lane
+// on hardware, see cpu/vfpu/prefix_ctrl - the interpreter handles that).
+static bool IsPrefixWithinSize(u32 prefix, VectorSize sz) {
+	int n = GetNumVectorElements(sz);
+	for (int i = 0; i < 4; i++) {
+		int regnum = (prefix >> (i * 2)) & 3;
+		int abs = (prefix >> (8 + i)) & 1;
+		int negate = (prefix >> (16 + i)) & 1;
+		int constants = (prefix >> (12 + i)) & 1;
+		if (constants) {
+			continue;
+		}
+		if (i >= n) {
+			if (abs || negate || regnum != i)
+				return false;
+		} else if (regnum >= n) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool IsPrefixWithinSize(u32 prefix, MIPSOpcode op) {
+	return IsPrefixWithinSize(prefix, GetVecSize(op));
+}
+
 bool IsOverlapSafeAllowS(int dreg, int di, int sn, const u8 sregs[], int tn = 0, const u8 tregs[] = NULL) {
 	for (int i = 0; i < sn; ++i) {
 		if (sregs[i] == dreg && i != di)
@@ -240,6 +267,13 @@ bool IsOverlapSafe(int dreg, int di, int sn, const u8 sregs[], int tn = 0, const
 void Jit::Comp_SV(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(LSU_VFPU);
 
+	if (js.kernelMode) {
+		// Send all memory accesses to the interpreter in kernel mode.
+		// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+		DISABLE;
+		return;
+	}
+
 	s32 imm = (signed short)(op&0xFFFC);
 	int vt = ((op >> 16) & 0x1f) | ((op & 3) << 5);
 	MIPSGPReg rs = _RS;
@@ -247,7 +281,7 @@ void Jit::Comp_SV(MIPSOpcode op) {
 	CheckMemoryBreakpoint(0, rs, imm);
 
 	switch (op >> 26) {
-	case 50: //lv.s  // VI(vt) = Memory::Read_U32(addr);
+	case 50: // lv.s
 		{
 			gpr.Lock(rs);
 			fpr.MapRegV(vt, MAP_DIRTY | MAP_NOINIT);
@@ -267,7 +301,7 @@ void Jit::Comp_SV(MIPSOpcode op) {
 		}
 		break;
 
-	case 58: //sv.s   // Memory::Write_U32(VI(vt), addr);
+	case 58: // sv.s
 		{
 			gpr.Lock(rs);
 
@@ -296,6 +330,13 @@ void Jit::Comp_SV(MIPSOpcode op) {
 
 void Jit::Comp_SVQ(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(LSU_VFPU);
+
+	if (js.kernelMode) {
+		// Send all memory accesses to the interpreter in kernel mode.
+		// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+		DISABLE;
+		return;
+	}
 
 	int imm = (signed short)(op&0xFFFC);
 	int vt = (((op >> 16) & 0x1f)) | ((op&1) << 5);
@@ -507,7 +548,8 @@ void Jit::Comp_SVQ(MIPSOpcode op) {
 void Jit::Comp_VVectorInit(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_XFER);
 
-	if (js.HasUnknownPrefix())
+	// vzero/vone are vmov with a constant forced into the S prefix, so a pending one changes them.
+	if (js.HasUnknownPrefix() || js.HasSPrefix())
 		DISABLE;
 
 	VectorSize sz = GetVecSize(op);
@@ -561,7 +603,8 @@ void Jit::Comp_VVectorInit(MIPSOpcode op) {
 
 void Jit::Comp_VIdt(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_XFER);
-	if (js.HasUnknownPrefix())
+	// Like vone, a pending S prefix changes the result.
+	if (js.HasUnknownPrefix() || js.HasSPrefix())
 		DISABLE;
 
 	int vd = _VD;
@@ -793,7 +836,8 @@ void Jit::Comp_VHdp(MIPSOpcode op) {
 void Jit::Comp_VCrossQuat(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
 
-	if (js.HasUnknownPrefix())
+	// The prefixes apply in their own way to these (the IR frontend says "weird prefixes").
+	if (!js.HasNoPrefix())
 		DISABLE;
 
 	VectorSize sz = GetVecSize(op);
@@ -873,19 +917,19 @@ void Jit::Comp_VCrossQuat(MIPSOpcode op) {
 		ADDSS(XMM0, R(XMM1));
 		MOVSS(fpr.V(dregs[0]), XMM0);
 
-		// Compute Y
-		//d[1] = s[1] * t[3] + s[2] * t[0] + s[3] * t[1] - s[0] * t[2];
+		// Compute Y, summed in the interpreter's order
+		//d[1] = -s[0] * t[2] + s[1] * t[3] + s[2] * t[0] + s[3] * t[1];
 		MOVSS(XMM0, fpr.V(sregs[1]));
 		MULSS(XMM0, fpr.V(tregs[3]));
+		MOVSS(XMM1, fpr.V(sregs[0]));
+		MULSS(XMM1, fpr.V(tregs[2]));
+		SUBSS(XMM0, R(XMM1));
 		MOVSS(XMM1, fpr.V(sregs[2]));
 		MULSS(XMM1, fpr.V(tregs[0]));
 		ADDSS(XMM0, R(XMM1));
 		MOVSS(XMM1, fpr.V(sregs[3]));
 		MULSS(XMM1, fpr.V(tregs[1]));
 		ADDSS(XMM0, R(XMM1));
-		MOVSS(XMM1, fpr.V(sregs[0]));
-		MULSS(XMM1, fpr.V(tregs[2]));
-		SUBSS(XMM0, R(XMM1));
 		MOVSS(fpr.V(dregs[1]), XMM0);
 
 		// Compute Z
@@ -903,20 +947,20 @@ void Jit::Comp_VCrossQuat(MIPSOpcode op) {
 		ADDSS(XMM0, R(XMM1));
 		MOVSS(fpr.V(dregs[2]), XMM0);
 
-		// Compute W
+		// Compute W, summed in the interpreter's order: s[3] * t[3] - (s[0] * t[0] + s[1] * t[1] + s[2] * t[2])
 		//d[3] = -s[0] * t[0] - s[1] * t[1] - s[2] * t[2] + s[3] * t[3];
-		MOVSS(XMM0, fpr.V(sregs[3]));
-		MULSS(XMM0, fpr.V(tregs[3]));
+		MOVSS(XMM0, fpr.V(sregs[0]));
+		MULSS(XMM0, fpr.V(tregs[0]));
 		MOVSS(XMM1, fpr.V(sregs[1]));
 		MULSS(XMM1, fpr.V(tregs[1]));
-		SUBSS(XMM0, R(XMM1));
+		ADDSS(XMM0, R(XMM1));
 		MOVSS(XMM1, fpr.V(sregs[2]));
 		MULSS(XMM1, fpr.V(tregs[2]));
-		SUBSS(XMM0, R(XMM1));
-		MOVSS(XMM1, fpr.V(sregs[0]));
-		MULSS(XMM1, fpr.V(tregs[0]));
-		SUBSS(XMM0, R(XMM1));
-		MOVSS(fpr.V(dregs[3]), XMM0);
+		ADDSS(XMM0, R(XMM1));
+		MOVSS(XMM1, fpr.V(sregs[3]));
+		MULSS(XMM1, fpr.V(tregs[3]));
+		SUBSS(XMM1, R(XMM0));
+		MOVSS(fpr.V(dregs[3]), XMM1);
 	}
 
 	fpr.ReleaseSpillLocks();
@@ -1001,7 +1045,12 @@ static s32 DoVmaxSS(s32 treg) {
 void Jit::Comp_VecDo3(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
 
-	if (js.HasUnknownPrefix())
+	// The prefix rules here follow the IR frontend, which follows the interpreter and the prefix
+	// tests in pspautotests. What's not handled goes to the interpreter.
+	if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || !IsPrefixWithinSize(js.prefixT, op))
+		DISABLE;
+	// vdiv applies the prefixes to its last lane only, from position 0.
+	if ((op >> 26) == 24 && ((op >> 23) & 7) == 7 && GetVecSize(op) != V_Single && !js.HasNoPrefix())
 		DISABLE;
 
 	// Check that we can support the ops, and prepare temporary values for ops that need it.
@@ -1612,14 +1661,18 @@ void Jit::Comp_Vh2f(MIPSOpcode op) {
 	SSE_CONST4(magic,               (254 - 15) << 23);
 	SSE_CONST4(was_infnan,          0x7bff);
 	SSE_CONST4(exp_infnan,          255 << 23);
+	SSE_CONST4(max_subnormal,       0x03ff);
+	SSE_CONST4(sign_only,           0x80000000);
 
-	OpArg mask_nosign_arg, nan_mantissa_arg, magic_arg, was_infnan_arg, exp_infnan_arg;
+	OpArg mask_nosign_arg, nan_mantissa_arg, magic_arg, was_infnan_arg, exp_infnan_arg, max_subnormal_arg, sign_only_arg;
 	if (RipAccessible(mask_nosign)) {
 		mask_nosign_arg = M(&mask_nosign[0]);
 		nan_mantissa_arg = M(&nan_mantissa[0]);
 		magic_arg = M(&magic[0]);
 		was_infnan_arg = M(&was_infnan[0]);
 		exp_infnan_arg = M(&exp_infnan[0]);
+		max_subnormal_arg = M(&max_subnormal[0]);
+		sign_only_arg = M(&sign_only[0]);
 	} else {
 		MOV(PTRBITS, R(TEMPREG), ImmPtr(&mask_nosign[0]));
 		mask_nosign_arg = MAccessibleDisp(TEMPREG, &mask_nosign[0], &mask_nosign[0]);
@@ -1627,6 +1680,8 @@ void Jit::Comp_Vh2f(MIPSOpcode op) {
 		magic_arg = MAccessibleDisp(TEMPREG, &mask_nosign[0], &magic[0]);
 		was_infnan_arg = MAccessibleDisp(TEMPREG, &mask_nosign[0], &was_infnan[0]);
 		exp_infnan_arg = MAccessibleDisp(TEMPREG, &mask_nosign[0], &exp_infnan[0]);
+		max_subnormal_arg = MAccessibleDisp(TEMPREG, &mask_nosign[0], &max_subnormal[0]);
+		sign_only_arg = MAccessibleDisp(TEMPREG, &mask_nosign[0], &sign_only[0]);
 	}
 
 #undef SSE_CONST4
@@ -1650,9 +1705,12 @@ void Jit::Comp_Vh2f(MIPSOpcode op) {
 	// Flush SIMD.
 	fpr.SimpleRegsV(sregs, sz, 0);
 
-	// Force ourselves an extra xreg as temp space.
-	X64Reg tempR = fpr.GetFreeXReg();
-	
+	// Force ourselves two extra xregs as temp space.
+	X64Reg temps[2];
+	fpr.GetFreeXRegs(temps, 2);
+	X64Reg tempR = temps[0];
+	X64Reg keepMask = temps[1];
+
 	MOVSS(XMM0, fpr.V(sregs[0]));
  	if (sz != V_Single) {
 		MOVSS(XMM1, fpr.V(sregs[1]));
@@ -1667,6 +1725,11 @@ void Jit::Comp_Vh2f(MIPSOpcode op) {
 	ANDPS(XMM0, mask_nosign_arg); // xmm0 = expmant
 	XORPS(XMM1, R(XMM0));  // xmm1 = justsign = expmant ^ xmm0
 	MOVAPS(tempR, R(XMM0));
+	// The hardware flushes subnormal halves to a signed zero: keep only the sign where the
+	// exponent is zero.
+	MOVAPS(keepMask, R(XMM0));
+	PCMPGTD(keepMask, max_subnormal_arg);  // keepMask = exponent != 0
+	ORPS(keepMask, sign_only_arg);
 	PSLLD(XMM0, 13);
 	MULPS(XMM0, magic_arg);  /// xmm0 = scaled
 	PSLLD(XMM1, 16);  // xmm1 = sign
@@ -1680,8 +1743,9 @@ void Jit::Comp_Vh2f(MIPSOpcode op) {
 	ANDPS(XMM1, R(tempR)); // xmm1 = infnan result OR zero if not infnan
 	ANDNPS(tempR, R(XMM0)); // tempR = result OR zero if infnan
 	ORPS(XMM1, R(tempR));
+	ANDPS(XMM1, R(keepMask));
 
-	fpr.MapRegsV(dregs, outsize, MAP_NOINIT | MAP_DIRTY);  
+	fpr.MapRegsV(dregs, outsize, MAP_NOINIT | MAP_DIRTY);
 
 	// TODO: Could apply D-prefix in parallel here...
 
@@ -1709,7 +1773,7 @@ alignas(16) static s8 vuc2i_shuffle[16] = { 0, 0, 0, 0,  1, 1, 1, 1,  2, 2, 2, 2
 
 void Jit::Comp_Vx2i(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
-	if (js.HasUnknownPrefix())
+	if (js.HasUnknownPrefix() || js.HasSPrefix())
 		DISABLE;
 
 	int bits = ((op >> 16) & 2) == 0 ? 8 : 16; // vuc2i/vc2i (0/1), vus2i/vs2i (2/3)
@@ -1959,7 +2023,8 @@ void Jit::Comp_Vcst(MIPSOpcode op) {
 		MOVSS(XMM0, MatR(TEMPREG));
 	}
 
-	if (fpr.TryMapRegsVS(dregs, sz, MAP_NOINIT | MAP_DIRTY)) {
+	// The SIMD path below skips ApplyPrefixD, so only take it without a D prefix.
+	if (!js.HasDPrefix() && fpr.TryMapRegsVS(dregs, sz, MAP_NOINIT | MAP_DIRTY)) {
 		SHUFPS(XMM0, R(XMM0), _MM_SHUFFLE(0,0,0,0));
 		MOVAPS(fpr.VS(dregs), XMM0);
 		fpr.ReleaseSpillLocks();
@@ -2007,9 +2072,17 @@ void Jit::Comp_Vsgn(MIPSOpcode op) {
 
 	// Would be nice with more temp regs here so we could put signBitLower and oneOneOneOne into regs...
 	for (int i = 0; i < n; ++i) {
-		XORPS(XMM0, R(XMM0));
-		CMPEQSS(XMM0, fpr.V(sregs[i]));  // XMM0 = s[i] == 0.0f
+		// A denormal signs as zero like on the hardware, so test the exponent field, not the value.
 		MOVSS(XMM1, fpr.V(sregs[i]));
+		MOVAPS(tempxregs[i], R(XMM1));
+		if (RipAccessible(fourinfnan)) {
+			ANDPS(tempxregs[i], M(&fourinfnan));  // rip accessible
+		} else {
+			MOV(PTRBITS, R(TEMPREG), ImmPtr(&fourinfnan));
+			ANDPS(tempxregs[i], MatR(TEMPREG));
+		}
+		XORPS(XMM0, R(XMM0));
+		CMPEQSS(XMM0, R(tempxregs[i]));  // XMM0 = exponent of s[i] == 0
 		// Preserve sign bit, replace rest with ones
 		if (RipAccessible(signBitLower)) {
 			ANDPS(XMM1, M(&signBitLower));  // rip accessible
@@ -2104,7 +2177,7 @@ void Jit::Comp_Vocp(MIPSOpcode op) {
 
 void Jit::Comp_Vbfy(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
-	if (js.HasUnknownPrefix())
+	if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix() || (js.prefixS & VFPU_NEGATE(1, 1, 1, 1)) != 0)
 		DISABLE;
 
 	VectorSize sz = GetVecSize(op);
@@ -2216,6 +2289,22 @@ void SinCosNegSin(SinCosArg angle, float *output) {
 	output[0] = -output[0];
 }
 
+void VSqrt(SinCosArg arg, float *output) {
+	output[0] = vfpu_sqrt(arg);
+}
+
+void VRSqrt(SinCosArg arg, float *output) {
+	output[0] = vfpu_rsqrt(arg);
+}
+
+void VRcp(SinCosArg arg, float *output) {
+	output[0] = vfpu_rcp(arg);
+}
+
+void VNRcp(SinCosArg arg, float *output) {
+	output[0] = -vfpu_rcp(arg);
+}
+
 void Exp2(SinCosArg arg, float *output) {
 	output[0] = vfpu_exp2(arg);
 }
@@ -2228,11 +2317,65 @@ void RExp2(SinCosArg arg, float *output) {
 	output[0] = vfpu_rexp2(arg);
 }
 
+#if PPSSPP_ARCH(AMD64)
+static float NegRcp(float x) {
+	return -vfpu_rcp(x);
+}
+
+static float NegSin(float x) {
+	return -vfpu_sin(x);
+}
+
+// The VV2Op math functions, called with CallProtectedLeaf. They take and return their float in XMM0.
+static float (*VV2OpMathFunc(int optype))(float) {
+	switch (optype) {
+	case 16: return &vfpu_rcp;
+	case 17: return &vfpu_rsqrt;
+	case 18: return &vfpu_sin;
+	case 19: return &vfpu_cos;
+	case 20: return &vfpu_exp2;
+	case 21: return &vfpu_log2;
+	case 22: return &vfpu_sqrt;
+	case 23: return &vfpu_asin;
+	case 24: return &NegRcp;
+	case 26: return &NegSin;
+	case 28: return &vfpu_rexp2;
+	default: return nullptr;
+	}
+}
+#endif
+
 void Jit::Comp_VV2Op(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
 
 	if (js.HasUnknownPrefix())
 		DISABLE;
+	{
+		int optype = (op >> 16) & 0x1f;
+		if (optype == 0) {
+			if (!IsPrefixWithinSize(js.prefixS, op))
+				DISABLE;
+		} else if (optype == 1 || optype == 2) {
+			// vabs and vneg are vmov with the abs/negate bit forced, so a negate in the S prefix
+			// doesn't negate twice. D prefix is fine for these, and used sometimes.
+			if (js.HasSPrefix())
+				DISABLE;
+		} else if (optype == 5 && js.HasDPrefix()) {
+			// vsat1 doesn't apply the D saturation.
+			DISABLE;
+		}
+		if (optype >= 16 && !js.HasNoPrefix()) {
+			// These apply the S and D prefixes to their last lane only, from prefix position 0.
+			// That's the whole vector for a single, so only that case is handled here.
+			if (GetVecSize(op) != V_Single)
+				DISABLE;
+			if (!IsPrefixWithinSize(js.prefixS, op))
+				DISABLE;
+			// The negative ones seem to use negate flags as a prefix hack.
+			if (optype >= 24 && (js.prefixS & 0x000F0000) != 0)
+				DISABLE;
+		}
+	}
 
 	auto specialFuncCallHelper = [this](void (*specialFunc)(SinCosArg, float *output), u8 sreg) {
 #if PPSSPP_ARCH(AMD64)
@@ -2330,10 +2473,22 @@ void Jit::Comp_VV2Op(MIPSOpcode op) {
 		}
 	}
 
+#if PPSSPP_ARCH(AMD64)
+	float (*mathFunc)(float) = VV2OpMathFunc((op >> 16) & 0x1f);
+#endif
+
 	// Warning: sregs[i] and tempxregs[i] may be the same reg.
 	// Helps for vmov, hurts for vrcp, etc.
 	for (int i = 0; i < n; ++i)
 	{
+#if PPSSPP_ARCH(AMD64)
+		if (mathFunc) {
+			MOVSS(XMM0, fpr.V(sregs[i]));
+			CallProtectedLeaf((const void *)mathFunc);
+			MOVSS(tempxregs[i], R(XMM0));
+			continue;
+		}
+#endif
 		switch ((op >> 16) & 0x1f)
 		{
 		case 0: // d[i] = s[i]; break; //vmov
@@ -2397,24 +2552,12 @@ void Jit::Comp_VV2Op(MIPSOpcode op) {
 			MINSS(tempxregs[i], R(XMM0));
 			break;
 		case 16: // d[i] = 1.0f / s[i]; break; //vrcp
-			if (RipAccessible(&one)) {
-				MOVSS(XMM0, M(&one));  // rip accessible
-			} else {
-				MOV(PTRBITS, R(TEMPREG), ImmPtr(&one));
-				MOVSS(XMM0, MatR(TEMPREG));
-			}
-			DIVSS(XMM0, fpr.V(sregs[i]));
-			MOVSS(tempxregs[i], R(XMM0));
+			specialFuncCallHelper(&VRcp, sregs[i]);
+			MOVSS(tempxregs[i], MIPSSTATE_VAR(sincostemp[0]));
 			break;
 		case 17: // d[i] = 1.0f / sqrtf(s[i]); break; //vrsq
-			SQRTSS(XMM0, fpr.V(sregs[i]));
-			if (RipAccessible(&one)) {
-				MOVSS(tempxregs[i], M(&one));  // rip accessible
-			} else {
-				MOV(PTRBITS, R(TEMPREG), ImmPtr(&one));
-				MOVSS(tempxregs[i], MatR(TEMPREG));
-			}
-			DIVSS(tempxregs[i], R(XMM0));
+			specialFuncCallHelper(&VRSqrt, sregs[i]);
+			MOVSS(tempxregs[i], MIPSSTATE_VAR(sincostemp[0]));
 			break;
 		case 18: // d[i] = sinf((float)M_PI_2 * s[i]); break; //vsin
 			specialFuncCallHelper(&SinOnly, sregs[i]);
@@ -2433,20 +2576,16 @@ void Jit::Comp_VV2Op(MIPSOpcode op) {
 			MOVSS(tempxregs[i], MIPSSTATE_VAR(sincostemp[0]));
 			break;
 		case 22: // d[i] = sqrtf(s[i]); break; //vsqrt
-			SQRTSS(tempxregs[i], fpr.V(sregs[i]));
-			MOV(PTRBITS, R(TEMPREG), ImmPtr(&noSignMask));
-			ANDPS(tempxregs[i], MatR(TEMPREG));
+			specialFuncCallHelper(&VSqrt, sregs[i]);
+			MOVSS(tempxregs[i], MIPSSTATE_VAR(sincostemp[0]));
 			break;
 		case 23: // d[i] = asinf(s[i]) / M_PI_2; break; //vasin
 			specialFuncCallHelper(&ASinScaled, sregs[i]);
 			MOVSS(tempxregs[i], MIPSSTATE_VAR(sincostemp[0]));
 			break;
 		case 24: // d[i] = -1.0f / s[i]; break; // vnrcp
-			// Rare so let's not bother checking for RipAccessible.
-			MOV(PTRBITS, R(TEMPREG), ImmPtr(&minus_one));
-			MOVSS(XMM0, MatR(TEMPREG));
-			DIVSS(XMM0, fpr.V(sregs[i]));
-			MOVSS(tempxregs[i], R(XMM0));
+			specialFuncCallHelper(&VNRcp, sregs[i]);
+			MOVSS(tempxregs[i], MIPSSTATE_VAR(sincostemp[0]));
 			break;
 		case 26: // d[i] = -sinf((float)M_PI_2 * s[i]); break; // vnsin
 			specialFuncCallHelper(&NegSinOnly, sregs[i]);
@@ -2525,19 +2664,30 @@ void Jit::Comp_Mftv(MIPSOpcode op) {
 				MOVD_xmm(fpr.VX(imm), gpr.R(rt));
 			}
 		} else if (imm < 128 + VFPU_CTRL_MAX) { //mtvc //currentMIPS->vfpuCtrl[imm - 128] = R(rt);
+			// Only some of the bits stick: six for CC, the low 20 of a prefix, and the RNG state
+			// keeps 0x3F8 on top (cpu/vfpu/prefix_ctrl, cpu/vfpu/vrnd). Same as the IR does it.
+			u32 mask;
+			u32 setBits = GetVFPUCtrlSetBits(imm - 128);
 			if (imm - 128 == VFPU_CTRL_CC) {
 				if (gpr.IsImm(rt)) {
-					gpr.SetImm(MIPS_REG_VFPUCC, gpr.GetImm(rt));
+					gpr.SetImm(MIPS_REG_VFPUCC, gpr.GetImm(rt) & 0x3F);
 				} else {
 					gpr.Lock(rt, MIPS_REG_VFPUCC);
 					gpr.MapReg(rt, true, false);
 					gpr.MapReg(MIPS_REG_VFPUCC, false, true);
 					MOV(32, gpr.R(MIPS_REG_VFPUCC), gpr.R(rt));
+					AND(32, gpr.R(MIPS_REG_VFPUCC), Imm32(0x3F));
 					gpr.UnlockAll();
 				}
+			} else if (!GetVFPUCtrlMask(imm - 128, &mask)) {
+				// Read-only or unknown register: nothing is written.
 			} else {
 				gpr.MapReg(rt, true, false);
 				MOV(32, MIPSSTATE_VAR_ELEM32(vfpuCtrl[0], imm - 128), gpr.R(rt));
+				if (mask != 0xFFFFFFFF)
+					AND(32, MIPSSTATE_VAR_ELEM32(vfpuCtrl[0], imm - 128), Imm32(mask));
+				if (setBits != 0)
+					OR(32, MIPSSTATE_VAR_ELEM32(vfpuCtrl[0], imm - 128), Imm32(setBits));
 			}
 
 			// TODO: Optimization if rt is Imm?
@@ -2572,6 +2722,8 @@ void Jit::Comp_Vmfvc(MIPSOpcode op) {
 			gpr.MapReg(MIPS_REG_VFPUCC, true, false);
 			MOVD_xmm(fpr.VX(vd), gpr.R(MIPS_REG_VFPUCC));
 		} else {
+			// In case we have a saved prefix.
+			FlushPrefixV();
 			MOVSS(fpr.VX(vd), MIPSSTATE_VAR_ELEM32(vfpuCtrl[0], imm));
 		}
 		fpr.ReleaseSpillLocks();
@@ -2587,12 +2739,19 @@ void Jit::Comp_Vmtvc(MIPSOpcode op) {
 	int vs = _VS;
 	int imm = op & 0x7F;
 	if (imm < VFPU_CTRL_MAX) {
+		u32 mask;
+		u32 setBits = GetVFPUCtrlSetBits(imm);
 		fpr.MapRegV(vs, 0);
 		if (imm == VFPU_CTRL_CC) {
 			gpr.MapReg(MIPS_REG_VFPUCC, false, true);
 			MOVD_xmm(gpr.R(MIPS_REG_VFPUCC), fpr.VX(vs));
-		} else {
+			AND(32, gpr.R(MIPS_REG_VFPUCC), Imm32(0x3F));
+		} else if (GetVFPUCtrlMask(imm, &mask)) {
 			MOVSS(MIPSSTATE_VAR_ELEM32(vfpuCtrl[0], imm), fpr.VX(vs));
+			if (mask != 0xFFFFFFFF)
+				AND(32, MIPSSTATE_VAR_ELEM32(vfpuCtrl[0], imm), Imm32(mask));
+			if (setBits != 0)
+				OR(32, MIPSSTATE_VAR_ELEM32(vfpuCtrl[0], imm), Imm32(setBits));
 		}
 		fpr.ReleaseSpillLocks();
 
@@ -2781,7 +2940,8 @@ void Jit::Comp_Vmmov(MIPSOpcode op) {
 void Jit::Comp_VScl(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
 
-	if (js.HasUnknownPrefix())
+	// The T prefix is applied oddly here, the interpreter knows how.
+	if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix())
 		DISABLE;
 
 	VectorSize sz = GetVecSize(op);
@@ -3089,7 +3249,8 @@ void Jit::Comp_Vtfm(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_MTX_VTFM);
 
 	// TODO: This probably ignores prefixes?  Or maybe uses D?
-	if (js.HasUnknownPrefix())
+	// Vertex transform, "weird prefixes" per the IR frontend, which hands them to the interpreter too.
+	if (!js.HasNoPrefix())
 		DISABLE;
 
 	VectorSize sz = GetVecSize(op);
@@ -3363,7 +3524,7 @@ alignas(16) static const float vavg_table[4] = { 1.0f, 1.0f / 2.0f, 1.0f / 3.0f,
 void Jit::Comp_Vhoriz(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
 
-	if (js.HasUnknownPrefix())
+	if (js.HasUnknownPrefix() || !IsPrefixWithinSize(js.prefixS, op) || js.HasTPrefix())
 		DISABLE;
 
 	VectorSize sz = GetVecSize(op);
@@ -3564,7 +3725,8 @@ void Jit::CompVrotShuffle(u8 *dregs, int imm, int n, bool negSin) {
 // Very heavily used by FF:CC
 void Jit::Comp_VRot(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(VFPU_VEC);
-	if (js.HasUnknownPrefix()) {
+	// The prefixes apply to the sine but never to the cosine; leave that to the interpreter.
+	if (!js.HasNoPrefix()) {
 		DISABLE;
 	}
 	if (!js.HasNoPrefix()) {
@@ -3597,14 +3759,21 @@ void Jit::Comp_VRot(MIPSOpcode op) {
 	if (vd2 >= 0)
 		GetVectorRegs(dregs2, sz, vd2);
 	GetVectorRegs(&sreg, V_Single, vs);
+	// With the angle in a destination lane, the cosine is taken of what was written there.
+	// The assembler refuses that, so leave it to the interpreter, and don't pair such a vrot.
+	for (int i = 0; i < n; i++) {
+		if (dregs[i] == sreg) {
+			DISABLE;
+		}
+		if (vd2 >= 0 && dregs2[i] == sreg) {
+			vd2 = -1;
+		}
+	}
 
 	// Flush SIMD.
 	fpr.SimpleRegsV(&sreg, V_Single, 0);
 
 	int imm = (op >> 16) & 0x1f;
-
-	gpr.FlushBeforeCall();
-	fpr.Flush();
 
 	bool negSin1 = (imm & 0x10) ? true : false;
 
@@ -3615,8 +3784,11 @@ void Jit::Comp_VRot(MIPSOpcode op) {
 	LEA(64, RDI, MIPSSTATE_VAR(sincostemp));
 #endif
 	MOVSS(XMM0, fpr.V(sreg));
-	ABI_CallFunction(negSin1 ? (const void *)&SinCosNegSin : (const void *)&SinCos);
+	CallProtectedLeaf(negSin1 ? (const void *)&SinCosNegSin : (const void *)&SinCos);
 #else
+	gpr.FlushBeforeCall();
+	fpr.Flush();
+
 	// Sigh, passing floats with cdecl isn't pretty, ends up on the stack.
 	ABI_CallFunctionAC(negSin1 ? (const void *)&SinCosNegSin : (const void *)&SinCos, fpr.V(sreg), (uintptr_t)mips_->sincostemp);
 #endif

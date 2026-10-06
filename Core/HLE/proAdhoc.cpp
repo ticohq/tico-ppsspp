@@ -120,7 +120,17 @@ sockaddr LocalIP;
 int defaultWlanChannel = PSP_SYSTEMPARAM_ADHOC_CHANNEL_11; // Don't put 0(Auto) here, it needed to be a valid/actual channel number
 
 static std::mutex chatLogLock;
-static std::vector<std::string> chatLog;
+static std::vector<ChatLogEntry> chatLog;
+// Enough to scroll back through a decent conversation without growing unbounded.
+static const size_t MAX_CHAT_LOG_LINES = 250;
+
+// chatLogLock must be held.
+static void AddChatLogEntry(std::string text) {
+	chatLog.push_back(ChatLogEntry{std::move(text), time(nullptr)});
+	if (chatLog.size() > MAX_CHAT_LOG_LINES) {
+		chatLog.erase(chatLog.begin(), chatLog.begin() + (chatLog.size() - MAX_CHAT_LOG_LINES));
+	}
+}
 static int chatMessageGeneration = 0;
 static int chatMessageCount = 0;
 
@@ -1202,7 +1212,7 @@ void AfterMatchingMipsCall::run(MipsCall &call) {
 	u32 v0 = currentMIPS->r[MIPS_REG_V0];
 	if (__IsInInterrupt()) ERROR_LOG(Log::sceNet, "AfterMatchingMipsCall::run [ID=%i][Event=%d] is Returning Inside an Interrupt!", contextID, EventID);
 	//SetMatchingInCallback(context, false);
-	DEBUG_LOG(Log::sceNet, "AfterMatchingMipsCall::run [ID=%i][Event=%d][%s] [cbId: %u][retV0: %08x]", contextID, EventID, mac2str((SceNetEtherAddr*)Memory::GetPointer(bufAddr)).c_str(), call.cbId, v0);
+	DEBUG_LOG(Log::sceNet, "AfterMatchingMipsCall::run [ID=%i][Event=%d][%s] [cbId: %u][retV0: %08x]", contextID, EventID, mac2str((SceNetEtherAddr*)Memory::GetPointerOrException(bufAddr)).c_str(), call.cbId, v0);
 	if (Memory::IsValidAddress(bufAddr)) userMemory.Free(bufAddr);
 	//call.setReturnValue(v0);
 }
@@ -1305,7 +1315,7 @@ void timeoutFriendsRecursive(SceNetAdhocctlPeerInfo * node, int32_t* count) {
 	if (count != NULL) (*count)++;
 }
 
-void sendChat(const std::string &chatString) {
+void sendChat(std::string_view chatString) {
 	SceNetAdhocctlChatPacketC2S chat{};
 	chat.base.opcode = OPCODE_CHAT;
 	//TODO check network inited, check send success or not, chatlog.pushback error on failed send, pushback error on not connected
@@ -1313,7 +1323,7 @@ void sendChat(const std::string &chatString) {
 		// Send Chat to Server 
 		if (!chatString.empty()) {
 			//maximum char allowed is 64 character for compability with original server (pro.coldbird.net)
-			std::string message = chatString.substr(0, 60); // 64 return chat variable corrupted is it out of memory?
+			std::string message(chatString.substr(0, 60)); // 64 return chat variable corrupted is it out of memory?
 			strcpy(chat.message, message.c_str());
 			//Send Chat Messages
 			if (IsSocketReady((int)metasocket, false, true) > 0) {
@@ -1322,25 +1332,21 @@ void sendChat(const std::string &chatString) {
 				std::string name = g_Config.sNickName;
 
 				std::lock_guard<std::mutex> guard(chatLogLock);
-				chatLog.emplace_back(name.substr(0, 8) + ": " + chat.message);
+				AddChatLogEntry(name.substr(0, 8) + ": " + chat.message);
 				chatMessageGeneration++;
 			}
 		}
 	} else {
 		std::lock_guard<std::mutex> guard(chatLogLock);
 		auto n = GetI18NCategory(I18NCat::NETWORKING);
-		chatLog.push_back(std::string(n->T("You're in Offline Mode, go to lobby or online hall")));
-		INFO_LOG(Log::sceNet, "Offline. Would have sent: %s", chatString.c_str());
+		AddChatLogEntry(std::string(n->T("You're in Offline Mode, go to lobby or online hall")));
+		INFO_LOG(Log::sceNet, "Offline. Would have sent: %.*s", STR_VIEW(chatString));
 		chatMessageGeneration++;
 	}
 }
 
-std::vector<std::string> getChatLog() {
+std::vector<ChatLogEntry> getChatLog() {
 	std::lock_guard<std::mutex> guard(chatLogLock);
-	// If the log gets large, trim it down.
-	if (chatLog.size() > 50) {
-		chatLog.erase(chatLog.begin(), chatLog.begin() + (chatLog.size() - 50));
-	}
 	return chatLog;
 }
 
@@ -1395,8 +1401,7 @@ int friendFinder() {
 	}
 	g_adhocServerIP.in.sin_port = htons(SERVER_PORT);
 
-	// Finder Loop
-	friendFinderRunning = true;
+	// Finder Loop. The flag was set by whoever started us, and cleared to stop us.
 	while (friendFinderRunning) {
 		// Acquire Network Lock
 		//_acquireNetworkLock();
@@ -1415,6 +1420,7 @@ int friendFinder() {
 				} 
 				else {
 					g_adhocServerConnected = false;
+					g_adhocServerLoginFailed = true;
 					shutdown((int)metasocket, SD_BOTH);
 					closesocket((int)metasocket);
 					metasocket = (int)INVALID_SOCKET;
@@ -1555,7 +1561,7 @@ int friendFinder() {
 						incoming.append((char*)packet->base.message);
 
 						std::lock_guard<std::mutex> guard(chatLogLock);
-						chatLog.push_back(incoming);
+						AddChatLogEntry(incoming);
 						chatMessageGeneration++;
 						chatMessageCount++;
 
@@ -1626,7 +1632,7 @@ int friendFinder() {
 						//joined.append((char *)packet->ip);
 
 						std::lock_guard<std::mutex> guard(chatLogLock);
-						chatLog.push_back(incoming);
+						AddChatLogEntry(incoming);
 						chatMessageGeneration++;
 
 #ifdef LOCALHOST_AS_PEER
@@ -2231,10 +2237,6 @@ int initNetwork(SceNetAdhocctlAdhocId *adhoc_id){
 	if (g_adhocServerIP.in.sin_addr.s_addr == INADDR_NONE)
 		return SOCKET_ERROR;
 
-	// Don't need to connect if AdhocServer IP is the same with this instance localhost IP and having AdhocServer disabled
-	if (g_adhocServerIP.in.sin_addr.s_addr == g_localhostIP.in.sin_addr.s_addr && !g_Config.bEnableAdhocServer)
-		return SOCKET_ERROR;
-
 	// Connect to Adhoc Server
 	int errorcode = 0;
 	int cnt = 0;
@@ -2250,6 +2252,16 @@ int initNetwork(SceNetAdhocctlAdhocId *adhoc_id){
 				return iResult;
 
 			done = (IsSocketReady((int)metasocket, false, true) > 0);
+			if (done) {
+				// Writable can also mean the attempt failed (refused, say). Then there's no point
+				// waiting out the timeout.
+				int soError = 0;
+				socklen_t soErrorLen = sizeof(soError);
+				if (getsockopt((int)metasocket, SOL_SOCKET, SO_ERROR, (char *)&soError, &soErrorLen) == 0 && soError != 0) {
+					errorcode = soError;
+					break;
+				}
+			}
 			struct sockaddr_in sin;
 			socklen_t sinlen = sizeof(sin);
 			memset(&sin, 0, sinlen);

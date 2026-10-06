@@ -32,7 +32,7 @@
 struct AT3BitrateMeta {
 	u16 sampleSize;
 	u8 dataByte;
-	u8 jointStereo;  // I think?
+	u8 jointStereo;
 };
 
 static const AT3BitrateMeta g_at3BitrateMeta[5] = {
@@ -174,6 +174,7 @@ static int ComputeAtracStateAndInitSecondBuffer(SceAtracIdInfo *info, u32 readSi
 
 	if (bufferSize < (u32)info->fileDataEnd) {
 		if (info->streamDataByte < (s32)info->sampleSize * 2) {
+			// sampleSize * 3 would be more accurate, but we increase tolerance for GTA LCS custom music (#20692).
 			return SCE_ERROR_ATRAC_SIZE_TOO_SMALL;
 		}
 		loopEnd = info->loopEnd;
@@ -217,6 +218,11 @@ int InitContextFromTrackInfo(SceAtracContext *ctx, const TrackInfo *wave, u32 bu
 	(ctx->info).curBuffer = 0;
 	(ctx->info).bufferByte = bufferSize;
 	(ctx->info).streamOff = dataOff;
+	// A packet larger than the buffer can't be streamed or assembled into the
+	// SAS assembly buffer. Reject it early, as sampleSize is file-derived.
+	if ((ctx->info).sampleSize > (u32)bufferSize) {
+		return SCE_ERROR_ATRAC_BAD_CODEC_PARAMS;
+	}
 	if ((ctx->info).loopEnd > endSample) {
 		return SCE_ERROR_ATRAC_BAD_CODEC_PARAMS;
 	}
@@ -231,20 +237,21 @@ int InitContextFromTrackInfo(SceAtracContext *ctx, const TrackInfo *wave, u32 bu
 		if ((ctx->info).codec != PSP_CODEC_AT3) {
 			// At3plus
 			// Configure the codec for the sample size, or whatever that data is.
-			(ctx->codec).unk40 = wave->sampleSizeMaybe;
-			(ctx->codec).unk48 = 0;
-			(ctx->codec).unk41 = wave->tailFlag;
+			(ctx->codec).fmt.at3.formatByte1 = wave->sampleSizeMaybe;
+			(ctx->codec).fmt.at3.at3Related = 0;
+			(ctx->codec).fmt.at3.formatByte2 = wave->tailFlag;
 			return 0;
 		}
-		// At3. Set up the hardware codec (hopefully we can correctly support this in sceAudiocodec and thus sceAtrac LLE in the future)
-		// This is not actually necessary since we don't use the actual hardware codec.
+		// At3. Set up the hardware codec parameter as libatrac3plus.prx's SetData (0880645c) does:
+		// keyed by frame size and the joint-stereo flag (sampleSizeMaybe, for Atrac3), it stores the
+		// data byte, as a word. We don't decode through it, but it's what the game sees.
 		for (int counter = 4; counter >= 0; counter--) {
 			if ((g_at3BitrateMeta[counter].sampleSize == (ctx->info).sampleSize) &&
-				((int)g_at3BitrateMeta[counter].dataByte == wave->sampleSizeMaybe)) {
-				(ctx->codec).unk40 = (char)g_at3BitrateMeta[counter].jointStereo;
-				(ctx->codec).unk41 = 0;
-				(ctx->codec).unk42 = 0;
-				(ctx->codec).unk43 = 0;
+				((int)g_at3BitrateMeta[counter].jointStereo == wave->sampleSizeMaybe)) {
+				(ctx->codec).fmt.at3.formatByte1 = g_at3BitrateMeta[counter].dataByte;
+				(ctx->codec).fmt.at3.formatByte2 = 0;
+				(ctx->codec).fmt.at3.unk2a = 0;
+				(ctx->codec).fmt.at3.unk2b = 0;
 				return 0;
 			}
 		}
@@ -330,7 +337,7 @@ void Atrac2::DumpBufferToFile() {
 }
 
 void Atrac2::DoState(PointerWrap &p) {
-	auto s = p.Section("Atrac2", 1, 3);
+	auto s = p.Section("Atrac2", 1, 4);
 	if (!s)
 		return;
 
@@ -355,8 +362,14 @@ void Atrac2::DoState(PointerWrap &p) {
 	}
 
 	const SceAtracIdInfo &info = context_->info;
+	if (s >= 4) {
+		Do(p, jointStereo_);
+	} else if (p.mode == p.MODE_READ) {
+		jointStereo_ = IsAtrac3StreamJointStereo(info.codec, info.sampleSize, info.numChan);
+	}
+
 	if (p.mode == p.MODE_READ && info.state != ATRAC_STATUS_NO_DATA) {
-		CreateDecoder(info.codec, info.sampleSize, info.numChan);
+		CreateDecoder(info.codec, info.sampleSize, info.numChan, jointStereo_);
 	}
 }
 
@@ -858,7 +871,7 @@ u32 Atrac2::DecodeInternal(u32 outbufAddr, int *SamplesNum, int *finish) {
 		}
 		outPtr = decodeTemp_;
 	} else {
-		outPtr = outbufAddr ? (int16_t *)Memory::GetPointer(outbufAddr) : 0;  // outbufAddr can be 0 during skip!
+		outPtr = outbufAddr ? (int16_t *)Memory::GetPointerOrException(outbufAddr) : 0;  // outbufAddr can be 0 during skip!
 	}
 
 	context_->codec.inBuf = inAddr;
@@ -894,7 +907,7 @@ u32 Atrac2::DecodeInternal(u32 outbufAddr, int *SamplesNum, int *finish) {
 		} else {
 			*finish = 0;
 		}
-		u8 *outBuf = outbufAddr ? Memory::GetPointerWrite(outbufAddr) : nullptr;
+		u8 *outBuf = outbufAddr ? Memory::GetPointerWriteOrException(outbufAddr) : nullptr;
 		if (samplesToDecode != info.SamplesPerFrame() && samplesToDecode != 0 && outBuf) {
 			memcpy(outBuf, decodeTemp_, samplesToDecode * outputChannels_ * sizeof(int16_t));
 		}
@@ -949,9 +962,13 @@ u32 Atrac2::DecodeInternal(u32 outbufAddr, int *SamplesNum, int *finish) {
 					info.curBuffer = 1;
 					info.streamDataByte = info.secondBufferByte;
 					info.secondStreamOff = 0;
-					memcpy(Memory::GetPointerWrite(info.buffer),
-						Memory::GetPointer(info.secondBuffer + (info.secondBufferByte - info.secondBufferByte % info.sampleSize)),
-						info.secondBufferByte % info.sampleSize);
+					// Clamp the copy to the main buffer size; sampleSize is file-derived and could be larger.
+					size_t copyLen = info.secondBufferByte % info.sampleSize;
+					if (copyLen > info.bufferByte)
+						copyLen = info.bufferByte;
+					memcpy(Memory::GetPointerWriteOrException(info.buffer),
+						Memory::GetPointerOrException(info.secondBuffer + (info.secondBufferByte - info.secondBufferByte % info.sampleSize)),
+						copyLen);
 				}
 			}
 		}
@@ -966,7 +983,9 @@ int Atrac2::SetData(const Track &track, u32 bufferAddr, u32 readSize, u32 buffer
 		// Turns out that games can abuse bufferSize, so we can't verify that it's a valid length with GetPointerRange.
 		const u8 *bufferPtr = Memory::GetPointerUnchecked(bufferAddr);
 		if (!Memory::IsValidRange(bufferAddr, readSize)) {
-			WARN_LOG(Log::Atrac, "Atrac2::SetData: Bad buffer range %08x+%08x - however, proceeeding.", bufferAddr, readSize);
+			WARN_LOG(Log::Atrac, "Atrac2::SetData: Bad buffer range %08x+%08x - clamping to mapped size.", bufferAddr, readSize);
+			// Clamp so the parsers below can't read past the mapped region.
+			readSize = Memory::ClampValidSizeAt(bufferAddr, readSize);
 		}
 		if (!isAA3) {
 			int retval = ParseWaveAT3(bufferPtr, readSize, &trackInfo);
@@ -991,7 +1010,8 @@ int Atrac2::SetData(const Track &track, u32 bufferAddr, u32 readSize, u32 buffer
 
 	SceAtracIdInfo &info = context_->info;
 
-	CreateDecoder(info.codec, info.sampleSize, info.numChan);
+	jointStereo_ = track.jointStereo != 0;
+	CreateDecoder(info.codec, info.sampleSize, info.numChan, jointStereo_);
 
 	outputChannels_ = outputChannels;
 
@@ -1006,8 +1026,9 @@ int Atrac2::SetData(const Track &track, u32 bufferAddr, u32 readSize, u32 buffer
 		info.fileDataEnd, info.decodePos, info.numSkipFrames, info.numChan
 	);
 
-	int skipCount = 0;  // TODO: use for delay
+	int skipCount = 0;
 	retval = SkipFrames(&skipCount);
+	setDataSkippedFrames_ = skipCount;
 
 	// Seen in Mui Mui house. Things go very wrong after this..
 	if (retval == SCE_ERROR_ATRAC_API_FAIL) {
@@ -1126,7 +1147,9 @@ void Atrac2::InitLowLevel(const Atrac3LowLevelParams &params, int codecType) {
 	info.dataOff = 0;
 	info.decodePos = 0;
 	info.state = ATRAC_STATUS_LOW_LEVEL;
-	CreateDecoder(codecType, info.sampleSize, info.numChan);
+	// There's no track header here, so go by the bitrate.
+	jointStereo_ = IsAtrac3StreamJointStereo(codecType, info.sampleSize, info.numChan);
+	CreateDecoder(codecType, info.sampleSize, info.numChan, jointStereo_);
 }
 
 int Atrac2::DecodeLowLevel(const u8 *srcData, int *bytesConsumed, s16 *dstData, int *bytesWritten) {
@@ -1203,7 +1226,7 @@ void Atrac2::DecodeForSas(s16 *dstData, int *bytesWritten, int *finish) {
 	// Keep decoding from the current buffer until it runs out.
 	if (sas_.streamOffset + (int)info.sampleSize <= (int)sas_.bufSize[sas_.curBuffer]) {
 		// Just decode.
-		const u8 *srcData = Memory::GetPointer(sas_.bufPtr[sas_.curBuffer] + sas_.streamOffset);
+		const u8 *srcData = Memory::GetPointerOrException(sas_.bufPtr[sas_.curBuffer] + sas_.streamOffset);
 		int bytesConsumed = 0;
 		bool decodeResult = decoder_->Decode(srcData, info.sampleSize, &bytesConsumed, 1, dstData, bytesWritten);
 		if (!decodeResult) {
@@ -1213,6 +1236,18 @@ void Atrac2::DecodeForSas(s16 *dstData, int *bytesWritten, int *finish) {
 	} else if (sas_.isStreaming) {
 		// TODO: Do we need special handling for the first buffer, since SetData will wrap around that packet? I think yes!
 		DEBUG_LOG(Log::Atrac, "Streaming atrac through sas, and hit the end of buffer %d", sas_.curBuffer);
+
+		// The packet spans two buffers and is reassembled into the fixed
+		// assembly buffer below. InitContextFromTrackInfo already rejects
+		// sampleSize > bufferByte, but a crafted file can still pass that with
+		// a large buffer, so also guard against sampleSize exceeding the fixed
+		// assembly buffer here.
+		if ((u32)info.sampleSize > sizeof(assembly)) {
+			ERROR_LOG(Log::Atrac, "SAS packet too large for assembly buffer: %d", info.sampleSize);
+			*bytesWritten = 0;
+			*finish = 1;
+			return;
+		}
 
 		// Compute the part sizes using the current size.
 		int part1Size = sas_.bufSize[sas_.curBuffer] - sas_.streamOffset;

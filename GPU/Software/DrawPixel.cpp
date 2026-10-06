@@ -41,6 +41,10 @@ void FlushJit() {
 	jitCache->Flush();
 }
 
+int JitClearGeneration() {
+	return PixelJitCache::ClearGeneration();
+}
+
 void Shutdown() {
 	delete jitCache;
 	jitCache = nullptr;
@@ -441,13 +445,14 @@ static inline Vec3<int> GetSourceFactor(PixelBlendFactor factor, const Vec4<int>
 		return Vec3<int>::AssignToAll(2 * source.a());
 
 	case PixelBlendFactor::DOUBLEINVSRCALPHA:
-		return Vec3<int>::AssignToAll(255 - std::min(2 * source.a(), 255));
+		// Can be negative, see SignedBlendingResult().
+		return Vec3<int>::AssignToAll(255 - 2 * source.a());
 
 	case PixelBlendFactor::DOUBLEDSTALPHA:
 		return Vec3<int>::AssignToAll(2 * dst.a());
 
 	case PixelBlendFactor::DOUBLEINVDSTALPHA:
-		return Vec3<int>::AssignToAll(255 - std::min(2 * dst.a(), 255));
+		return Vec3<int>::AssignToAll(255 - 2 * dst.a());
 
 	case PixelBlendFactor::FIX:
 	default:
@@ -498,13 +503,14 @@ static inline Vec3<int> GetDestFactor(PixelBlendFactor factor, const Vec4<int> &
 		return Vec3<int>::AssignToAll(2 * source.a());
 
 	case PixelBlendFactor::DOUBLEINVSRCALPHA:
-		return Vec3<int>::AssignToAll(255 - std::min(2 * source.a(), 255));
+		// Can be negative, see SignedBlendingResult().
+		return Vec3<int>::AssignToAll(255 - 2 * source.a());
 
 	case PixelBlendFactor::DOUBLEDSTALPHA:
 		return Vec3<int>::AssignToAll(2 * dst.a());
 
 	case PixelBlendFactor::DOUBLEINVDSTALPHA:
-		return Vec3<int>::AssignToAll(255 - std::min(2 * dst.a(), 255));
+		return Vec3<int>::AssignToAll(255 - 2 * dst.a());
 
 	case PixelBlendFactor::FIX:
 	default:
@@ -520,10 +526,39 @@ static inline Vec3<int> GetDestFactor(PixelBlendFactor factor, const Vec4<int> &
 }
 
 // Removed inline here - it was never chosen to be inlined by the compiler anyway, too complex.
+static bool IsSignedBlendFactor(PixelBlendFactor factor) {
+	return factor == PixelBlendFactor::DOUBLEINVSRCALPHA || factor == PixelBlendFactor::DOUBLEINVDSTALPHA;
+}
+
+// 255 - 2a goes negative for a >= 128, and then the term subtracts: -(((2c + 1) * (2|f| + 1)) >> 10)
+// (gpu/probe exp116, all factors and equations exact).
+static Vec3<int> SignedBlendingResult(const PixelFuncID &pixelID, const Vec3<int> &srcfactor, const Vec3<int> &dstfactor, const Vec4<int> &source, const Vec4<int> &dst) {
+	auto term = [](int c, int f) {
+		const int t = ((2 * c + 1) * (2 * std::abs(f) + 1)) >> 10;
+		return f < 0 ? -t : t;
+	};
+	Vec3<int> result;
+	for (int i = 0; i < 3; ++i) {
+		const int s = term(source[i], srcfactor[i]);
+		const int d = term(dst[i], dstfactor[i]);
+		switch (pixelID.AlphaBlendEq()) {
+		case GE_BLENDMODE_MUL_AND_SUBTRACT: result[i] = s - d; break;
+		case GE_BLENDMODE_MUL_AND_SUBTRACT_REVERSE: result[i] = d - s; break;
+		default: result[i] = s + d; break;
+		}
+	}
+	return result;
+}
+
 static Vec3<int> AlphaBlendingResult(const PixelFuncID &pixelID, const Vec4<int> &source, const Vec4<int> &dst) {
-	// Note: These factors cannot go below 0, but they can go above 255 when doubling.
+	// Note: These factors can go above 255 when doubling, and below 0 for the doubled inverses.
 	Vec3<int> srcfactor = GetSourceFactor(pixelID.AlphaBlendSrc(), source, dst, pixelID.cached.alphaBlendSrc);
 	Vec3<int> dstfactor = GetDestFactor(pixelID.AlphaBlendDst(), source, dst, pixelID.cached.alphaBlendDst);
+	const GEBlendMode eq = pixelID.AlphaBlendEq();
+	if ((IsSignedBlendFactor(pixelID.AlphaBlendSrc()) || IsSignedBlendFactor(pixelID.AlphaBlendDst())) &&
+		(eq == GE_BLENDMODE_MUL_AND_ADD || eq == GE_BLENDMODE_MUL_AND_SUBTRACT || eq == GE_BLENDMODE_MUL_AND_SUBTRACT_REVERSE)) {
+		return SignedBlendingResult(pixelID, srcfactor, dstfactor, source, dst);
+	}
 
 	switch (pixelID.AlphaBlendEq()) {
 	case GE_BLENDMODE_MUL_AND_ADD:
@@ -765,6 +800,9 @@ void SOFTRAST_CALL DrawSinglePixel(int x, int y, int z, int fog, Vec4IntArg colo
 }
 
 SingleFunc GetSingleFunc(const PixelFuncID &id, BinManager *binner) {
+	// The jit clamps blend factors at 0.
+	if (id.alphaBlend && (IsSignedBlendFactor(id.AlphaBlendSrc()) || IsSignedBlendFactor(id.AlphaBlendDst())))
+		return jitCache->GenericSingle(id);
 	SingleFunc jitted = jitCache->GetSingle(id, binner);
 	if (jitted) {
 		return jitted;
@@ -849,8 +887,15 @@ void PixelJitCache::Flush() {
 	compileQueue_.clear();
 }
 
+// Without a backend nothing ever compiles, and a lookup would flush the binner for nothing.
+#if PPSSPP_ARCH(AMD64) && !PPSSPP_PLATFORM(UWP)
+static constexpr bool HAS_PIXEL_JIT = true;
+#else
+static constexpr bool HAS_PIXEL_JIT = false;
+#endif
+
 SingleFunc PixelJitCache::GetSingle(const PixelFuncID &id, BinManager *binner) {
-	if (!g_Config.bSoftwareRenderingJit)
+	if (!HAS_PIXEL_JIT || !g_Config.bSoftwareRenderingJit)
 		return nullptr;
 
 	const size_t key = std::hash<PixelFuncID>()(id);

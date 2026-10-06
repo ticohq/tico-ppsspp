@@ -9,10 +9,12 @@
 #include "Common/UI/PopupScreens.h"
 #include "Common/UI/Notice.h"
 #include "Common/StringUtils.h"
+#include "Common/Net/HTTPClient.h"
 
 #include "Core/Config.h"
 #include "Core/RetroAchievements.h"
 
+#include "Common/UI/ScreenManager.h"
 #include "UI/RetroAchievementScreens.h"
 #include "UI/BackgroundAudio.h"
 #include "UI/OnScreenDisplay.h"
@@ -30,6 +32,7 @@ public:
 	UI::UISound sound_;
 };
 
+constexpr double MAX_AUDIO_DURATION_SECONDS = 5.0;
 AudioFileChooser::AudioFileChooser(RequesterToken token, std::string *value, std::string_view title, UI::UISound sound, UI::LayoutParams *layoutParams) : UI::LinearLayout(ORIENT_HORIZONTAL, layoutParams), sound_(sound) {
 	using namespace UI;
 	SetSpacing(2.0f);
@@ -45,6 +48,14 @@ AudioFileChooser::AudioFileChooser(RequesterToken token, std::string *value, std
 		std::string path = e.s;
 		Sample *sample = Sample::Load(path);
 		if (sample) {
+			double duration = static_cast<double>(sample->length_) / sample->rateInHz_;
+			if (duration > MAX_AUDIO_DURATION_SECONDS) {
+				auto au = GetI18NCategory(I18NCat::AUDIO);
+				g_OSD.Show(OSDType::MESSAGE_ERROR, au->T("Audio file is too long. Maximum duration is 5 seconds."));
+				delete sample;
+				value->clear();
+				return;
+			}
 			g_BackgroundAudio.SFX().UpdateSample(sound, sample);
 		} else {
 			auto au = GetI18NCategory(I18NCat::AUDIO);
@@ -247,20 +258,32 @@ RetroAchievementsLeaderboardScreen::RetroAchievementsLeaderboardScreen(const Pat
 
 void RetroAchievementsLeaderboardScreen::FetchEntries() {
 	auto callback = [](int result, const char *error_message, rc_client_leaderboard_entry_list_t *list, rc_client_t *client, void *userdata) {
+		RetroAchievementsLeaderboardScreen *thiz = (RetroAchievementsLeaderboardScreen *)userdata;
+		// rc_client frees the handle after this returns, so it must not be aborted later.
+		thiz->pendingAsyncCall_ = nullptr;
 		if (result != RC_OK) {
 			g_OSD.Show(OSDType::MESSAGE_ERROR, error_message, 10.0f);
 			return;
 		}
-
-		RetroAchievementsLeaderboardScreen *thiz = (RetroAchievementsLeaderboardScreen *)userdata;
+		if (thiz->pendingEntryList_) {
+			rc_client_destroy_leaderboard_entry_list(thiz->pendingEntryList_);
+		}
 		thiz->pendingEntryList_ = list;
-		thiz->pendingAsyncCall_ = nullptr;
 	};
 
+	// An aborted request doesn't call back, so only the latest request can reach the callback.
+	if (pendingAsyncCall_) {
+		rc_client_abort_async(Achievements::GetClient(), pendingAsyncCall_);
+		pendingAsyncCall_ = nullptr;
+	}
+
+	// Store the handle so the destructor can abort it if we're closed before the
+	// response arrives - without this, the callback above would run later against
+	// a freed `this`.
 	if (nearMe_) {
-		rc_client_begin_fetch_leaderboard_entries_around_user(Achievements::GetClient(), leaderboardID_, 10, callback, this);
+		pendingAsyncCall_ = rc_client_begin_fetch_leaderboard_entries_around_user(Achievements::GetClient(), leaderboardID_, 10, callback, this);
 	} else {
-		rc_client_begin_fetch_leaderboard_entries(Achievements::GetClient(), leaderboardID_, 0, 25, callback, this);
+		pendingAsyncCall_ = rc_client_begin_fetch_leaderboard_entries(Achievements::GetClient(), leaderboardID_, 0, 25, callback, this);
 	}
 }
 
@@ -384,7 +407,7 @@ void RetroAchievementsSettingsScreen::CreateAccountTab(UI::ViewGroup *viewGroup)
 			viewGroup->Add(new Choice(di->T("Log in")))->OnClick.Add([this](UI::EventParams &) -> void {
 				auto di = GetI18NCategory(I18NCat::DIALOG);
 				std::string title = StringFromFormat("RetroAchievements: %s", di->T_cstr("Log in"));
-				System_AskUsernamePassword(GetRequesterToken(), title, g_Config.sAchievementsUserName, [](const std::string &value, int) {
+				System_AskUsernamePassword(GetRequesterToken(), title, g_Config.sAchievementsUserName, [](std::string_view value, int) {
 					std::vector<std::string> parts;
 					SplitString(value, '\n', parts);
 					if (parts.size() == 2 && !parts[0].empty() && !parts[1].empty()) {
@@ -619,9 +642,12 @@ void RenderAchievement(UIContext &dc, const rc_client_achievement_t *achievement
 
 	// Download and display the image.
 	const char *url = iconState == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED ? achievement->badge_url : achievement->badge_locked_url;
-	Achievements::DownloadImageIfMissing(url);
-	if (g_iconCache.BindIconTexture(&dc, url)) {
-		dc.Draw()->DrawTexRect(Bounds(bounds.x + padding, bounds.y + padding, iconSpace, iconSpace), 0.0f, 0.0f, 1.0f, 1.0f, whiteAlpha(alpha));
+	if (url && strlen(url) > 0) {
+		std::string imageUrl = http::RemoveHttpsIfNeeded(url);
+		Achievements::DownloadImageIfMissing(imageUrl);
+		if (g_iconCache.BindIconTexture(&dc, imageUrl)) {
+			dc.Draw()->DrawTexRect(Bounds(bounds.x + padding, bounds.y + padding, iconSpace, iconSpace), 0.0f, 0.0f, 1.0f, 1.0f, whiteAlpha(alpha));
+		}
 	}
 	dc.SetFontStyle(*GetTextStyle(dc, UI::TextSize::Normal));
 	dc.Flush();
@@ -668,9 +694,13 @@ static void RenderGameAchievementSummary(UIContext &dc, const Bounds &bounds, fl
 	dc.SetFontStyle(dc.GetTheme().uiFont);
 	dc.Flush();
 
-	Achievements::DownloadImageIfMissing(gameInfo->badge_url);
-	if (g_iconCache.BindIconTexture(&dc, gameInfo->badge_url)) {
-		dc.Draw()->DrawTexRect(Bounds(bounds.x, bounds.y + (bounds.h - iconSpace) * 0.5f, iconSpace, iconSpace), 0.0f, 0.0f, 1.0f, 1.0f, whiteAlpha(alpha));
+	if (gameInfo->badge_url && strlen(gameInfo->badge_url) > 0) {
+		std::string imageUrl = http::RemoveHttpsIfNeeded(gameInfo->badge_url);
+
+		Achievements::DownloadImageIfMissing(imageUrl);
+		if (g_iconCache.BindIconTexture(&dc, imageUrl)) {
+			dc.Draw()->DrawTexRect(Bounds(bounds.x, bounds.y + (bounds.h - iconSpace) * 0.5f, iconSpace, iconSpace), 0.0f, 0.0f, 1.0f, 1.0f, whiteAlpha(alpha));
+		}
 	}
 
 	dc.Flush();
@@ -765,8 +795,9 @@ static void RenderLeaderboardEntry(UIContext &dc, const rc_client_leaderboard_en
 	// Come up with a unique name for the icon entry.
 	char userImageUrl[512];
 	if (RC_OK == rc_client_leaderboard_entry_get_user_image_url(entry, userImageUrl, sizeof(userImageUrl))) {
-		Achievements::DownloadImageIfMissing(userImageUrl);
-		if (g_iconCache.BindIconTexture(&dc, userImageUrl)) {
+		std::string imageUrl = http::RemoveHttpsIfNeeded(userImageUrl);
+		Achievements::DownloadImageIfMissing(imageUrl, ICON_MAX_AGE_AVATAR);
+		if (g_iconCache.BindIconTexture(&dc, imageUrl)) {
 			dc.Draw()->DrawTexRect(Bounds(bounds.x + iconLeft, bounds.y + 4.0f, 64.0f, 64.0f), 0.0f, 0.0f, 1.0f, 1.0f, whiteAlpha(alpha));
 		}
 	}

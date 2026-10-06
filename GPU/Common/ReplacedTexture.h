@@ -23,15 +23,10 @@
 #include "Common/File/VFS/VFS.h"
 #include "Common/GPU/thin3d.h"
 #include "Core/ConfigValues.h"
+#include "GPU/Common/ImageCommon.h"
 
 class TextureReplacer;
 class LimitedWaitable;
-
-// These must match the constants in TextureCacheCommon.
-enum class ReplacedTextureAlpha {
-	UNKNOWN = 0x04,
-	FULL = 0x00,
-};
 
 // For forward compatibility, we specify the hash.
 enum class ReplacedTextureHash {
@@ -69,11 +64,45 @@ struct GPUFormatSupport {
 	bool etc2;
 };
 
+struct ReplacementCacheKey {
+	u64 cachekey;  // Split into two u32?
+	u32 hash;
+
+	ReplacementCacheKey() : cachekey(0), hash(0) {}
+	ReplacementCacheKey(u64 ckey, u32 h) : cachekey(ckey), hash(h) {}
+
+	bool operator ==(const ReplacementCacheKey &k) const {
+		return k.cachekey == cachekey && k.hash == hash;
+	}
+
+	bool operator <(const ReplacementCacheKey &k) const {
+		if (k.cachekey == cachekey) {
+			return k.hash < hash;
+		}
+		return k.cachekey < cachekey;
+	}
+
+	// Access the parts.
+	u64 CacheKey() const { return cachekey; }
+	u32 ClutHash() const { return (u32)(cachekey & 0xFFFFFFFFULL); }
+	u32 Address() const { return (u32)(cachekey >> 32); }
+	u32 ContentsHash() const { return hash; }
+
+	void ZeroAddress() {
+		cachekey &= 0xFFFFFFFFULL;
+	}
+	void ZeroClutHash() {
+		cachekey &= 0xFFFFFFFF00000000ULL;
+	}
+	void ZeroContentsHash() {
+		hash = 0;
+	}
+};
+
 struct ReplacementDesc {
 	int newW;
 	int newH;
-	uint64_t cachekey;
-	uint32_t hash;
+	ReplacementCacheKey cacheKey;
 	int w;
 	int h;
 	TextureFiltering forceFiltering;
@@ -90,7 +119,7 @@ class ReplacedTexture;
 // replacement (texture == nullptr).
 struct ReplacedTextureRef {
 	ReplacedTexture *texture;  // shortcut
-	std::string hashfiles;  // key into the cache
+	std::string hashfiles;  // key into levelCache_
 };
 
 // Metadata about a given texture level.
@@ -111,6 +140,8 @@ struct ReplacedTextureLevel {
 
 class ReplacedTexture {
 public:
+	ReplacedTexture(const ReplacedTexture &) = delete;
+	ReplacedTexture &operator=(const ReplacedTexture &) = delete;
 	ReplacedTexture(VFSBackend *vfs, const ReplacementDesc &desc);
 	~ReplacedTexture();
 
@@ -169,8 +200,8 @@ public:
 		return desc_;
 	}
 
-	u8 AlphaStatus() const {
-		return (u8)alphaStatus_;
+	TextureAlpha AlphaStatus() const {
+		return alphaStatus_;
 	}
 
 	bool Poll(double budget);
@@ -186,17 +217,24 @@ private:
 	};
 
 	void Prepare(VFSBackend *vfs);
+	// Waits for any load task, then drops all data and file references, and detaches from the VFS.
+	// The texture reloads from scratch once it gets a VFS again. Must run before the VFS is deleted.
+	void Unload();
+	void ReleaseLevels();
 	LoadLevelResult LoadLevelData(VFSFileReference *fileRef, const std::string &filename, int level, Draw::DataFormat *pixelFormat);
 	void PurgeIfNotUsedSinceTime(double t);
 
 	std::vector<std::vector<uint8_t>> data_;
 	std::vector<ReplacedTextureLevel> levels_;
+	// Image format of mip level 0; mixing formats across levels is not
+	// allowed (container formats like KTX2/DDS manage their own mip chain).
+	ReplacedImageType firstImageType_ = ReplacedImageType::INVALID;
 
 	double lastUsed_ = 0.0;
 	LimitedWaitable *threadWaitable_ = nullptr;
 	std::mutex lock_;
-	Draw::DataFormat fmt = Draw::DataFormat::UNDEFINED;  // NOTE: Right now, the only supported format is Draw::DataFormat::R8G8B8A8_UNORM.
-	ReplacedTextureAlpha alphaStatus_ = ReplacedTextureAlpha::UNKNOWN;
+	Draw::DataFormat fmt = Draw::DataFormat::UNDEFINED;
+	TextureAlpha alphaStatus_ = TextureAlpha::Any;
 	double lastUsed = 0.0;
 
 	std::atomic<ReplacementState> state_ = ReplacementState::UNLOADED;

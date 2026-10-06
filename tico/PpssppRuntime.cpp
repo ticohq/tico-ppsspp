@@ -20,7 +20,7 @@
 #include "Common/File/VFS/DirectoryReader.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/GPU/thin3d.h"
-#include "Common/GraphicsContext.h"
+#include "Common/GPU/GraphicsContext.h"
 #include "Common/Log/LogManager.h"
 #include "Common/Profiler/Profiler.h"
 #include "Common/StringUtils.h"
@@ -916,7 +916,7 @@ void RefreshSaveStateSlots(bool force) {
 	g_state.lastSaveStateScanMs = nowMs;
 }
 
-void AfterSaveStateAction(SaveState::Status status, std::string_view message) {
+void AfterSaveStateAction(SaveState::Status status, std::string_view message, std::string_view) {
 	Log("tico savestate status=%d message=%.*s", (int)status, (int)message.size(), message.data());
 	RefreshSaveStateSlots(true);
 }
@@ -1389,8 +1389,6 @@ bool System_GetPropertyBool(SystemProperty prop) {
 	switch (prop) {
 	case SYSPROP_CAN_JIT:
 		return true;
-	case SYSPROP_SKIP_UI:
-		return false;
 	case SYSPROP_SUPPORTS_HTTPS:
 		return false;
 	case SYSPROP_SUPPORTS_PERMISSIONS:
@@ -1416,11 +1414,6 @@ void System_RunOnMainThread(std::function<void()> func) {
 
 bool System_MakeRequest(SystemRequestType type, int, const std::string &param1, const std::string &, int64_t, int64_t) {
 	switch (type) {
-	case SystemRequestType::SEND_DEBUG_OUTPUT:
-		if (!param1.empty()) {
-			fwrite(param1.data(), sizeof(char), param1.size(), stdout);
-		}
-		return true;
 	case SystemRequestType::EXIT_APP:
 	case SystemRequestType::RESTART_APP:
 		Tico::RuntimeRequestExit();
@@ -1428,6 +1421,10 @@ bool System_MakeRequest(SystemRequestType type, int, const std::string &param1, 
 	default:
 		return false;
 	}
+}
+
+std::vector<std::string> System_GetCameraDeviceList() {
+	return {};
 }
 
 void System_AskForPermission(SystemPermission) {

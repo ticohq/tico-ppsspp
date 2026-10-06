@@ -514,12 +514,12 @@ bool Overlay::Init(Draw::DrawContext *draw, const char *gamePath, LogCallback lo
 		return false;
 	}
 
-	const float loadedFontSize = io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0]->FontSize : 21.0f;
+	const float loadedFontSize = io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0]->LegacySize : 21.0f;
 	if (loadedFontSize > 0.0f) {
-		io.FontGlobalScale = Display::FontSize / loadedFontSize;
+		ImGui::GetStyle().FontScaleMain = Display::FontSize / loadedFontSize;
 	}
 	LogMessage(log_, "tico overlay font scale=%.3f base=%.1f target=%.1f",
-		io.FontGlobalScale, loadedFontSize, Display::FontSize);
+		ImGui::GetStyle().FontScaleMain, loadedFontSize, Display::FontSize);
 
 	title_ = GameTitleFromPath(gamePath);
 	displaySettings_ = LoadPpssppDisplaySettings(log_);
@@ -1372,7 +1372,7 @@ void Overlay::DrawMenu(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 			const ImU32 borderColor = selected ? IM_COL32(255, 255, 255, (int)(230.0f * ease)) : IM_COL32(180, 180, 180, (int)(210.0f * ease));
 			const ImU32 fillColor = checkboxChecked ? IM_COL32(230, 230, 230, (int)(245.0f * ease)) : IM_COL32(30, 30, 30, (int)(130.0f * ease));
 			drawList->AddRectFilled(boxMin, boxMax, fillColor, 4.0f * scale);
-			drawList->AddRect(boxMin, boxMax, borderColor, 4.0f * scale, 0, 1.5f * scale);
+			drawList->AddRect(boxMin, boxMax, borderColor, 4.0f * scale, 1.5f * scale);
 			if (checkboxChecked) {
 				const ImU32 checkColor = IM_COL32(40, 40, 40, (int)(255.0f * ease));
 				drawList->AddLine(
@@ -1538,7 +1538,7 @@ void Overlay::DrawStatus(ImDrawList *drawList, ImVec2 displaySize, float scale, 
 	const float tipHeight = 10.0f * scale;
 	const ImVec2 bodyMin(cursorX, centerY - bodyHeight * 0.5f);
 	const ImVec2 bodyMax(bodyMin.x + bodyWidth, bodyMin.y + bodyHeight);
-	drawList->AddRect(bodyMin, bodyMax, textColor, 3.0f * scale, 0, 2.0f * scale);
+	drawList->AddRect(bodyMin, bodyMax, textColor, 3.0f * scale, 2.0f * scale);
 	drawList->AddRectFilled(
 		ImVec2(bodyMax.x, bodyMin.y + (bodyHeight - tipHeight) * 0.5f),
 		ImVec2(bodyMax.x + tipWidth, bodyMin.y + (bodyHeight + tipHeight) * 0.5f),
@@ -1630,7 +1630,7 @@ void Overlay::DrawRAAlerts(Draw::DrawContext *draw, ImDrawList *drawList, ImVec2
 		const ImVec2 max(anchorX + alertWidth, min.y + alertHeight);
 
 		drawList->AddRectFilled(min, max, IM_COL32(35, 35, 40, alpha), cornerRadius);
-		drawList->AddRect(min, max, IM_COL32(70, 70, 80, (int)(180.0f * slideProgress)), cornerRadius, 0, 1.5f * scale);
+		drawList->AddRect(min, max, IM_COL32(70, 70, 80, (int)(180.0f * slideProgress)), cornerRadius, 1.5f * scale);
 
 		Draw::Texture *badgeTexture = nullptr;
 		const bool isRAIcon = notification.badgeName == "ra_icon";
@@ -1734,9 +1734,9 @@ void Overlay::Render(Draw::DrawContext *draw) {
 	const float orthoW = g_display.dp_xres > 0 ? (float)g_display.dp_xres : width;
 	const float orthoH = g_display.dp_yres > 0 ? (float)g_display.dp_yres : height;
 	const float scale = std::max(1.0f, height / 720.0f);
-	const float loadedFontSize = io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0]->FontSize : 21.0f;
+	const float loadedFontSize = io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0]->LegacySize : 21.0f;
 	if (loadedFontSize > 0.0f) {
-		io.FontGlobalScale = (Display::FontSize * scale) / loadedFontSize;
+		ImGui::GetStyle().FontScaleMain = (Display::FontSize * scale) / loadedFontSize;
 	}
 
 	ImGui_ImplThin3d_NewFrame(draw, ComputeOrthoMatrix(orthoW, orthoH, draw->GetDeviceCaps().coordConvention));

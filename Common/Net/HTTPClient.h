@@ -1,10 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 #include "Common/File/Path.h"
 #include "Common/Net/NetBuffer.h"
@@ -19,15 +21,15 @@ class Connection {
 public:
 	virtual ~Connection();
 
-	explicit Connection(ResolveFunc func) : customResolve_(func) {}
+	explicit Connection(ResolveFunc func) : customResolve_(std::move(func)) {}
 
-	// Inits the sockaddr_in.
+	// Inits the addrinfo chain.
 	bool Resolve(const char *host, int port, DNSType type = DNSType::ANY);
 
 	bool Connect(int maxTries = 2, double timeout = 20.0f, bool *cancelConnect = nullptr);
 	void Disconnect();
 
-	// Only to be used for bring-up and debugging.
+	// TODO: Try to expose this less.
 	uintptr_t sock() const { return sock_; }
 
 	std::string GetLocalIpAsString() const;
@@ -49,13 +51,15 @@ private:
 
 namespace http {
 
+// Ignores line folding (deprecated), but respects field combining.
+// Don't use for Set-Cookie, which is a special header per RFC 7230.
 bool GetHeaderValue(const std::vector<std::string> &responseHeaders, std::string_view header, std::string *value);
 
 class RequestParams {
 public:
-	RequestParams() {}
+	RequestParams() = default;
 	explicit RequestParams(const char *r) : resource(r) {}
-	RequestParams(const std::string &r, const char *a) : resource(r), acceptMime(a) {}
+	RequestParams(std::string r, const char *a) : resource(std::move(r)), acceptMime(a) {}
 
 	std::string resource;
 	const char *acceptMime = "*/*";
@@ -83,7 +87,7 @@ public:
 	int ReadResponseEntity(net::Buffer *readbuf, const std::vector<std::string> &responseHeaders, Buffer *output, net::RequestProgress *progress);
 
 	void SetDataTimeout(double t) {
-		dataTimeout_ = t;
+		headerTimeout_ = t;
 	}
 
 	void SetUserAgent(std::string_view value) {
@@ -97,7 +101,7 @@ public:
 protected:
 	std::string userAgent_;
 	const char* httpVersion_;
-	double dataTimeout_ = 900.0;
+	double headerTimeout_ = 900.0;
 };
 
 // Really an asynchronous request.
@@ -121,7 +125,9 @@ private:
 	std::string postData_;
 	std::thread thread_;
 	std::string postMime_;
-	bool completed_ = false;
+	// Set last on the download thread, after the result code and buffer. Atomic, so that once
+	// Done() sees it, those are visible too.
+	std::atomic<bool> completed_{false};
 	bool failed_ = false;
 	net::ResolveFunc customResolve_;
 };
@@ -132,7 +138,7 @@ private:
 class CachedRequest : public Request {
 public:
 	CachedRequest(RequestMethod method, std::string_view url, std::string_view name, bool *cancelled, RequestFlags flags, std::string_view responseData)
-		: Request(method, url, name, cancelled, flags)
+		: Request(method, url, name, Path(), cancelled, flags)
 	{
 		buffer_.Append(responseData);
 	}

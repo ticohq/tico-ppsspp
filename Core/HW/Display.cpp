@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <mutex>
@@ -23,8 +24,10 @@
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/System/System.h"
 #include "Common/TimeUtil.h"
+#include "Common/Data/Text/StringWriter.h"
 #include "Core/Config.h"
 #include "Core/System.h"
+#include "Core/MIPS/MIPS.h"
 #include "Core/CoreTiming.h"
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceCtrl.h"
@@ -39,7 +42,9 @@ typedef std::pair<FlipCallback, void *> FlipListener;
 static std::vector<FlipListener> flipListeners;
 
 static uint64_t frameStartTicks;
-static int numVBlanks;
+// Atomic because the WebSocket debugger reads it from its own thread (input.buttons.press uses
+// it to count down frames) while the CPU thread bumps it.
+static std::atomic<int> numVBlanks;
 // hCount is computed now.
 static int vCount;
 // The "AccumulatedHcount" can be adjusted, this is the base.
@@ -79,10 +84,10 @@ static void CalculateFPS() {
 		actualFps = (float)(actualFlips - lastActualFlips);
 
 		fps = frames / (now - lastFpsTime);
-		flips = (float)(g_Config.iDisplayRefreshRate * (double)(gpuStats.numFlips - lastNumFlips) / frames);
+		flips = (float)(g_Config.iDisplayRefreshRate * (double)(gpuStats.totals.numFlips - lastNumFlips) / frames);
 
 		lastFpsFrame = numVBlanks;
-		lastNumFlips = gpuStats.numFlips;
+		lastNumFlips = gpuStats.totals.numFlips;
 		lastActualFlips = actualFlips;
 		lastFpsTime = now;
 
@@ -93,7 +98,7 @@ static void CalculateFPS() {
 		}
 	}
 
-	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || coreCollectDebugStats) {
+	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || g_coreCollectDebugStats) {
 		frameTimeHistory[frameTimeHistoryPos++] = (float)(now - lastFrameTimeHistory);
 		lastFrameTimeHistory = now;
 		frameTimeHistoryPos = frameTimeHistoryPos % frameTimeHistorySize;
@@ -154,7 +159,7 @@ uint64_t DisplayFrameStartTicks() {
 }
 
 uint32_t __DisplayGetCurrentHcount() {
-	const int ticksIntoFrame = (int)(CoreTiming::GetTicks() - frameStartTicks);
+	const int ticksIntoFrame = (int)(CoreTiming::GetTicks(currentMIPS) - frameStartTicks);
 	const int ticksPerVblank = CoreTiming::GetClockFrequencyHz() / 60 / hCountPerVblank;
 	// Can't seem to produce a 0 on real hardware, offsetting by 1 makes things look right.
 	return 1 + (ticksIntoFrame / ticksPerVblank);
@@ -187,24 +192,12 @@ void DisplayNotifySleep(double t, int pos) {
 	frameSleepHistory[pos] += t;
 }
 
-void __DisplayGetDebugStats(char *stats, size_t bufsize) {
-	char statbuf[4096];
+void __DisplayGetDebugStats(StringWriter &w) {
 	if (!gpu) {
-		snprintf(stats, bufsize, "N/A");
+		w.C("No GPU stats available").endl();
 		return;
 	}
-	gpu->GetStats(statbuf, sizeof(statbuf));
-
-	snprintf(stats, bufsize,
-		"Kernel processing time: %0.2f ms\n"
-		"Slowest syscall: %s : %0.2f ms\n"
-		"Most active syscall: %s : %0.2f ms\n%s",
-		kernelStats.msInSyscalls * 1000.0f,
-		kernelStats.slowestSyscallName ? kernelStats.slowestSyscallName : "(none)",
-		kernelStats.slowestSyscallTime * 1000.0f,
-		kernelStats.summedSlowestSyscallName ? kernelStats.summedSlowestSyscallName : "(none)",
-		kernelStats.summedSlowestSyscallTime * 1000.0f,
-		statbuf);
+	gpu->GetStats(w);
 }
 
 // On like 90hz, 144hz, etc, we return 60.0f as the framerate target. We only target other
@@ -238,7 +231,7 @@ bool DisplayIsRunningSlow() {
 }
 
 void DisplayFireVblankStart() {
-	frameStartTicks = CoreTiming::GetTicks();
+	frameStartTicks = CoreTiming::GetTicks(currentMIPS);
 	numVBlanks++;
 
 	isVblank = 1;

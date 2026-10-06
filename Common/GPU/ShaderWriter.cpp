@@ -9,7 +9,6 @@
 const char * const vulkan_glsl_preamble_fs =
 "#extension GL_ARB_separate_shader_objects : enable\n"
 "#extension GL_ARB_shading_language_420pack : enable\n"
-"#extension GL_ARB_conservative_depth : enable\n"
 "#extension GL_ARB_shader_image_load_store : enable\n"
 "#define splat3(x) vec3(x)\n"
 "#define DISCARD discard\n"
@@ -28,44 +27,26 @@ const char * const hlsl_preamble_fs =
 "#define ivec4 int4\n"
 "#define mat4 float4x4\n"
 "#define mat3x4 float4x3\n"  // note how the conventions are backwards
-"#define splat3(x) float3(x, x, x)\n"
-"#define mix lerp\n"
 "#define lowp\n"
 "#define mediump\n"
 "#define highp\n"
+"#define splat3(x) float3(x, x, x)\n"
+"#define mix lerp\n"
 "#define fract frac\n"
 "#define mod(x, y) fmod(x, y)\n"
-"#define inversesqrt rsqrt\n";
+"#define inversesqrt rsqrt\n"
+"#define floatBitsToUint asuint\n"
+"#define uintBitsToFloat asfloat\n"
+"#define floatBitsToInt asint\n"
+"#define intBitsToFloat asfloat\n"
+"\n";
 
 static const char * const hlsl_d3d11_preamble_fs =
 "#define DISCARD discard\n"
-"#define DISCARD_BELOW(x) clip(x);\n";
+"#define DISCARD_BELOW(x) clip(x);\n"
+"\n";
 
 static const char * const vulkan_glsl_preamble_vs =
-"#extension GL_ARB_separate_shader_objects : enable\n"
-"#extension GL_ARB_shading_language_420pack : enable\n"
-"#define mul(x, y) ((x) * (y))\n"
-"#define splat3(x) vec3(x)\n"
-"precision highp float;\n"
-"\n";
-
-static const char * const hlsl_preamble_gs =
-"#define vec2 float2\n"
-"#define vec3 float3\n"
-"#define vec4 float4\n"
-"#define ivec2 int2\n"
-"#define ivec4 int4\n"
-"#define mat2 float2x2\n"
-"#define mat4 float4x4\n"
-"#define mat3x4 float4x3\n"  // note how the conventions are backwards
-"#define splat3(x) vec3(x, x, x)\n"
-"#define lowp\n"
-"#define mediump\n"
-"#define highp\n"
-"#define inversesqrt rsqrt\n"
-"\n";
-
-static const char * const vulkan_glsl_preamble_gs =
 "#extension GL_ARB_separate_shader_objects : enable\n"
 "#extension GL_ARB_shading_language_420pack : enable\n"
 "#define mul(x, y) ((x) * (y))\n"
@@ -82,11 +63,18 @@ static const char * const hlsl_preamble_vs =
 "#define mat2 float2x2\n"
 "#define mat4 float4x4\n"
 "#define mat3x4 float4x3\n"  // note how the conventions are backwards
-"#define splat3(x) vec3(x, x, x)\n"
 "#define lowp\n"
 "#define mediump\n"
 "#define highp\n"
+"#define splat3(x) float3(x, x, x)\n"
+"#define mix lerp\n"
+"#define fract frac\n"
+"#define mod(x, y) fmod(x, y)\n"
 "#define inversesqrt rsqrt\n"
+"#define floatBitsToUint asuint\n"
+"#define uintBitsToFloat asfloat\n"
+"#define floatBitsToInt asint\n"
+"#define intBitsToFloat asfloat\n"
 "\n";
 
 static const char * const semanticNames[] = {
@@ -128,9 +116,6 @@ void ShaderWriter::Preamble(Slice<const char *> extensions) {
 		case ShaderStage::Fragment:
 			W(vulkan_glsl_preamble_fs);
 			break;
-		case ShaderStage::Geometry:
-			W(vulkan_glsl_preamble_gs);
-			break;
 		default:
 			break;
 		}
@@ -143,9 +128,6 @@ void ShaderWriter::Preamble(Slice<const char *> extensions) {
 		case ShaderStage::Fragment:
 			W(hlsl_preamble_fs);
 			W(hlsl_d3d11_preamble_fs);
-			break;
-		case ShaderStage::Geometry:
-			W(hlsl_preamble_gs);
 			break;
 		default:
 			break;
@@ -177,11 +159,6 @@ void ShaderWriter::Preamble(Slice<const char *> extensions) {
 			}
 			C("#define gl_VertexIndex gl_VertexID\n");
 			break;
-		case ShaderStage::Geometry:
-			if (lang_.gles) {
-				C("precision highp float;\n");
-			}
-			break;
 		default:
 			break;
 		}
@@ -196,7 +173,40 @@ void ShaderWriter::Preamble(Slice<const char *> extensions) {
 	}
 }
 
+void ShaderWriter::DeclareUniforms(const Slice<UniformDef> &uniforms) {
+	switch (lang_.shaderLanguage) {
+	case HLSL_D3D11:
+		if (!uniforms.is_empty()) {
+			C("cbuffer base : register(b0) {\n");
+
+			for (auto &uniform : uniforms) {
+				F("  %s %s;\n", uniform.type, uniform.name);
+			}
+
+			C("};\n");
+		}
+		break;
+	case GLSL_VULKAN:
+		if (!uniforms.is_empty()) {
+			C("layout(std140, set = 0, binding = 0) uniform bufferVals {\n");
+			for (auto &uniform : uniforms) {
+				F("%s %s;\n", uniform.type, uniform.name);
+			}
+			C("};\n");
+		}
+		break;
+
+	default:  // GLSL OpenGL
+		for (auto &uniform : uniforms) {
+			F("uniform %s %s;\n", uniform.type, uniform.name);
+		}
+		break;
+	}
+}
+
 void ShaderWriter::BeginVSMain(Slice<InputDef> inputs, Slice<UniformDef> uniforms, Slice<VaryingDef> varyings) {
+	DeclareUniforms(uniforms);
+
 	_assert_(this->stage_ == ShaderStage::Vertex);
 	switch (lang_.shaderLanguage) {
 	case HLSL_D3D11:
@@ -249,18 +259,9 @@ void ShaderWriter::BeginVSMain(Slice<InputDef> inputs, Slice<UniformDef> uniform
 
 void ShaderWriter::BeginFSMain(Slice<UniformDef> uniforms, Slice<VaryingDef> varyings) {
 	_assert_(this->stage_ == ShaderStage::Fragment);
+	DeclareUniforms(uniforms);
 	switch (lang_.shaderLanguage) {
 	case HLSL_D3D11:
-		if (!uniforms.is_empty()) {
-			C("cbuffer base : register(b0) {\n");
-
-			for (auto &uniform : uniforms) {
-				F("  %s %s;\n", uniform.type, uniform.name);
-			}
-
-			C("};\n");
-		}
-
 		if (flags_ & ShaderWriterFlags::FS_WRITE_DEPTH) {
 			C("float gl_FragDepth;\n");
 		}
@@ -291,13 +292,6 @@ void ShaderWriter::BeginFSMain(Slice<UniformDef> uniforms, Slice<VaryingDef> var
 			F("layout(location = %d) %s in %s %s;  // %s\n", varying.index, varying.precision ? varying.precision : "", varying.type, varying.name, semanticNames[varying.semantic]);
 		}
 		C("layout(location = 0, index = 0) out vec4 fragColor0;\n");
-		if (!uniforms.is_empty()) {
-			C("layout(std140, set = 0, binding = 0) uniform bufferVals {\n");
-			for (auto &uniform : uniforms) {
-				F("%s %s;\n", uniform.type, uniform.name);
-			}
-			C("};\n");
-		}
 		C("\nvoid main() {\n");
 		break;
 
@@ -305,50 +299,10 @@ void ShaderWriter::BeginFSMain(Slice<UniformDef> uniforms, Slice<VaryingDef> var
 		for (auto &varying : varyings) {
 			F("%s %s %s %s;  // %s\n", lang_.varying_fs, varying.precision ? varying.precision : "", varying.type, varying.name, semanticNames[varying.semantic]);
 		}
-		for (auto &uniform : uniforms) {
-			F("uniform %s %s;\n", uniform.type, uniform.name);
-		}
 		if (!strcmp(lang_.fragColor0, "fragColor0")) {
 			C("out vec4 fragColor0;\n");
 		}
 		C("\nvoid main() {\n");
-		break;
-	}
-}
-
-void ShaderWriter::BeginGSMain(Slice<VaryingDef> varyings, Slice<VaryingDef> outVaryings) {
-	_assert_(this->stage_ == ShaderStage::Geometry);
-	switch (lang_.shaderLanguage) {
-	case HLSL_D3D11:
-		// Untested, but should work.
-		C("\nstruct GS_OUTPUT {\n");
-		for (auto &varying : outVaryings) {
-			F("  %s %s : %s;\n", varying.type, varying.name, semanticNames[varying.semantic]);
-		}
-		F("  vec4 pos : %s;\n", lang_.shaderLanguage == HLSL_D3D11 ? "SV_Position" : "POSITION");
-		C("};\n");
-		C("#define EmitVertex() emit.Append(gsout)\n");
-
-		C("void main(");
-		for (auto &varying : varyings) {
-			F("  in %s %s : %s, ", varying.type, varying.name, semanticNames[varying.semantic]);
-		}
-		C("inout TriangleStream<GS_OUTPUT> emit) {\n");
-		C("  GS_OUTPUT gsout;\n");
-		break;
-	case GLSL_VULKAN:
-		for (auto &varying : varyings) {
-			F("layout(location = %d) %s in %s %s[];  // %s\n", varying.index, varying.precision ? varying.precision : "", varying.type, varying.name, semanticNames[varying.semantic]);
-		}
-		for (auto &varying : outVaryings) {
-			F("layout(location = %d) %s out %s %s;  // %s\n", varying.index, varying.precision ? varying.precision : "", varying.type, varying.name, semanticNames[varying.semantic]);
-		}
-		C("\nvoid main() {\n");
-		break;
-	case GLSL_3xx:
-		C("\nvoid main() {\n");
-		break;
-	default:
 		break;
 	}
 }
@@ -360,6 +314,9 @@ void ShaderWriter::EndVSMain(Slice<VaryingDef> varyings) {
 		C("  VS_OUTPUT vs_out;\n");
 		if (strlen(lang_.viewportYSign)) {
 			F("  gl_Position.y *= %s1.0;\n", lang_.viewportYSign);
+		}
+		if (lang_.depthMinusOneToOne) {
+			F("  gl_Position.z = gl_Position.z * 2.0 - gl_Position.w;\n");  // homogenous math... looks confusing.
 		}
 		C("  vs_out.pos = gl_Position;\n");
 		for (auto &varying : varyings) {
@@ -389,11 +346,6 @@ void ShaderWriter::EndFSMain(const char *vec4_color_variable) {
 		F("  %s = %s;\n", lang_.fragColor0, vec4_color_variable);
 		break;
 	}
-	C("}\n");
-}
-
-void ShaderWriter::EndGSMain() {
-	_assert_(this->stage_ == ShaderStage::Geometry);
 	C("}\n");
 }
 

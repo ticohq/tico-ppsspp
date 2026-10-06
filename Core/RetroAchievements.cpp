@@ -12,7 +12,11 @@
 // md5_hash(PSP_GAME/EBOOT.BIN)
 // hash = md5_finalize()
 
+// To test RAIntegration, get the DLL here: https://github.com/RetroAchievements/RAIntegration/releases
+// Then just place it next to PPSSPP and enable RAIntegration in PPSSPP achivement settings, then restart it.
+
 #include <algorithm>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -34,7 +38,9 @@
 #include "Common/Crypto/md5.h"
 #include "Common/Log.h"
 #include "Common/File/Path.h"
+#include "Common/File/FileUtil.h"
 #include "Common/Net/HTTPRequest.h"
+#include "Common/Net/HTTPClient.h"
 #include "Common/System/OSD.h"
 #include "Common/System/System.h"
 #include "Common/System/NativeApp.h"
@@ -159,11 +165,31 @@ bool g_isIdentifying = false;
 bool g_isLoggingIn = false;
 bool g_hasRichPresence = false;
 int g_loginResult;
+std::string g_loginError;  // The server's message for g_loginResult.
 
 double g_lastLoginAttemptTime;
 
 // rc_client implementation
 static rc_client_t *g_rcClient;
+
+// rc_client keeps raw pointers to itself in the callback data of some requests (award achievement,
+// submit leaderboard entry, ping), so it can't be destroyed while those are in flight. Shutdown()
+// retires a busy client instead, and it's destroyed when its last request completes, or after
+// RETIRED_CLIENT_TIMEOUT, from which point its late callbacks are dropped. Keyed by an ID rather
+// than the pointer, so a new client allocated at the same address doesn't get an old client's callbacks.
+struct TrackedClient {
+	rc_client_t *client;
+	int outstandingRequests;
+	double retireTime;  // 0.0 while the client is live.
+};
+static std::map<uint32_t, TrackedClient> g_trackedClients;
+static uint32_t g_nextClientId = 1;
+constexpr double RETIRED_CLIENT_TIMEOUT = 60.0;
+
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+// The main window, once InitializeRAIntegration has been called, so Initialize can load the DLL again.
+static void *g_raIntegrationWindow;
+#endif
 static const std::string g_RAImageID = "I_RETROACHIEVEMENTS_LOGO";
 constexpr double LOGIN_ATTEMPT_INTERVAL_S = 10.0;
 
@@ -218,7 +244,12 @@ size_t GetRichPresenceMessage(char *buffer, size_t bufSize) {
 	if (!IsLoggedIn() || !rc_client_has_rich_presence(g_rcClient)) {
 		return (size_t)-1;
 	}
-	return rc_client_get_rich_presence_message(g_rcClient, buffer, bufSize);
+	size_t length = rc_client_get_rich_presence_message(g_rcClient, buffer, bufSize);
+	if (length >= bufSize) {
+		// On truncation, rcheevos returns the length it needed rather than what it wrote.
+		length = strnlen(buffer, bufSize);
+	}
+	return length;
 }
 
 bool WarnUserIfHardcoreModeActive(bool isSaveStateAction, std::string_view message) {
@@ -252,11 +283,15 @@ bool IsActive() {
 
 static void raintegration_write_memory_handler(uint32_t address, uint8_t *buffer, uint32_t num_bytes, rc_client_t *client) {
 	// convert_retroachievements_address_to_real_address
-	uint32_t realAddress = address + PSP_MEMORY_OFFSET;
-	uint8_t *writePtr = Memory::GetPointerWriteRange(realAddress, num_bytes);
-	if (writePtr) {
-		memcpy(writePtr, buffer, num_bytes);
+	const uint32_t realAddress = address + PSP_MEMORY_OFFSET;
+	if (!Memory::IsValidRange(realAddress, num_bytes)) {
+		ERROR_LOG(Log::Achievements, "RAIntegration write memory: Bad address range %08x-%08x (%d bytes) (%08x was passed in)", realAddress, realAddress + num_bytes, num_bytes, address);
+		return;
 	}
+
+	// We checked the pointer above, this is ok.
+	uint8_t *writePtr = Memory::GetPointerWriteUnchecked(realAddress);
+	memcpy(writePtr, buffer, num_bytes);
 }
 
 #endif
@@ -264,23 +299,62 @@ static void raintegration_write_memory_handler(uint32_t address, uint8_t *buffer
 static uint32_t read_memory_callback(uint32_t address, uint8_t *buffer, uint32_t num_bytes, rc_client_t *client) {
 	// Achievements are traditionally defined relative to the base of main memory of the emulated console.
 	// This is some kind of RetroArch-related legacy. In the PSP's case, this is simply a straight offset of 0x08000000.
-	uint32_t orig_address = address;
-	address += PSP_MEMORY_OFFSET;
+	const uint32_t realAddress = address + PSP_MEMORY_OFFSET;
 
-	if (!Memory::IsValidRange(address, num_bytes)) {
+	if (!Memory::IsValidRange(realAddress, num_bytes)) {
 		// Some achievement packs are really, really spammy.
 		// So we'll just count the bad accesses.
 		Achievements::g_stats.badMemoryAccessCount++;
 		if (g_Config.bAchievementsLogBadMemReads) {
-			WARN_LOG(Log::G3D, "RetroAchievements PeekMemory: Bad address %08x (%d bytes) (%08x was passed in)", address, num_bytes, orig_address);
+			WARN_LOG(Log::G3D, "RetroAchievements PeekMemory: Bad address %08x (%d bytes) (%08x was passed in)", realAddress, num_bytes, address);
 		}
-
 		// This tells rcheevos that the access was bad, which should now be handled properly.
 		return 0;
 	}
 
-	Memory::MemcpyUnchecked(buffer, address, num_bytes);
+	Memory::MemcpyUnchecked(buffer, realAddress, num_bytes);
 	return num_bytes;
+}
+
+static void destroy_client(rc_client_t *client) {
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+	rc_client_unload_raintegration(client);
+#endif
+	rc_client_destroy(client);
+}
+
+static void complete_server_call(uint32_t clientId, http::Request &download, rc_client_server_callback_t callback, void *callback_data) {
+	if (g_trackedClients.find(clientId) == g_trackedClients.end()) {
+		// The client timed out after being retired and is gone. callback_data belongs to it, and leaks.
+		WARN_LOG(Log::Achievements, "Dropping a server response for a destroyed client");
+		return;
+	}
+
+	std::string buffer;
+	download.buffer().TakeAll(&buffer);
+	rc_api_server_response_t response{};
+	int resultCode = download.ResultCode();
+	if (resultCode <= 0) {
+		// No HTTP status: the request failed in transport (naett's codes are negative, and
+		// naettConnectionError is -1, which rcheevos reads as a non-retryable client error).
+		// Report it as retryable so that unlocks and leaderboard submissions aren't dropped.
+		buffer = StringFromFormat("Network error (%d)", resultCode);
+		response.http_status_code = RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
+	} else {
+		response.http_status_code = resultCode;
+	}
+	response.body = buffer.c_str();
+	response.body_length = buffer.size();
+	callback(&response, callback_data);
+
+	// Look it up again, the callback may have issued new requests.
+	auto iter = g_trackedClients.find(clientId);
+	iter->second.outstandingRequests--;
+	if (iter->second.retireTime != 0.0 && iter->second.outstandingRequests == 0) {
+		INFO_LOG(Log::Achievements, "Destroying retired client, its requests are done");
+		destroy_client(iter->second.client);
+		g_trackedClients.erase(iter);
+	}
 }
 
 // This is the HTTP request dispatcher that is provided to the rc_client. Whenever the client
@@ -290,28 +364,28 @@ static void server_call_callback(const rc_api_request_t *request,
 {
 	// If post data is provided, we need to make a POST request, otherwise, a GET request will suffice.
 	auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
+	std::string url = http::RemoveHttpsIfNeeded(request->url);
+
+	uint32_t clientId = 0;
+	for (auto &iter : g_trackedClients) {
+		if (iter.second.client == client) {
+			clientId = iter.first;
+			iter.second.outstandingRequests++;
+			break;
+		}
+	}
+	_dbg_assert_(clientId != 0);
+
 	if (request->post_data) {
-		std::shared_ptr<http::Request> download = g_DownloadManager.AsyncPostWithCallback(std::string(request->url), std::string(request->post_data), "application/x-www-form-urlencoded", http::RequestFlags::ProgressBar | http::RequestFlags::ProgressBarDelayed,
-			[callback, callback_data](http::Request &download) {
-			std::string buffer;
-			download.buffer().TakeAll(&buffer);
-			rc_api_server_response_t response{};
-			response.body = buffer.c_str();
-			response.body_length = buffer.size();
-			response.http_status_code = download.ResultCode();
-			callback(&response, callback_data);
+		std::shared_ptr<http::Request> download = g_DownloadManager.AsyncPostWithCallback(url, std::string(request->post_data), "application/x-www-form-urlencoded", http::RequestFlags::ProgressBar | http::RequestFlags::ProgressBarDelayed,
+			[clientId, callback, callback_data](http::Request &download) {
+			complete_server_call(clientId, download, callback, callback_data);
 		}, ac->T("Contacting RetroAchievements server..."));
 	} else {
-		std::shared_ptr<http::Request> download = g_DownloadManager.StartDownload(std::string(request->url), Path(), http::RequestFlags::ProgressBar | http::RequestFlags::ProgressBarDelayed, nullptr,
+		std::shared_ptr<http::Request> download = g_DownloadManager.StartDownload(url, Path(), http::RequestFlags::ProgressBar | http::RequestFlags::ProgressBarDelayed, nullptr,
 			ac->T("Contacting RetroAchievements server..."),
-			[callback, callback_data](http::Request &download) {
-			std::string buffer;
-			download.buffer().TakeAll(&buffer);
-			rc_api_server_response_t response{};
-			response.body = buffer.c_str();
-			response.body_length = buffer.size();
-			response.http_status_code = download.ResultCode();
-			callback(&response, callback_data);
+			[clientId, callback, callback_data](http::Request &download) {
+			complete_server_call(clientId, download, callback, callback_data);
 		});
 	}
 }
@@ -343,11 +417,11 @@ static void event_handler_callback(const rc_client_event_t *event, rc_client_t *
 		const rc_client_game_t *gameInfo = rc_client_get_game_info(g_rcClient);
 
 		std::string setTitle = gameInfo->title;
-		std::string badgeUrl = gameInfo->badge_url;
+		std::string badgeUrl = http::RemoveHttpsIfNeeded(gameInfo->badge_url);
 		if (event->type == RC_CLIENT_EVENT_SUBSET_COMPLETED) {
 			const rc_client_subset_t *subset = event->subset;
 			setTitle = subset->title;
-			badgeUrl = subset->badge_url;
+			badgeUrl = http::RemoveHttpsIfNeeded(subset->badge_url);
 		}
 
 		DownloadImageIfMissing(badgeUrl);
@@ -511,26 +585,30 @@ static void login_token_callback(int result, const char *error_message, rc_clien
 	case RC_INVALID_JSON:
 	default:
 	{
-		ERROR_LOG(Log::Achievements, "Callback: Failure logging in via token: %d, %s", result, error_message);
-		if (isInitialAttempt) {
+		ERROR_LOG(Log::Achievements, "Callback: Failure logging in via token: %d, %s", result, error_message ? error_message : "");
+		// The server rejecting the token isn't retried, so say so even if this was a background retry.
+		const bool rejected = result == RC_INVALID_CREDENTIALS || result == RC_EXPIRED_TOKEN || result == RC_ACCESS_DENIED;
+		if (isInitialAttempt || rejected) {
 			auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
 			char message[512];
-			snprintf(message, sizeof(message), "%d: %s", result, error_message);
+			snprintf(message, sizeof(message), "%d: %s", result, error_message ? error_message : "");
 			g_OSD.Show(OSDType::MESSAGE_WARNING, ac->T("Failed logging in to RetroAchievements"), message, g_RAImageID);
 		}
 
 		// Take some action.
 		switch (result) {
 		case RC_INVALID_CREDENTIALS:
-			g_loginResult = RC_OK;  // why?
-			break;
 		case RC_EXPIRED_TOKEN:
-			WARN_LOG(Log::Achievements, "Clearing token since it was expired");
+			// The token is no good, the user has to log in with their password again. Clearing it
+			// stops Idle() retrying it, and with no login problem recorded, the settings show the login form.
+			WARN_LOG(Log::Achievements, "Clearing token since the server rejected it");
 			NativeClearSecret(RA_TOKEN_SECRET_NAME);
-			g_loginResult = RC_OK;  // why?
+			g_loginResult = RC_OK;
 			break;
 		default:
+			// Includes RC_ACCESS_DENIED, which Idle() doesn't retry. The settings show the message, and Log out.
 			g_loginResult = result;
+			g_loginError = error_message ? error_message : "";
 			break;
 		}
 		OnAchievementsLoginStateChange();
@@ -539,6 +617,7 @@ static void login_token_callback(int result, const char *error_message, rc_clien
 	}
 	}
 	g_loginResult = result;
+	g_loginError = error_message ? error_message : "";
 	g_isLoggingIn = false;
 }
 
@@ -613,7 +692,7 @@ static void load_integration_callback(int result, const char *error_message, rc_
 	}
 	case RC_MISSING_VALUE:
 		// This is fine, proceeding to login.
-		g_OSD.Show(OSDType::MESSAGE_WARNING, ac->T("RAIntegration is enabled, but %1 was not found."));
+		g_OSD.Show(OSDType::MESSAGE_WARNING, ApplySafeSubstitutions(ac->T("RAIntegration is enabled, but %1 was not found."), RAINTEGRATION_FILENAME));
 		break;
 	case RC_ABORTED:
 		// This is fine(-ish), proceeding to login.
@@ -635,13 +714,7 @@ static void load_integration_callback(int result, const char *error_message, rc_
 void Initialize() {
 	if (!g_Config.bAchievementsEnable) {
 		INFO_LOG(Log::Achievements, "Achievements are disabled, not initializing.");
-		if (g_rcClient) {
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-			rc_client_unload_raintegration(g_rcClient);
-#endif
-			rc_client_destroy(g_rcClient);
-			g_rcClient = nullptr;
-		}
+		Shutdown();
 		return;
 	}
 	if (g_rcClient) {
@@ -654,6 +727,7 @@ void Initialize() {
 		// Shouldn't happen really.
 		return;
 	}
+	g_trackedClients[g_nextClientId++] = TrackedClient{ g_rcClient, 0, 0.0 };
 
 	// Provide a logging function to simplify debugging
 	rc_client_enable_logging(g_rcClient, RC_CLIENT_LOG_LEVEL_VERBOSE, log_message_callback);
@@ -673,7 +747,24 @@ void Initialize() {
 	rc_client_set_unofficial_enabled(g_rcClient, g_Config.bAchievementsUnofficial ? 1 : 0);
 
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-	if (g_Config.bAchievementsEnableRAIntegration) {
+	if (!g_Config.bAchievementsEnableRAIntegration) {
+		TryLoginByToken(true);
+	} else if (g_raIntegrationWindow) {
+		// Re-enabled after startup. WinMain only calls InitializeRAIntegration once, and Shutdown
+		// unloaded the DLL, so load it again (it logs in when loaded). It builds menus, so do it on the window's thread.
+		System_RunCallbackInWndProc([](void *hWnd, void *) {
+			InitializeRAIntegration(hWnd);
+		}, nullptr);
+	}
+#else
+	TryLoginByToken(true);
+#endif
+}
+
+void InitializeRAIntegration(void *windowHandle) {
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+	g_raIntegrationWindow = windowHandle;
+	if (g_rcClient && g_Config.bAchievementsEnableRAIntegration) {
 		wchar_t szFilePath[MAX_PATH];
 		GetModuleFileNameW(NULL, szFilePath, MAX_PATH);
 		for (int64_t i = wcslen(szFilePath) - 1; i > 0; i--) {
@@ -682,12 +773,30 @@ void Initialize() {
 				break;
 			}
 		}
-		HWND hWnd = (HWND)System_GetPropertyInt(SYSPROP_MAIN_WINDOW_HANDLE);
+		HWND hWnd = (HWND)windowHandle;
+		if (!hWnd) {
+			ERROR_LOG(Log::Achievements, "RAIntegration is enabled, but no main window handle was found.");
+			return;
+		}
+
+		// RAIntegration writes its cache and local achievement data next to the executable. If we
+		// can't write there - the usual case being an install under Program Files - it takes the
+		// emulator down with it as soon as it loads a set, so refuse to load it at all. See #21260.
+		const Path &exeDir = File::GetExeDirectory();
+		if (!File::IsDirectoryWritable(exeDir)) {
+			auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
+			ERROR_LOG(Log::Achievements, "Not loading RAIntegration, '%s' is not writable", exeDir.c_str());
+			g_OSD.Show(OSDType::MESSAGE_ERROR, ac->T("RAIntegrationNotWritable",
+				"RAIntegration needs to write next to PPSSPP.exe, which this install doesn't allow. Use the portable .zip version instead."), "", g_RAImageID, 10.0f);
+			// Carry on without the toolkit - plain achievements still work.
+			TryLoginByToken(true);
+			return;
+		}
+
 		rc_client_begin_load_raintegration(g_rcClient, szFilePath, hWnd, "PPSSPP", PPSSPP_GIT_VERSION, &load_integration_callback, hWnd);
 		return;
 	}
 #endif
-	TryLoginByToken(true);
 }
 
 bool HasToken() {
@@ -695,8 +804,11 @@ bool HasToken() {
 }
 
 bool LoginProblems(std::string *errorString) {
-	// TODO: Set error string.
-	return g_loginResult != RC_OK;
+	if (g_loginResult == RC_OK) {
+		return false;
+	}
+	*errorString = g_loginError;
+	return true;
 }
 
 static void TryLoginByToken(bool isInitialAttempt) {
@@ -753,7 +865,8 @@ static void login_password_callback(int result, const char *error_message, rc_cl
 
 bool LoginAsync(const char *username, const char *password) {
 	auto di = GetI18NCategory(I18NCat::DIALOG);
-	if (IsLoggedIn() || std::strlen(username) == 0 || std::strlen(password) == 0)
+	// While a token login is pending, rc_client refuses another login, and the callback for that would clear g_isLoggingIn early.
+	if (IsLoggedIn() || g_isLoggingIn || std::strlen(username) == 0 || std::strlen(password) == 0)
 		return false;
 
 	g_OSD.SetProgressBar("cheevos_async_login", di->T("Logging in..."), 0, 0, 0, 0.0f);
@@ -765,6 +878,9 @@ bool LoginAsync(const char *username, const char *password) {
 
 void Logout() {
 	rc_client_logout(g_rcClient);
+	// An aborted login or game load doesn't always call back, so clear the flags here.
+	g_isLoggingIn = false;
+	g_isIdentifying = false;
 	// remove secret from config
 	NativeClearSecret(RA_TOKEN_SECRET_NAME);
 	g_Config.Save("Achievements logout");
@@ -786,25 +902,38 @@ void UpdateSettings() {
 	}
 }
 
-bool Shutdown() {
+bool Shutdown(bool waitForRequests) {
 	g_activeChallenges.clear();
 	if (g_rcClient) {
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-		rc_client_unload_raintegration(g_rcClient);
-#endif
-		rc_client_destroy(g_rcClient);
+		for (auto iter = g_trackedClients.begin(); iter != g_trackedClients.end(); ++iter) {
+			if (iter->second.client != g_rcClient) {
+				continue;
+			}
+			if (waitForRequests && iter->second.outstandingRequests > 0) {
+				INFO_LOG(Log::Achievements, "Retiring client with %d requests in flight", iter->second.outstandingRequests);
+				// Events from here on would reach code that expects g_rcClient.
+				rc_client_set_event_handler(g_rcClient, [](const rc_client_event_t *, rc_client_t *) {});
+				iter->second.retireTime = time_now_d();
+			} else {
+				destroy_client(g_rcClient);
+				g_trackedClients.erase(iter);
+			}
+			break;
+		}
 		g_rcClient = nullptr;
 		INFO_LOG(Log::Achievements, "Achievements shut down.");
 	}
+	if (!waitForRequests) {
+		// Any requests still pending are about to be cancelled, so their callbacks won't run.
+		for (auto &iter : g_trackedClients) {
+			destroy_client(iter.second.client);
+		}
+		g_trackedClients.clear();
+	}
+	// A destroyed client doesn't call back for pending logins or game loads.
+	g_isLoggingIn = false;
+	g_isIdentifying = false;
 	return true;
-}
-
-void ResetRuntime() {
-	if (!g_rcClient)
-		return;
-	INFO_LOG(Log::Achievements, "Resetting rcheevos state...");
-	rc_client_reset(g_rcClient);
-	g_activeChallenges.clear();
 }
 
 void FrameUpdate() {
@@ -817,6 +946,15 @@ void Idle() {
 	rc_client_idle(g_rcClient);
 
 	double now = time_now_d();
+	for (auto iter = g_trackedClients.begin(); iter != g_trackedClients.end(); ) {
+		if (iter->second.retireTime != 0.0 && now > iter->second.retireTime + RETIRED_CLIENT_TIMEOUT) {
+			WARN_LOG(Log::Achievements, "Destroying retired client with %d requests still in flight", iter->second.outstandingRequests);
+			destroy_client(iter->second.client);
+			iter = g_trackedClients.erase(iter);
+		} else {
+			++iter;
+		}
+	}
 
 	// If failed to log in, occasionally try again while the user is at the menu.
 	// Do not try if if in-game, that could get confusing.
@@ -825,7 +963,7 @@ void Idle() {
 		if (g_rcClient && IsLoggedIn()) {
 			return;  // All good.
 		}
-		if (g_Config.sAchievementsUserName.empty() || g_isLoggingIn || !HasToken()) {
+		if (g_Config.sAchievementsUserName.empty() || g_isLoggingIn || !HasToken() || g_loginResult == RC_ACCESS_DENIED) {
 			// Didn't try to login yet or is in the process of logging in. Also OK.
 			return;
 		}
@@ -841,7 +979,10 @@ void Idle() {
 void DoState(PointerWrap &p) {
 	auto sw = p.Section("Achievements", 0, 1);
 	if (!sw) {
-		// Save state is missing the section.
+		// Save state is missing the section, or this is a save that failed earlier.
+		if (p.mode != PointerWrap::MODE_READ) {
+			return;
+		}
 		// Reset the runtime.
 		if (HasAchievementsOrLeaderboards()) {
 			auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
@@ -866,6 +1007,9 @@ void DoState(PointerWrap &p) {
 		data_size = (uint32_t)(g_rcClient ? rc_client_progress_size(g_rcClient) : 0);
 	}
 	Do(p, data_size);
+	if (p.mode == PointerWrap::MODE_READ && !p.CheckRead(data_size)) {
+		return;
+	}
 
 	if (data_size > 0) {
 		uint8_t *buffer = new uint8_t[data_size];
@@ -875,7 +1019,7 @@ void DoState(PointerWrap &p) {
 		case PointerWrap::MODE_WRITE:
 		case PointerWrap::MODE_VERIFY:
 		{
-			int retval = rc_client_serialize_progress(g_rcClient, buffer);
+			int retval = rc_client_serialize_progress_sized(g_rcClient, buffer, data_size);
 			if (retval != RC_OK) {
 				ERROR_LOG(Log::Achievements, "Error %d serializing achievement data. Ignoring.", retval);
 			}
@@ -890,7 +1034,7 @@ void DoState(PointerWrap &p) {
 		switch (p.mode) {
 		case PointerWrap::MODE_READ:
 		{
-			int retval = rc_client_deserialize_progress(g_rcClient, buffer);
+			int retval = rc_client_deserialize_progress_sized(g_rcClient, buffer, data_size);
 			if (retval != RC_OK) {
 				// TODO: What should we really do here?
 				ERROR_LOG(Log::Achievements, "Error %d deserializing achievement data. Ignoring.", retval);
@@ -917,15 +1061,21 @@ bool HasAchievementsOrLeaderboards() {
 	return IsActive();
 }
 
-void DownloadImageIfMissing(std::string_view url) {
+void DownloadImageIfMissing(std::string_view url, double maxAge) {
+	// On Linux for example, we currently have no way of doing a HTTPS request.
 	if (g_iconCache.MarkPending(url)) {
 		INFO_LOG(Log::Achievements, "Downloading image: %.*s", STR_VIEW(url));
-		g_DownloadManager.StartDownload(url, Path(), http::RequestFlags::Default, nullptr, "", [](http::Request &download) {
-			if (download.ResultCode() != 200)
-				return;
+		g_DownloadManager.StartDownload(url, Path(), http::RequestFlags::Default, nullptr, "", [maxAge](http::Request &download) {
 			std::string data;
-			download.buffer().TakeAll(&data);
-			g_iconCache.InsertIcon(download.url(), IconFormat::PNG, std::move(data));
+			if (download.ResultCode() == 200) {
+				download.buffer().TakeAll(&data);
+			}
+			if (data.empty()) {
+				WARN_LOG(Log::Achievements, "Failed to download image (%d): %s", download.ResultCode(), download.url().c_str());
+				g_iconCache.MarkFailed(download.url());
+				return;
+			}
+			g_iconCache.InsertIcon(download.url(), IconFormat::PNG, std::move(data), maxAge);
 		});
 	}
 }
@@ -977,7 +1127,7 @@ void ShowNotLoggedInMessage() {
 void identify_and_load_callback(int result, const char *error_message, rc_client_t *client, void *userdata) {
 	auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
 
-	NOTICE_LOG(Log::Achievements, "Load callback: %d (%s)", result, error_message);
+	NOTICE_LOG(Log::Achievements, "Load callback: %d (%s)", result, error_message ? error_message : "");
 
 	switch (result) {
 	case RC_OK:
@@ -985,7 +1135,8 @@ void identify_and_load_callback(int result, const char *error_message, rc_client
 		// Successful! Show a message that we're active.
 		const rc_client_game_t *gameInfo = rc_client_get_game_info(client);
 
-		DownloadImageIfMissing(gameInfo->badge_url);
+		std::string imageUrl = http::RemoveHttpsIfNeeded(gameInfo->badge_url);
+		DownloadImageIfMissing(imageUrl);
 
 		GameRegion region = DetectGameRegionFromID(g_paramSFO.GetDiscID());
 		auto ga = GetI18NCategory(I18NCat::GAME);
@@ -997,7 +1148,7 @@ void identify_and_load_callback(int result, const char *error_message, rc_client
 			title += ")";
 		}
 		// TODO: Detect current subset.
-		g_OSD.Show(OSDType::MESSAGE_INFO, title, GetGameAchievementSummary(0), gameInfo->badge_url, 5.0f);
+		g_OSD.Show(OSDType::MESSAGE_INFO, title, GetGameAchievementSummary(0), imageUrl, 5.0f);
 		break;
 	}
 	case RC_NO_GAME_LOADED:
@@ -1108,11 +1259,13 @@ void UnloadGame() {
 		g_gamePath.clear();
 		s_game_hash.clear();
 	}
+	// Unloading aborts a pending load, and rc_client doesn't call back for an aborted load.
+	g_isIdentifying = false;
 }
 
 void change_media_callback(int result, const char *error_message, rc_client_t *client, void *userdata) {
 	auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
-	NOTICE_LOG(Log::Achievements, "Change media callback: %d (%s)", result, error_message);
+	NOTICE_LOG(Log::Achievements, "Change media callback: %d (%s)", result, error_message ? error_message : "");
 	g_isIdentifying = false;
 
 	switch (result) {
@@ -1156,6 +1309,9 @@ void ChangeUMD(const Path &path, FileLoader *fileLoader) {
 	s_game_hash = ComputePSPISOHash(blockDevice);
 	if (s_game_hash.empty()) {
 		ERROR_LOG(Log::Achievements, "Failed to hash - can't identify");
+		// Leaving this set makes IsBlockingExecution() true forever, so EmuScreen stops running
+		// the CPU and the game is frozen until restart. SetGame's equivalent path clears it too.
+		g_isIdentifying = false;
 		return;
 	}
 

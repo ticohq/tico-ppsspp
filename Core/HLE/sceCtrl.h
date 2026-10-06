@@ -73,6 +73,9 @@ void __CtrlVblank();
 
 // Clears and sets selected buttons. NOTE: Clearing happens first.
 void __CtrlUpdateButtons(u32 bitsToSet, u32 bitsToClear);
+// Presses buttons for a number of vblanks of emulated time; returns an id for __CtrlPressActive.
+int __CtrlPressFor(u32 buttons, int vblanks);
+bool __CtrlPressActive(int id);
 
 // Call this to set the position of an analog stick, ideally when it changes.
 // X and Y values should be from -1 to 1, inclusive, in a square (no need to force to a circle.)
@@ -87,6 +90,9 @@ bool __CtrlGetRapidFire();
 
 // For use by internal UI like MsgDialog
 u32 __CtrlPeekButtons();
+
+// Exposed so sceVshBridge can reuse it directly for vshCtrlReadBufferPositive, matching JPCSP.
+int sceCtrlReadBufferPositive(u32 ctrlDataPtr, u32 nBufs);
 u32 __CtrlPeekButtonsVisual();  // also incorporates rapid-fire
 void __CtrlPeekAnalog(int stick, float *x, float *y);
 u32 __CtrlReadLatch();

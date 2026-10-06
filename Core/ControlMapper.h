@@ -1,12 +1,13 @@
 #pragma once
 
-#include "Common/Input/InputState.h"
-#include "Core/KeyMap.h"
-
-#include <functional>
 #include <cstring>
+#include <atomic>
+#include <functional>
 #include <mutex>
 #include <vector>
+
+#include "Common/Input/InputState.h"
+#include "Core/KeyMap.h"
 
 struct DisplayLayoutConfig;
 
@@ -21,6 +22,8 @@ public:
 	virtual void SetRawAnalog(int stick, float x, float y) {}
 };
 
+class StringWriter;
+
 // Utilities for mapping input events to PSP inputs and virtual keys.
 // Main use is of course from EmuScreen.cpp, but also useful from control settings etc.
 class ControlMapper {
@@ -30,14 +33,14 @@ public:
 
 	// Inputs to the table-based mapping
 	// These functions are free-threaded.
-	bool Key(const KeyInput &key, bool *pauseTrigger);
+	bool Key(const KeyInput &key);
 	void Axis(const AxisInput *axes, size_t count);
 
 	// Required callbacks.
 	// TODO: These are so many now that a virtual interface might be more appropriate..
-	void AddListener(ControlListener *listener) {
-		listeners_.push_back(listener);
-	}
+	// Both of these take mutex_ - listeners_ is iterated on the input thread, and screens add and
+	// remove themselves from another one.
+	void AddListener(ControlListener *listener);
 	void RemoveListener(ControlListener *listener);
 
 	// Inject raw PSP key input directly, such as from touch screen controls.
@@ -56,7 +59,11 @@ public:
 	// Call when the emu screen gets pushed behind some other screen, like the pause screen, to release all "down" inputs.
 	void ReleaseAll();
 
-	void GetDebugString(char *buffer, size_t bufSize) const;
+	void GetDebugString(StringWriter &w) const;
+
+	bool PollPauseTrigger() {
+		return pauseTrigger_.exchange(false);
+	}
 
 	struct InputSample {
 		float value;
@@ -66,6 +73,9 @@ public:
 private:
 	void UpdateSwapAxes();
 	bool UpdatePSPState(const InputMapping &changedMapping, double now);
+	void UpdateComboSuppression();
+	bool IsSuppressedByCombo(const KeyMap::MultiInputMapping &multiMapping) const;
+	bool SuppressionChanged(const KeyMap::MultiInputMapping &multiMapping) const;
 	float MapAxisValue(float value, int vkId, const InputMapping &mapping, const InputMapping &changedMapping, bool *oppositeTouched);
 	void SwapMappingIfEnabled(uint32_t *vkey);
 
@@ -105,16 +115,28 @@ private:
 	bool autoRotatingAnalogCW_ = false;
 	bool autoRotatingAnalogCCW_ = false;
 
+	std::atomic<bool> pauseTrigger_{};
+
 	bool swapAxes_ = false;
 
 	int iInternalScreenRotationCached_ = 0;
 
-	// Protects basically all the state.
-	// TODO: Maybe we should piggyback on the screenmanager mutex - it's always locked
-	// when events come in here.
+	// Protects basically all the state. (There is no screenmanager mutex to piggyback on, despite
+	// what a previous comment here claimed - input arrives on its own thread.)
 	std::mutex mutex_;
 
 	std::map<InputMapping, InputSample> curInput_;
+
+	// While a combo mapping is fully held, the shorter mappings that its inputs also belong to are
+	// suppressed - see UpdateComboSuppression. Maps an input to the size of the longest satisfied
+	// combo it takes part in, so a mapping is suppressed if it's shorter than that.
+	std::map<InputMapping, size_t> comboSuppression_;
+	// Every combo mapping in the keymap. Cached, since scanning them all isn't free and the
+	// mappings only change when the user edits them.
+	std::vector<KeyMap::MultiInputMapping> comboMappings_;
+	int comboMappingsGeneration_ = -1;
+	// Inputs whose suppression state changed in the current update, see UpdateComboSuppression.
+	std::vector<InputMapping> comboSuppressionChanged_;
 
 	// Callbacks
 	std::vector<ControlListener *> listeners_;

@@ -21,20 +21,18 @@
 
 #include "ppsspp_config.h"
 
-#include "Common/System/Display.h"
+#include "Common/CPUDetect.h"
 #include "Common/System/System.h"
 #include "Common/UI/Root.h"
 #include "Common/UI/Context.h"
 #include "Common/UI/View.h"
 #include "Common/UI/ViewGroup.h"
 
+#include "Common/UI/ScreenManager.h"
 #include "Common/File/FileUtil.h"
 #include "Common/StringUtils.h"
 #include "Core/System.h"
 #include "Core/Util/RecentFiles.h"
-#include "Core/Reporting.h"
-#include "Core/HLE/sceCtrl.h"
-#include "Core/ELF/PBPReader.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/Util/GameManager.h"
 
@@ -48,7 +46,9 @@
 #include "UI/RemoteISOScreen.h"
 #include "UI/DisplayLayoutScreen.h"
 #include "UI/SavedataScreen.h"
+#include "UI/InstallUpdateScreen.h"
 #include "UI/InstallZipScreen.h"
+#include "UI/InstallPkgScreen.h"
 #include "UI/Background.h"
 #include "UI/GameBrowser.h"
 #include "Core/Config.h"
@@ -65,9 +65,18 @@ static void LaunchFile(ScreenManager *screenManager, Screen *currentScreen, cons
 	if (extension == ".zip" || extension == ".7z") {
 		// If is a zip file, we have a screen for that.
 		screenManager->push(new InstallZipScreen(path));
+	} else if (extension == ".pkg") {
+		// A game update package - not something to boot, something to install.
+		screenManager->push(new InstallPkgScreen(path));
 	} else {
 		// Check if we already know that this game isn't playable.
-		auto info = g_gameInfoCache->GetInfo(nullptr, path, GameInfoFlags::FILE_TYPE);
+		// If coming from the main screen, the info will already be computed here since the icon is displayed etc.
+		// Otherwise (launching from a file association, a shortcut, drag-and-drop...) we have to block until
+		// it's available - we can't decide what to do below without it. HIGH, so we don't wait behind
+		// whatever else is queued, like a search's loads for every game in a big list.
+		const GameInfoFlags neededFlags = GameInfoFlags::FILE_TYPE | GameInfoFlags::PARAM_SFO;
+		std::shared_ptr<GameInfo> info = g_gameInfoCache->GetInfo(nullptr, path, neededFlags, nullptr, GameInfoFlags::EMPTY, TaskPriority::HIGH);
+		info->WaitUntilReady(neededFlags);
 
 		switch (info->fileType) {
 		case IdentifiedFileType::PSP_UMD_VIDEO_ISO:
@@ -80,6 +89,20 @@ static void LaunchFile(ScreenManager *screenManager, Screen *currentScreen, cons
 			std::string title = SanitizeString(info->GetTitle(), StringRestriction::NoLineBreaksOrSpecials, 0, 200);
 			screenManager->push(new SavedataPopupScreen(Path(), path, title));
 			return;
+		}
+		case IdentifiedFileType::PSP_PBP:
+		case IdentifiedFileType::PSP_PBP_DIRECTORY:
+		{
+			// Check if it's an update file. If so, we'll offer to install it directly,
+			// instead of running it (which currently will not work).
+			if (info->id == "MSTKUPDATE") {
+				std::string title = info->GetTitle();  // includes the version.
+				// The unpacker wants the PBP itself, not the folder it happens to sit in.
+				const Path pbpPath = info->fileType == IdentifiedFileType::PSP_PBP ? path : path / "EBOOT.PBP";
+				screenManager->push(new InstallUpdateScreen(pbpPath, title, true));
+				return;
+			}
+			break;
 		}
 		default:
 			break;
@@ -320,7 +343,6 @@ void MainScreen::CreateMainButtons(UI::ViewGroup *parent, bool portrait) {
 			if (!g_Config.Save("MainScreen::OnExit")) {
 				System_Toast("Failed to save settings!\nCheck permissions, or try to restart the device.");
 			}
-
 			UpdateUIState(UISTATE_EXIT);
 			// Request the framework to exit cleanly.
 			System_ExitApp();
@@ -337,6 +359,9 @@ void MainScreen::CreateViews() {
 	const bool vertical = GetDeviceOrientation() == DeviceOrientation::Portrait;
 
 	auto mm = GetI18NCategory(I18NCat::MAINMENU);
+
+	// Thie is the true root, leaves room for persistent notifications.
+	root_ = new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, FILL_PARENT));
 
 	tabHolder_ = new TabHolder(ORIENT_HORIZONTAL, 64, TabHolderFlags::Default, nullptr, nullptr, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, 1.0f));
 	ViewGroup *leftColumn = tabHolder_;
@@ -430,13 +455,13 @@ void MainScreen::CreateViews() {
 		CreateMainButtons(buttonGroup, vertical);
 		header->Add(buttonGroup);
 
-		LinearLayout *rootLayout = new LinearLayout(ORIENT_VERTICAL);
+		LinearLayout *rootLayout = new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(1.0f));
 		rootLayout->SetSpacing(0.0f);
 
 		leftColumn->ReplaceLayoutParams(new LinearLayoutParams(1.0f));
 		rootLayout->Add(header);
 		rootLayout->Add(leftColumn);
-		root_ = rootLayout;
+		root_->Add(rootLayout);
 
 		// no space for a fullscreen button!
 	} else {
@@ -465,9 +490,10 @@ void MainScreen::CreateViews() {
 
 		rightColumn->Add(rightColumnItems);
 
-		root_ = new LinearLayout(ORIENT_HORIZONTAL);
-		root_->Add(leftColumn);
-		root_->Add(rightColumn);
+		LinearLayout *columns = new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(1.0f));
+		columns->Add(leftColumn);
+		columns->Add(rightColumn);
+		root_->Add(columns);
 	}
 
 	if (focusButton) {
@@ -478,47 +504,63 @@ void MainScreen::CreateViews() {
 
 	root_->SetTag("mainroot");
 
-	if (!g_Config.sUpgradeMessage.empty()) {
-		auto di = GetI18NCategory(I18NCat::DIALOG);
+	const UI::Drawable dismissableBackground = screenManager()->getUIContext()->GetTheme().itemDownStyle.background;
+
+	auto CreateDismissableBar = [this, vertical, dismissableBackground](std::string_view message, std::string_view action, std::function<void()> onDismiss) {
 		Margins margins(0, 0);
-		if (vertical) {
-			margins.bottom = ITEM_HEIGHT;
-		}
-		UI::LinearLayout *upgradeBar = new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, margins));
+		UI::LinearLayout *bar = new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, margins));
 
 		UI::Margins textMargins(10, 5);
 		UI::Margins buttonMargins(5, 0);
-		UI::Drawable solid(0xFFbd9939);
-		upgradeBar->SetSpacing(5.0f);
-		upgradeBar->SetBG(solid);
-		std::string upgradeMessage(di->T("New version of PPSSPP available"));
-		if (!vertical) {
-			// The version only really fits in the horizontal layout.
-			upgradeMessage += ": " + g_Config.sUpgradeVersion;
+		UI::Drawable solid(dismissableBackground);
+		bar->SetSpacing(5.0f);
+		bar->SetBG(solid);
+
+		bar->Add(new TextView(message, FLAG_WRAP_TEXT, false, new LinearLayoutParams(1.0f, UI::Gravity::G_VCENTER, textMargins)));
+		if (!action.empty()) {
+			bar->Add(new Choice(action, new LinearLayoutParams(0.0f, UI::Gravity::G_VCENTER, buttonMargins)))->OnClick.Handle(this, &MainScreen::OnDownloadUpgrade);
 		}
-		upgradeBar->Add(new TextView(upgradeMessage, new LinearLayoutParams(1.0f, UI::Gravity::G_VCENTER, textMargins)));
-		upgradeBar->Add(new Choice(di->T("Download"), new LinearLayoutParams(buttonMargins)))->OnClick.Handle(this, &MainScreen::OnDownloadUpgrade);
-		Choice *dismiss = upgradeBar->Add(new Choice("", ImageID("I_CROSS"), new LinearLayoutParams(buttonMargins)));
-		dismiss->OnClick.Add([this](UI::EventParams &e) {
-			g_Config.DismissUpgrade();
-			g_Config.Save("dismissupgrade");
+
+		Choice *dismiss = bar->Add(new Choice("", ImageID("I_CROSS"), new LinearLayoutParams(0.0f, UI::Gravity::G_VCENTER, buttonMargins)));
+		dismiss->OnClick.Add([this, onDismiss](UI::EventParams &e) {
+			onDismiss();
 			RecreateViews();
 		});
+		return bar;
+	};
 
-		// Slip in under root_
-		LinearLayout *newRoot = new LinearLayout(ORIENT_VERTICAL);
-		newRoot->Add(root_);
-		newRoot->Add(upgradeBar);
-		root_->ReplaceLayoutParams(new LinearLayoutParams(1.0));
-		root_ = newRoot;
+	if (!g_Config.sUpgradeMessage.empty()) {
+		auto di = GetI18NCategory(I18NCat::DIALOG);
+		std::string upgradeMessage(di->T("New version of PPSSPP available"));
+		// The version only really fits in the horizontal layout.
+		upgradeMessage += ": " + g_Config.sUpgradeVersion;
+		UI::LinearLayout *upgradeBar = CreateDismissableBar(upgradeMessage, di->T("Download"), [this]() {
+			g_Config.DismissUpgrade();
+			g_Config.Save("dismissupgrade");
+		});
+
+		// Slip in at the top.
+		root_->Insert(0, upgradeBar);
 	}
+
+#if PPSSPP_PLATFORM(WINDOWS) && PPSSPP_ARCH(X86)
+	if (cpu_info.OS64bit && !g_Config.bWow64WarningDismissed) {
+		auto di = GetI18NCategory(I18NCat::DIALOG);
+		std::string_view message = di->T("You're running the 32-bit version. Use PPSSPPWindows64.exe instead for best performance.");
+		UI::LinearLayout *upgradeBar = CreateDismissableBar(message, "", [this]() {
+			g_Config.bWow64WarningDismissed = true;
+			g_Config.Save("dismisswow64");
+		});
+		root_->Insert(0, upgradeBar);
+	}
+#endif
 }
 
 bool MainScreen::key(const KeyInput &key) {
 	if (key.flags & KeyInputFlags::DOWN) {
-		if (key.keyCode == NKCODE_F && (key.flags & KeyInputFlags::MOD_CTRL) && System_GetPropertyBool(SYSPROP_HAS_TEXT_INPUT_DIALOG)) {
+		if (key.keyCode == NKCODE_F && (key.flags & KeyInputFlags::ModCtrl) && System_GetPropertyBool(SYSPROP_HAS_TEXT_INPUT_DIALOG)) {
 			auto se = GetI18NCategory(I18NCat::SEARCH);
-			System_InputBoxGetString(GetRequesterToken(), se->T("Search term"), searchFilter_, false, [&](const std::string &value, int) {
+			System_InputBoxGetString(GetRequesterToken(), se->T("Search term"), searchFilter_, false, [this](std::string_view value, int) {
 				searchFilter_ = StripSpaces(value);
 				searchChanged_ = true;
 			});
@@ -597,7 +639,7 @@ void MainScreen::update() {
 void MainScreen::OnLoadFile(UI::EventParams &e) {
 	if (System_GetPropertyBool(SYSPROP_HAS_FILE_BROWSER)) {
 		auto mm = GetI18NCategory(I18NCat::MAINMENU);
-		System_BrowseForFile(GetRequesterToken(), mm->T("Load"), BrowseFileType::BOOTABLE, [](const std::string &value, int) {
+		System_BrowseForFile(GetRequesterToken(), mm->T("Load"), BrowseFileType::BOOTABLE, [](std::string_view value, int) {
 			System_PostUIMessage(UIMessage::REQUEST_GAME_BOOT, value);
 		});
 	}
@@ -836,7 +878,7 @@ void UmdReplaceScreen::CreateViews() {
 	if (System_GetPropertyBool(SYSPROP_HAS_FILE_BROWSER)) {
 		rightColumnItems->Add(new Choice(mm->T("Load", "Load...")))->OnClick.Add([&](UI::EventParams &e) {
 			auto mm = GetI18NCategory(I18NCat::MAINMENU);
-			System_BrowseForFile(GetRequesterToken(), mm->T("Load"), BrowseFileType::BOOTABLE, [this](const std::string &value, int) {
+			System_BrowseForFile(GetRequesterToken(), mm->T("Load"), BrowseFileType::BOOTABLE, [this](std::string_view value, int) {
 				__UmdReplace(Path(value));
 				TriggerFinish(DR_OK);
 			});
@@ -859,8 +901,8 @@ void UmdReplaceScreen::CreateViews() {
 }
 
 void UmdReplaceScreen::update() {
+	UIBaseDialogScreen::update();
 	UpdateUIState(UISTATE_PAUSEMENU);
-	UIScreen::update();
 }
 
 void UmdReplaceScreen::OnGameSelected(UI::EventParams &e) {

@@ -17,34 +17,6 @@ namespace Draw {
 	class DrawContext;
 }
 
-enum class QueuedEventType : u8 {
-	KEY,
-	AXIS,
-	TOUCH,
-};
-
-struct QueuedEvent {
-	QueuedEventType type;
-	union {
-		TouchInput touch;
-		KeyInput key;
-		AxisInput axis;
-	};
-};
-
-enum class Modifier {
-	NONE = 0,
-	LCTRL = 1,
-	RCTRL = 2,
-	LSHIFT = 4,
-	RSHIFT = 8,
-	LALT = 16,
-	RALT = 32,
-	LMETA = 64,
-	RMETA = 128,
-};
-ENUM_CLASS_BITOPS(Modifier);
-
 class UIScreen : public Screen {
 public:
 	UIScreen();
@@ -55,13 +27,9 @@ public:
 	void deviceLost() override;
 	void deviceRestored(Draw::DrawContext *draw) override;
 
-	virtual void touch(const TouchInput &touch);
-	virtual bool key(const KeyInput &key);
-	virtual void axis(const AxisInput &axis);
-
-	bool UnsyncTouch(const TouchInput &touch) override;
-	bool UnsyncKey(const KeyInput &key) override;
-	void UnsyncAxis(const AxisInput *axes, size_t count) override;
+	bool touch(const TouchInput &touch) override;
+	bool key(const KeyInput &key) override;
+	void axis(const AxisInput &axis) override;
 
 	TouchInput transformTouch(const TouchInput &touch) override;
 
@@ -76,11 +44,16 @@ public:
 
 	virtual void focusChanged(ScreenFocusChange focusChange) override {
 		Screen::focusChanged(focusChange);
-		modifiersPressed_ = Modifier::NONE;
 	}
+
+	virtual bool AllowKeyboardNavigation() const { return true; }
+
+	// Process keyboard shortcuts even outside the game.
+	virtual InputMode PassInputToMapper() const override { return InputMode::Keyboard; }
 
 protected:
 	virtual void CreateViews() = 0;
+	virtual bool AllowFocusMovement() const { return true; }
 
 	Bounds GetLayoutBounds(UIContext &dc) const;
 
@@ -104,21 +77,21 @@ protected:
 
 	bool recreateViews_ = true;
 	DeviceOrientation lastOrientation_ = DeviceOrientation::Landscape;
-
-private:
-	std::mutex eventQueueLock_;
-	std::deque<QueuedEvent> eventQueue_;
-
-	Modifier modifiersPressed_{};
 };
 
 class UIDialogScreen : public UIScreen {
 public:
 	UIDialogScreen() : UIScreen(), finished_(false) {}
 	~UIDialogScreen() override;
+	void update() override {
+		UIScreen::update();
+		firstFrame_ = false;
+	}
 	bool key(const KeyInput &key) override;
 	void sendMessage(UIMessage message, const char *value) override;
 
+protected:
+	bool firstFrame_ = true;  // Since back button can toggle this screen, we need to make sure we don't immediately pop it on the first frame.
 private:
 	bool finished_;
 };

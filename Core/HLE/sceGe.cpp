@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <list>
 #include <map>
 #include <vector>
 #include <mutex>
@@ -23,7 +24,6 @@
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/Serialize/SerializeList.h"
 #include "Common/Serialize/SerializeMap.h"
-#include "Common/Data/Collections/ThreadSafeList.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/HLE/FunctionWrappers.h"
@@ -56,7 +56,7 @@ struct GeInterruptData {
 	u32 cmd;
 };
 
-static ThreadSafeList<GeInterruptData> ge_pending_cb;
+static std::list<GeInterruptData> ge_pending_cb;
 static int geSyncEvent;
 static int geInterruptEvent;
 static int geCycleEvent;
@@ -67,7 +67,8 @@ public:
 
 	bool run(PendingInterrupt& pend) override {
 		if (ge_pending_cb.empty()) {
-			ERROR_LOG_REPORT(Log::sceGe, "Unable to run GE interrupt: no pending interrupt");
+			// sceGeBreak(1) got there first.  If interrupts were off, this one had already been raised.
+			DEBUG_LOG(Log::sceGe, "Ignoring GE interrupt, nothing pending anymore");
 			return false;
 		}
 
@@ -113,8 +114,15 @@ public:
 
 		// Set the list as complete once the interrupt starts.
 		// In other words, not before another interrupt finishes.
-		if (dl->signal != PSP_GE_SIGNAL_HANDLER_PAUSE && cmd == GE_CMD_FINISH) {
+		// A list that sceGeBreak(1) reset in the meantime stays that way.
+		if (dl->signal != PSP_GE_SIGNAL_HANDLER_PAUSE && cmd == GE_CMD_FINISH && dl->state != PSP_GE_DL_STATE_NONE) {
 			dl->state = PSP_GE_DL_STATE_COMPLETED;
+		}
+
+		// The pause has been delivered now. It's marked the same way as sceGeBreak does, which
+		// is what lets sceGeContinue through again.
+		if (dl->signal == PSP_GE_SIGNAL_HANDLER_PAUSE && cmd == GE_CMD_FINISH) {
+			dl->signal = PSP_GE_SIGNAL_HANDLER_SUSPEND;
 		}
 
 		SubIntrHandler* handler = get(subintr);
@@ -126,11 +134,10 @@ public:
 			currentMIPS->r[MIPS_REG_A1] = handler->handlerArg;
 			currentMIPS->r[MIPS_REG_A2] = sceKernelGetCompiledSdkVersion() <= 0x02000010 ? 0 : intrdata.pc + 4;
 			// RA is already taken care of in __RunOnePendingInterrupt
-
 			return true;
 		}
 
-		if (dl->signal == PSP_GE_SIGNAL_HANDLER_SUSPEND) {
+		if (dl->signal == PSP_GE_SIGNAL_HANDLER_SUSPEND && cmd == GE_CMD_SIGNAL) {
 			if (sceKernelGetCompiledSdkVersion() <= 0x02000010) {
 				if (dl->state != PSP_GE_DL_STATE_NONE && dl->state != PSP_GE_DL_STATE_COMPLETED) {
 					dl->state = PSP_GE_DL_STATE_QUEUED;
@@ -141,11 +148,10 @@ public:
 		ge_pending_cb.pop_front();
 		gpu->InterruptEnd(intrdata.listid);
 		// Seen in GoW.
-		if (subintr >= 0)
+		if (subintr >= 0) {
 			DEBUG_LOG(Log::sceGe, "Ignoring interrupt for display list %d, already been released.", intrdata.listid);
+		}
 
-		// Hm. This might be really tricky to get to behave the same in both modes. Here we are in __KernelReschedule, CoreTiming::Advance, ProcessEvents, GeExecuteInterrupt, ... .... __RunOnePendingInterrupt
-		// But not sure how much it will matter. The test pause2 hits here.
 		DLResult result = gpu->ProcessDLQueue();
 		_dbg_assert_(result != DLResult::DebugBreak);
 		return false;
@@ -161,7 +167,7 @@ public:
 			return;
 		}
 
-		switch (dl->signal) {
+		switch (intrdata.cmd == GE_CMD_SIGNAL ? dl->signal : PSP_GE_SIGNAL_NONE) {
 		case PSP_GE_SIGNAL_HANDLER_SUSPEND:
 			if (sceKernelGetCompiledSdkVersion() <= 0x02000010) {
 				// uofw says dl->state = endCmd & 0xFF;
@@ -274,7 +280,7 @@ void __GeShutdown() {
 
 bool __GeTriggerSync(GPUSyncType type, int id, u64 atTicks) {
 	u64 userdata = (u64)id << 32 | (u64)type;
-	s64 future = atTicks - CoreTiming::GetTicks();
+	s64 future = atTicks - CoreTiming::GetTicks(currentMIPS);
 	if (type == GPU_SYNC_DRAW) {
 		s64 left = CoreTiming::UnscheduleEvent(geSyncEvent, userdata);
 		if (left > future)
@@ -282,6 +288,21 @@ bool __GeTriggerSync(GPUSyncType type, int id, u64 atTicks) {
 	}
 	CoreTiming::ScheduleEvent(future, geSyncEvent, userdata);
 	return true;
+}
+
+void __GeCancelRaisedInterrupts(bool interruptRunning) {
+	int count = __CancelRaisedInterrupts(PSP_GE_INTR);
+	// They're raised in the order they were triggered. Hence these are the oldest ones - after the one
+	// being handled right now (if any) which is still needed when its handler returns.
+	auto it = ge_pending_cb.begin();
+	if (interruptRunning && it != ge_pending_cb.end())
+		++it;
+	for (; count > 0 && it != ge_pending_cb.end(); --count) {
+		DisplayList *dl = gpu->getList(it->listid);
+		if (dl)
+			dl->pendingInterrupt = false;
+		it = ge_pending_cb.erase(it);
+	}
 }
 
 bool __GeTriggerInterrupt(int listid, u32 pc, u64 atTicks) {
@@ -293,7 +314,7 @@ bool __GeTriggerInterrupt(int listid, u32 pc, u64 atTicks) {
 	ge_pending_cb.push_back(intrdata);
 
 	u64 userdata = (u64)listid << 32 | (u64) pc;
-	CoreTiming::ScheduleEvent(atTicks - CoreTiming::GetTicks(), geInterruptEvent, userdata);
+	CoreTiming::ScheduleEvent(atTicks - CoreTiming::GetTicks(currentMIPS), geInterruptEvent, userdata);
 	return true;
 }
 
@@ -319,6 +340,8 @@ static bool __GeTriggerWait(WaitType waitType, SceUID waitId, WaitingThreadList 
 	for (int threadID : waitingThreads)
 		wokeThreads |= HLEKernel::ResumeFromWait(threadID, waitType, waitId, 0);
 	waitingThreads.clear();
+	gstate_c.textureSyncTimeDomain++;
+	gpuStats.perFrame.numGEInterrupts++;
 	return wokeThreads;
 }
 
@@ -368,14 +391,14 @@ u32 sceGeListEnQueue(u32 listAddress, u32 stallAddress, int callbackId, u32 optP
 	hleCoreTimingForceCheck();
 	DEBUG_LOG(Log::sceGe,
 		"%08x=sceGeListEnQueue(addr=%08x, stall=%08x, cbid=%08x, param=%08x) ticks=%lld", listID,
-		listAddress, stallAddress, callbackId, optParamAddr, (long long)CoreTiming::GetTicks());
+		listAddress, stallAddress, callbackId, optParamAddr, (long long)CoreTiming::GetTicks(currentMIPS));
 	return hleNoLog(listID); // We already logged above, logs get confusing if we use hleLogSuccess.
 }
 
 u32 sceGeListEnQueueHead(u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr) {
 	DEBUG_LOG(Log::sceGe,
 		"sceGeListEnQueueHead(addr=%08x, stall=%08x, cbid=%08x, param=%08x) ticks=%lld",
-		listAddress, stallAddress, callbackId, optParamAddr, (long long)CoreTiming::GetTicks());
+		listAddress, stallAddress, callbackId, optParamAddr, (long long)CoreTiming::GetTicks(currentMIPS));
 	auto optParam = PSPPointer<PspGeListArgs>::Create(optParamAddr);
 
 	bool runList;
@@ -423,6 +446,7 @@ static int sceGeListUpdateStallAddr(u32 displayListID, u32 stallAddress) {
 // 0 : wait for completion. 1:check and return
 int sceGeListSync(u32 displayListID, u32 mode) {
 	hleEatCycles(220);  // Fudged without measuring, copying sceGeContinue.
+	gstate_c.textureSyncTimeDomain++;
 	return hleLogDebug(Log::sceGe, gpu->ListSync(LIST_ID_MAGIC ^ displayListID, mode));
 }
 
@@ -432,6 +456,7 @@ static u32 sceGeDrawSync(u32 mode) {
 		hleEatCycles(500000); //HACK(?) : Potential fix for Crash Tag Team Racing and a few Gundam games
 	else if (!PSP_CoreParameter().compat.flags().DrawSyncInstant)
 		hleEatCycles(1240);
+	gstate_c.textureSyncTimeDomain++;
 	return hleLogDebug(Log::sceGe, gpu->DrawSync(mode));
 }
 
@@ -536,7 +561,7 @@ u32 sceGeSaveContext(u32 ctxAddr) {
 
 	// Let's just dump gstate.
 	if (Memory::IsValidAddress(ctxAddr)) {
-		gstate.Save((u32_le *)Memory::GetPointer(ctxAddr));
+		gstate.Save((u32_le *)Memory::GetPointerOrException(ctxAddr));
 	}
 
 	// This action should probably be pushed to the end of the queue of the display thread -
@@ -550,7 +575,7 @@ u32 sceGeRestoreContext(u32 ctxAddr) {
 	}
 
 	if (Memory::IsValidAddress(ctxAddr)) {
-		gstate.Restore((u32_le *)Memory::GetPointer(ctxAddr));
+		gstate.Restore((u32_le *)Memory::GetPointerOrException(ctxAddr));
 	}
 
 	gpu->ReapplyGfxState();
@@ -569,7 +594,7 @@ static int sceGeGetMtx(int type, u32 matrixPtr) {
 	if (!gpu || !gpu->GetMatrix24(GEMatrixType(type), dest, 0))
 		return hleLogError(Log::sceGe, SCE_KERNEL_ERROR_INVALID_INDEX, "invalid matrix");
 
-	return hleLogInfo(Log::sceGe, 0);
+	return hleLogDebug(Log::sceGe, 0);
 }
 
 static u32 sceGeGetCmd(int cmd) {
@@ -599,7 +624,7 @@ static u32 sceGeGetCmd(int cmd) {
 		default:
 			break;
 		}
-		return hleLogInfo(Log::sceGe, val);
+		return hleLogDebug(Log::sceGe, val);
 	}
 	return hleLogError(Log::sceGe, SCE_KERNEL_ERROR_INVALID_INDEX);
 }

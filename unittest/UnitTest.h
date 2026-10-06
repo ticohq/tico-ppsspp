@@ -1,7 +1,27 @@
 #pragma once
 
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <algorithm>
+
+#include "Common/TimeUtil.h"
+
+// For benchmarks: calls fn over and over, callsPerBatch at a time between reads of the clock, for at
+// least the given number of seconds, and returns how many calls per second that came to. Multiply by
+// the work one call does (pixels, vertices) for a throughput.
+template <typename Func>
+double CallsPerSecond(Func fn, double seconds, int callsPerBatch) {
+	int calls = 0;
+	const double start = time_now_d();
+	do {
+		for (int i = 0; i < callsPerBatch; i++) {
+			fn();
+		}
+		calls += callsPerBatch;
+	} while (time_now_d() - start < seconds);
+	return calls / (time_now_d() - start);
+}
 
 inline bool rel_equal(float a, float b, float precision) {
 	float diff = fabsf(a - b);
@@ -26,3 +46,5 @@ inline bool rel_equal(float a, float b, float precision) {
 #define EXPECT_EQ_MEM(a, b, sz) if (memcmp(a, b, sz) != 0) { printf("%s: Test Fail\n%.*s\nvs\n%.*s\n", __FUNCTION__, (int)sz, a, (int)sz, b); return false; }
 
 #define RET(a) if (!(a)) { return false; }
+
+extern bool g_testLog;

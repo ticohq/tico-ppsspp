@@ -18,6 +18,8 @@
 #pragma once
 
 #include <vector>
+#include <algorithm>
+#include <cfloat>
 
 #include "Common/CommonTypes.h"
 #include "Common/Data/Collections/Hashmaps.h"
@@ -36,6 +38,11 @@ enum {
 	VERTEX_BUFFER_MAX = 65536,
 	DECODED_VERTEX_BUFFER_SIZE = VERTEX_BUFFER_MAX * 2 * 36,  // 36 == sizeof(SimpleVertex)
 	DECODED_INDEX_BUFFER_SIZE = VERTEX_BUFFER_MAX * 6 * 6 * 2,   // * 6 for spline tessellation, then * 6 again for converting into points/lines, and * 2 for 2 bytes per index
+	// TestBoundingBox handles up to 1025 vertices: corners (SimpleVertex), then positions, then decoded vertices.
+	BBOX_SCRATCH_CORNERS_OFFSET = 0,
+	BBOX_SCRATCH_VERTS_OFFSET = 64 * 1024,
+	BBOX_SCRATCH_TEMP_OFFSET = 128 * 1024,
+	BBOX_SCRATCH_SIZE = 256 * 1024,
 };
 
 enum {
@@ -43,9 +50,6 @@ enum {
 	TEX_SLOT_SHADERBLEND_SRC = 1,
 	TEX_SLOT_ALPHATEST = 2,
 	TEX_SLOT_CLUT = 3,
-	TEX_SLOT_SPLINE_POINTS = 4,
-	TEX_SLOT_SPLINE_WEIGHTS_U = 5,
-	TEX_SLOT_SPLINE_WEIGHTS_V = 6,
 };
 
 enum FBOTexState {
@@ -57,13 +61,6 @@ enum FBOTexState {
 struct SimpleVertex;
 namespace Spline { struct Weight2D; }
 
-class TessellationDataTransfer {
-public:
-	virtual ~TessellationDataTransfer() {}
-	static void CopyControlPoints(float *pos, float *tex, float *col, int posStride, int texStride, int colStride, const SimpleVertex *const *points, int size, u32 vertType);
-	virtual void SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) = 0;
-};
-
 // Culling plane, group of 8.
 struct alignas(16) Plane8 {
 	float x[8], y[8], z[8], w[8];
@@ -73,12 +70,14 @@ struct alignas(16) Plane8 {
 
 class DrawEngineCommon {
 public:
+	DrawEngineCommon(const DrawEngineCommon &) = delete;
+	DrawEngineCommon &operator=(const DrawEngineCommon &) = delete;
 	DrawEngineCommon();
 	virtual ~DrawEngineCommon();
 
 	void Init();
 
-	virtual void BeginFrame();
+	virtual void BeginFrame() {}
 
 	void SetGPUCommon(GPUCommon *gpuCommon) {
 		gpuCommon_ = gpuCommon;
@@ -93,9 +92,9 @@ public:
 	// This would seem to be unnecessary now, but is still required for splines/beziers to work in the software backend since SubmitPrim
 	// is different. Should probably refactor that.
 	// Note that vertTypeID should be computed using GetVertTypeID().
-	virtual void DispatchSubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, bool clockwise, int *bytesRead) {
+	virtual void DispatchSubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, bool clockwise, int *bytesRead, ClipInfoFlags clipInfoFlags) {
 		VertexDecoder *dec = GetVertexDecoder(vertTypeID);
-		SubmitPrim(verts, inds, prim, vertexCount, dec, vertTypeID, clockwise, bytesRead);
+		SubmitPrim(verts, inds, prim, vertexCount, dec, vertTypeID, clockwise, bytesRead, clipInfoFlags);
 	}
 
 	virtual void DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex *buffer, int vertexCount, int cullMode, bool continuation);
@@ -104,8 +103,9 @@ public:
 
 	// This is a less accurate version of TestBoundingBox, but faster. Can have more false positives.
 	// Doesn't support indexing.
-	bool TestBoundingBoxFast(const void *control_points, int vertexCount, const VertexDecoder *dec, u32 vertType);
-	bool TestBoundingBoxThrough(const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType, int *bytesRead);
+	bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *clipInfoFlags);
+	bool TestBoundingBoxThrough(GEPrimitiveType prim, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, int *bytesRead, ClipInfoFlags *flags);
+	bool EstimateThroughPrimSafeSize(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertType, int *safeWidth, int *safeHeight);
 
 	void FlushPartialDecode() {
 		DecodeVerts(dec_, decoded_);
@@ -117,28 +117,20 @@ public:
 		}
 	}
 
-	int ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle);
-	bool SubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead);
-	void SkipPrim(GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, int *bytesRead);
+	int ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle, ClipInfoFlags clipInfoFlags);
+	bool SubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, ClipInfoFlags clipInfoFlags);
+	void SkipPrim(GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, int *bytesRead);
 
 	template<class Surface>
 	void SubmitCurve(const void *control_points, const void *indices, Surface &surface, u32 vertType, int *bytesRead, const char *scope);
 	static void ClearSplineBezierWeights();
 
 	bool CanUseHardwareTransform(int prim) const;
-	bool CanUseHardwareTessellation(GEPatchPrimType prim) const;
 
 	std::vector<std::string> DebugGetVertexLoaderIDs();
 	std::string DebugGetVertexLoaderString(std::string_view id, DebugShaderStringType stringType);
 
 	virtual void NotifyConfigChanged();
-
-	bool EverUsedExactEqualDepth() const {
-		return everUsedExactEqualDepth_;
-	}
-	void SetEverUsedExactEqualDepth(bool v) {
-		everUsedExactEqualDepth_ = v;
-	}
 
 	bool DescribeCodePtr(const u8 *ptr, std::string &name) const;
 	int GetNumDrawCalls() const {
@@ -168,11 +160,15 @@ public:
 	void FlushQueuedDepth();
 
 protected:
-	virtual bool UpdateUseHWTessellation(bool enabled) const { return enabled; }
-	void UpdatePlanes();
+	bool CheckClipFlags(bool useHwTransform) const;
 
 	void DecodeVerts(const VertexDecoder *dec, u8 *dest);
 	int DecodeInds();
+
+	// Whether an indexed draw can share the previous draw's vertex decode, by widening its index range.
+	bool CanExtendDecode(const void *verts, const void *inds, const VertexDecoder *dec) const {
+		return inds && numDrawVerts_ > decodeVertsCounter_ && drawVerts_[numDrawVerts_ - 1].verts == verts && !dec->skinInDecode;
+	}
 
 	int ComputeNumVertsToDecode() const;
 
@@ -182,7 +178,7 @@ protected:
 	void ShutdownDepthRaster();
 	void DepthRasterSubmitRaw(GEPrimitiveType prim, const VertexDecoder *dec, uint32_t vertTypeID, int vertexCount);
 	void DepthRasterPredecoded(GEPrimitiveType prim, const void *inVerts, int numDecoded, const VertexDecoder *dec, int vertexCount);
-	bool CalculateDepthDraw(DepthDraw *draw, GEPrimitiveType prim, int vertexCount);
+	bool CalculateDepthDraw(DepthDraw *draw, GEPrimitiveType prim, int vertexCount, int numDecoded);
 
 	static inline int IndexSize(u32 vtype) {
 		const u32 indexType = (vtype & GE_VTYPE_IDX_MASK);
@@ -213,22 +209,25 @@ protected:
 	}
 
 	inline void ResetAfterDrawInline() {
-		gpuStats.numFlushes++;
-		gpuStats.numDrawCalls += numDrawInds_;
-		gpuStats.numVertexDecodes += numDrawVerts_;
-		gpuStats.numVertsSubmitted += vertexCountInDrawCalls_;
-		gpuStats.numVertsDecoded += numDecodedVerts_;
+		gpuStats.perFrame.numFlushes++;
+		gpuStats.perFrame.numDrawCalls += numDrawInds_;
+		gpuStats.perFrame.numVertexDecodes += numDrawVerts_;
+		gpuStats.perFrame.numVertsSubmitted += vertexCountInDrawCalls_;
+		gpuStats.perFrame.numVertsDecoded += numDecodedVerts_;
 
 		indexGen.Reset();
 		numDecodedVerts_ = 0;
 		numDrawVerts_ = 0;
 		numDrawInds_ = 0;
 		vertexCountInDrawCalls_ = 0;
+		expandedVertsInDrawCalls_ = 0;
+		numVertsToDecode_ = 0;
 		decodeIndsCounter_ = 0;
 		decodeVertsCounter_ = 0;
 		seenPrims_ = 0;
 		anyCCWOrIndexed_ = false;
 		gstate_c.vertexFullAlpha = true;
+		clipInfoFlags_ = {};
 
 		// Now seems as good a time as any to reset the min/max coords, which we may examine later.
 		gstate_c.vertBounds.minU = 512;
@@ -275,7 +274,6 @@ protected:
 	}
 
 	bool useHWTransform_ = false;
-	bool useHWTessellation_ = false;
 	// Used to prevent unnecessary flushing in softgpu.
 	bool flushOnParams_ = true;
 
@@ -283,9 +281,15 @@ protected:
 	bool everUsedEqualDepth_ = false;
 	bool everUsedExactEqualDepth_ = false;
 
+	// The draw context's invalidation callback is installed from BeginFrame, on the emu thread. The draw
+	// engine is created on the loader thread, while the UI thread may already be rendering and calling it.
+	bool invalidationCallbackInstalled_ = false;
+
 	// Vertex collector buffers
 	u8 *decoded_ = nullptr;
 	u16 *decIndex_ = nullptr;
+	// Separate from decoded_, which can hold decoded vertices that haven't been flushed yet.
+	u8 *bboxScratch_ = nullptr;
 
 	// Cached vertex decoders
 	DenseHashMap<u32, VertexDecoder *> decoderMap_;
@@ -295,7 +299,7 @@ protected:
 	TransformedVertex *transformed_ = nullptr;
 	TransformedVertex *transformedExpanded_ = nullptr;
 
-	// Defer all vertex decoding to a "Flush" (except when software skinning)
+	// Defer all vertex decoding to a "Flush" (except when skinning, when we decode per draw)
 	struct DeferredVerts {
 		const void *verts;
 		UVScale uvScale;
@@ -325,6 +329,11 @@ protected:
 	int numDrawVerts_ = 0;
 	int numDrawInds_ = 0;
 	int vertexCountInDrawCalls_ = 0;
+	// How many vertices software transform expands the queued points, lines and rectangles to (4 per
+	// point, line or rectangle). Must stay <= VERTEX_BUFFER_MAX, or the expansion drops the whole draw.
+	int expandedVertsInDrawCalls_ = 0;
+	// How many vertices DecodeVerts will produce for the queued draws. Must stay <= VERTEX_BUFFER_MAX.
+	int numVertsToDecode_ = 0;
 
 	int decodeVertsCounter_ = 0;
 	int decodeIndsCounter_ = 0;
@@ -332,8 +341,6 @@ protected:
 	int seenPrims_ = 0;
 	bool anyCCWOrIndexed_ = 0;
 	bool anyIndexed_ = 0;
-
-	bool applySkinInDecode_ = false;
 
 	// Vertex collector state
 	IndexGenerator indexGen;
@@ -346,18 +353,9 @@ protected:
 	// Sometimes, unusual situations mean we need to reset dirty flags after state calc finishes.
 	uint64_t dirtyRequiresRecheck_ = 0;
 
-	ComputedPipelineState pipelineState_;
+	ComputedPipelineState pipelineState_{};
 
-	// Hardware tessellation
-	TessellationDataTransfer *tessDataTransfer;
-
-	// Culling
-	Plane8 planes_;
-	Vec2f minOffset_;
-	Vec2f maxOffset_;
-	bool offsetOutsideEdge_;
-
-	GPUCommon *gpuCommon_;
+	GPUCommon *gpuCommon_ = nullptr;
 
 	// Software depth raster
 	bool useDepthRaster_ = false;
@@ -366,10 +364,16 @@ protected:
 	int *depthScreenVerts_ = nullptr;
 	uint16_t *depthIndices_ = nullptr;
 
+	// Depth tracking
+	ClipInfoFlags clipInfoFlags_{};
+	ClipInfoFlags lastClipInfoFlags_{};  // Flags at the last flush. For dirtying.
+
 	// Queue
 	int depthVertexCount_ = 0;
 	int depthIndexCount_ = 0;
 	std::vector<DepthDraw> depthDraws_;
 
 	double rasterTimeStart_ = 0.0;
+
+	bool lastUseHwTransform_ = true;
 };

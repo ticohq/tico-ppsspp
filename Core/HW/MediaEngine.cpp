@@ -569,6 +569,17 @@ bool MediaEngine::setVideoStream(int streamNum, bool force) {
 	return true;
 }
 
+bool MediaEngine::setAudioStream(int streamNum) {
+	if (m_audioStream == streamNum)
+		return true;
+
+	m_audioStream = streamNum;
+	if (m_demux) {
+		m_demux->setAudioChannel(streamNum);
+	}
+	return true;
+}
+
 bool MediaEngine::setVideoDim(int width, int height)
 {
 #ifdef USE_FFMPEG
@@ -1066,7 +1077,7 @@ int MediaEngine::getNextAudioFrame(u8 **buf, int *headerCode1, int *headerCode2)
 }
 
 int MediaEngine::getAudioSamples(u32 bufferPtr) {
-	int16_t *buffer = (int16_t *)Memory::GetPointerWriteRange(bufferPtr, 8192);
+	int16_t *buffer = (int16_t *)Memory::GetPointerWriteRangeOrException(bufferPtr, 8192);
 	if (buffer == nullptr) {
 		ERROR_LOG_REPORT(Log::ME, "Ignoring bad audio decode address %08x during video playback", bufferPtr);
 	}

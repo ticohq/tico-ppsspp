@@ -201,7 +201,6 @@ GLuint ShaderStageToOpenGL(ShaderStage stage) {
 	case ShaderStage::Vertex: return GL_VERTEX_SHADER;
 #ifndef USING_GLES2
 	case ShaderStage::Compute: return GL_COMPUTE_SHADER;
-	case ShaderStage::Geometry: return GL_GEOMETRY_SHADER;
 #endif
 	case ShaderStage::Fragment:
 	default:
@@ -378,6 +377,7 @@ public:
 
 	void UpdateBuffer(Buffer *buffer, const uint8_t *data, size_t offset, size_t size, UpdateBufferFlags flags) override;
 	void UpdateTextureLevels(Texture *texture, const uint8_t **data, TextureCallback initDataCallback, int numLevels) override;
+	void UpdateTextureRegions(Texture *texture, int level, const TextureRegionUpdate *regions, int numRegions) override;
 
 	void CopyFramebufferImage(Framebuffer *src, int level, int x, int y, int z, Framebuffer *dst, int dstLevel, int dstX, int dstY, int dstZ, int width, int height, int depth, Aspect aspects, const char *tag) override;
 	bool BlitFramebuffer(Framebuffer *src, int srcX1, int srcY1, int srcX2, int srcY2, Framebuffer *dst, int dstX1, int dstY1, int dstX2, int dstY2, Aspect aspects, FBBlitFilter filter, const char *tag) override;
@@ -534,26 +534,6 @@ private:
 	PresentMode requestedPresentMode_{};
 };
 
-static constexpr int MakeIntelSimpleVer(int v1, int v2, int v3) {
-	return (v1 << 16) | (v2 << 8) | v3;
-}
-
-static bool HasIntelDualSrcBug(const int versions[4]) {
-	// Intel uses a confusing set of at least 3 version numbering schemes.  This is the one given to OpenGL.
-	switch (MakeIntelSimpleVer(versions[0], versions[1], versions[2])) {
-	case MakeIntelSimpleVer(9, 17, 10):
-	case MakeIntelSimpleVer(9, 18, 10):
-		return false;
-	case MakeIntelSimpleVer(10, 18, 10):
-		return versions[3] < 4061;
-	case MakeIntelSimpleVer(10, 18, 14):
-		return versions[3] < 4080;
-	default:
-		// Older than above didn't support dual src anyway, newer should have the fix.
-		return false;
-	}
-}
-
 OpenGLContext::OpenGLContext(bool canChangeSwapInterval) : renderManager_(frameTimeHistory_) {
 	if (gl_extensions.IsGLES) {
 		if (gl_extensions.OES_packed_depth_stencil || gl_extensions.OES_depth24) {
@@ -561,11 +541,12 @@ OpenGLContext::OpenGLContext(bool canChangeSwapInterval) : renderManager_(frameT
 		} else {
 			caps_.preferredDepthBufferFormat = DataFormat::D16;
 		}
+		if (gl_extensions.FullPrecisionIntInFragment()) {
+			caps_.fragmentShaderInt32Supported = true;
+		}
 		if (gl_extensions.GLES3) {
-			// Mali reports 30 but works fine...
-			if (gl_extensions.range[1][5][1] >= 30) {
-				caps_.fragmentShaderInt32Supported = true;
-			}
+			// 30 is an ok value for the max since it's 2^31-1, which is the max value for a signed int. NVIDIA also reports this.
+			caps_.samplerLodControl = true;
 		}
 		caps_.texture3DSupported = gl_extensions.GLES3 || gl_extensions.OES_texture_3D;
 		caps_.textureDepthSupported = gl_extensions.GLES3 || gl_extensions.OES_depth_texture;
@@ -573,13 +554,18 @@ OpenGLContext::OpenGLContext(bool canChangeSwapInterval) : renderManager_(frameT
 		if (gl_extensions.VersionGEThan(3, 3, 0)) {
 			caps_.fragmentShaderInt32Supported = true;
 		}
+		caps_.fragmentShaderFullPrecisionFloat = true;
 		caps_.preferredDepthBufferFormat = DataFormat::D24_S8;
 		caps_.texture3DSupported = true;
 		caps_.textureDepthSupported = true;
+		caps_.samplerLodControl = true;
+	}
+
+	if (gl_extensions.HighpFragmentFloatMantissaBits() >= 23 && !(gl_extensions.bugs & BUG_PVR_SHADER_PRECISION_TERRIBLE)) {
+		caps_.fragmentShaderFullPrecisionFloat = true;
 	}
 
 	caps_.maxTextureSize = gl_extensions.maxTextureSize;
-	caps_.maxClipPlanes = gl_extensions.IsGLES ? 0 : gl_extensions.maxClipPlanes;
 	caps_.coordConvention = CoordConvention::OpenGL;
 	caps_.setMaxFrameLatencySupported = true;
 	caps_.dualSourceBlend = gl_extensions.ARB_blend_func_extended || gl_extensions.EXT_blend_func_extended;
@@ -592,17 +578,8 @@ OpenGLContext::OpenGLContext(bool canChangeSwapInterval) : renderManager_(frameT
 	caps_.blendMinMaxSupported = gl_extensions.EXT_blend_minmax;
 	caps_.multiSampleLevelsMask = 1;  // More could be supported with some work.
 
-	if (gl_extensions.IsGLES) {
-		caps_.clipDistanceSupported = gl_extensions.EXT_clip_cull_distance || gl_extensions.APPLE_clip_distance;
-		caps_.cullDistanceSupported = gl_extensions.EXT_clip_cull_distance;
-	} else {
-		caps_.clipDistanceSupported = gl_extensions.VersionGEThan(3, 0);
-		caps_.cullDistanceSupported = gl_extensions.ARB_cull_distance;
-	}
-	caps_.textureNPOTFullySupported =
-		(!gl_extensions.IsGLES && gl_extensions.VersionGEThan(2, 0, 0)) ||
-		gl_extensions.IsCoreContext || gl_extensions.GLES3 ||
-		gl_extensions.ARB_texture_non_power_of_two || gl_extensions.OES_texture_npot;
+	caps_.maxClipDistances = gl_extensions.maxClipDistances;
+	caps_.maxCullDistances = gl_extensions.maxCullDistances;
 
 	if (gl_extensions.IsGLES) {
 		caps_.fragmentShaderDepthWriteSupported = gl_extensions.GLES3;
@@ -650,17 +627,6 @@ OpenGLContext::OpenGLContext(bool canChangeSwapInterval) : renderManager_(frameT
 	if (!gl_extensions.VersionGEThan(3, 0, 0)) {
 		// Don't use this extension on sub 3.0 OpenGL versions as it does not seem reliable.
 		bugs_.Infest(Bugs::DUAL_SOURCE_BLENDING_BROKEN);
-	} else if (caps_.vendor == GPUVendor::VENDOR_INTEL) {
-		// Note: this is for Intel drivers with GL3+.
-		// Also on Intel, see https://github.com/hrydgard/ppsspp/issues/10117
-		// TODO: Remove entirely sometime reasonably far in driver years after 2015.
-		const std::string ver = OpenGLContext::GetInfoString(Draw::InfoField::APIVERSION);
-		int versions[4]{};
-		if (sscanf(ver.c_str(), "Build %d.%d.%d.%d", &versions[0], &versions[1], &versions[2], &versions[3]) == 4) {
-			if (HasIntelDualSrcBug(versions)) {
-				bugs_.Infest(Bugs::DUAL_SOURCE_BLENDING_BROKEN);
-			}
-		}
 	}
 
 #if PPSSPP_ARCH(ARMV7)
@@ -895,6 +861,7 @@ public:
 	}
 
 	void UpdateTextureLevels(GLRenderManager *render, const uint8_t *const *data, int numLevels, TextureCallback initDataCallback);
+	void UpdateTextureRegions(GLRenderManager *render, int level, const TextureRegionUpdate *regions, int numRegions);
 
 private:
 	void SetImageData(int x, int y, int z, int width, int height, int depth, int level, int stride, const uint8_t *data, TextureCallback initDataCallback);
@@ -953,6 +920,23 @@ void OpenGLTexture::UpdateTextureLevels(GLRenderManager *render, const uint8_t *
 		generatedMips_ = true;
 	}
 	render->FinalizeTexture(tex_, mipLevels_, genMips);
+}
+
+void OpenGLTexture::UpdateTextureRegions(GLRenderManager *render, int level, const TextureRegionUpdate *regions, int numRegions) {
+	const int pixelSize = (int)DataFormatSizeInBytes(format_);
+	for (int i = 0; i < numRegions; i++) {
+		const TextureRegionUpdate &region = regions[i];
+		_dbg_assert_(region.w > 0 && region.h > 0);
+		const int srcStride = region.byteStride ? region.byteStride : region.w * pixelSize;
+		const int dstStride = region.w * pixelSize;
+		// glTexSubImage2D could take the stride through GL_UNPACK_ROW_LENGTH, but that's not in GLES2,
+		// and the queue runner owns the data anyway, so just pack it here.
+		uint8_t *texData = new uint8_t[(size_t)dstStride * region.h];
+		for (int y = 0; y < region.h; y++) {
+			memcpy(texData + (size_t)dstStride * y, region.data + (size_t)srcStride * y, dstStride);
+		}
+		render->TextureSubImageInit(tex_, level, region.x, region.y, region.w, region.h, format_, texData);
+	}
 }
 
 OpenGLTexture::~OpenGLTexture() {
@@ -1078,6 +1062,11 @@ Texture *OpenGLContext::CreateTexture(const TextureDesc &desc) {
 void OpenGLContext::UpdateTextureLevels(Texture *texture, const uint8_t **data, TextureCallback initDataCallback, int numLevels) {
 	OpenGLTexture *tex = (OpenGLTexture *)texture;
 	tex->UpdateTextureLevels(&renderManager_, data, numLevels, initDataCallback);
+}
+
+void OpenGLContext::UpdateTextureRegions(Texture *texture, int level, const TextureRegionUpdate *regions, int numRegions) {
+	OpenGLTexture *tex = (OpenGLTexture *)texture;
+	tex->UpdateTextureRegions(&renderManager_, level, regions, numRegions);
 }
 
 DepthStencilState *OpenGLContext::CreateDepthStencilState(const DepthStencilStateDesc &desc) {
@@ -1267,15 +1256,8 @@ void OpenGLContext::ApplySamplers() {
 		} else {
 			continue;
 		}
-		GLenum wrapS;
-		GLenum wrapT;
-		if (tex->canWrap) {
-			wrapS = samp->wrapU;
-			wrapT = samp->wrapV;
-		} else {
-			wrapS = GL_CLAMP_TO_EDGE;
-			wrapT = GL_CLAMP_TO_EDGE;
-		}
+		GLenum wrapS = samp->wrapU;
+		GLenum wrapT = samp->wrapV;
 		GLenum magFilt = samp->magFilt;
 		GLenum minFilt = tex->numMips > 1 ? samp->mipMinFilt : samp->minFilt;
 		renderManager_.SetTextureSampler(i, wrapS, wrapT, magFilt, minFilt, 0.0f);
@@ -1380,12 +1362,13 @@ void OpenGLContext::BindPipeline(Pipeline *pipeline) {
 }
 
 void OpenGLContext::UpdateDynamicUniformBuffer(const void *ub, size_t size) {
-	if (curPipeline_->dynamicUniforms.uniformBufferSize != size) {
+	const auto &dynamicUniforms = curPipeline_->dynamicUniforms;
+	if (dynamicUniforms.uniformBufferSize != size) {
 		Crash();
 	}
 
-	for (size_t i = 0; i < curPipeline_->dynamicUniforms.uniforms.size(); ++i) {
-		const auto &uniform = curPipeline_->dynamicUniforms.uniforms[i];
+	for (size_t i = 0; i < dynamicUniforms.uniforms.size(); ++i) {
+		const auto &uniform = dynamicUniforms.uniforms[i];
 		const GLint &loc = curPipeline_->locs_->dynamicUniformLocs_[i];
 		const float *data = (const float *)((uint8_t *)ub + uniform.offset);
 		switch (uniform.type) {

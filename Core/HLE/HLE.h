@@ -98,6 +98,8 @@ struct Syscall {
 #define RETURN64(n) {u64 RETURN64_tmp = n; currentMIPS->r[MIPS_REG_V0] = RETURN64_tmp & 0xFFFFFFFF; currentMIPS->r[MIPS_REG_V1] = RETURN64_tmp >> 32;}
 #define RETURNF(fl) currentMIPS->f[0] = fl
 
+#define PARAM_MIPS(mips, n) mips->r[MIPS_REG_A0 + n]
+
 struct HLEModuleMeta {
 	// This is the modname (name from the PRX header). Probably, we should really blacklist on the module names of the exported symbol metadata.
 	const char *modname;
@@ -108,10 +110,20 @@ struct HLEModuleMeta {
 const HLEModuleMeta *GetHLEModuleMetaByFlag(DisableHLEFlags flag);
 const HLEModuleMeta *GetHLEModuleMeta(std::string_view modname);
 bool ShouldHLEModule(std::string_view modname, bool *wasDisabledManually = nullptr);
+// When set, ShouldHLEModule always says no, so every module genuinely loads and runs Sony's
+// code. Needed by the headless reverse-engineering dump (headless/ReverseEngineer.cpp), which
+// exists precisely to look at the real thing - including modules like sceAudiocodec_Driver that
+// have no DisableHLEFlags bit of their own and so can't be turned off the normal way.
+// Only affects loading; imports still resolve through the HLE tables, which is what gives
+// imported functions their names.
+void SetForceRealModuleLoads(bool force);
 bool ShouldHLEModuleByImportName(std::string_view importModuleName);
 
+// May return nullptr
 const char *GetHLEFuncName(std::string_view module, u32 nib);
+// May return nullptr if indices out of range.
 const char *GetHLEFuncName(int module, int func);
+
 const HLEModule *GetHLEModuleByName(std::string_view name);
 const HLEFunction *GetHLEFunc(std::string_view module, u32 nib);
 int GetHLEFuncIndexByNib(int moduleIndex, u32 nib);
@@ -122,6 +134,9 @@ void RegisterHLEModule(std::string_view name, int numFunctions, const HLEFunctio
 int GetNumRegisteredHLEModules();
 const HLEModule *GetHLEModuleByIndex(int index);
 DisableHLEFlags AlwaysDisableHLEFlags();
+// The flags actually in effect for this boot - latched at the first module load and restored from
+// savestates, so it can differ from what g_Config says if the setting changed since.
+DisableHLEFlags GetEffectiveDisableHLEFlags();
 
 // Run the current thread's callbacks after the syscall finishes.
 void hleCheckCurrentCallbacks();
@@ -172,29 +187,40 @@ inline s64 hleDelayResult(s64 result, const char *reason, int usec) {
 }
 
 void HLEInit();
+void HLECheckModuleAvailability();
+// The flags that were asked for but could not be honoured, because the firmware module they need
+// is neither installed nor on the disc - those libraries ran our HLE instead. HLECheckModuleAvailability()
+// fills this in during boot, so it only means anything after that.
+DisableHLEFlags HLEGetUnavailableDisableFlags();
 void HLEDoState(PointerWrap &p);
 void HLEShutdown();
+const HLEFunction *HLEGetFunctionBeingCalled();
+size_t HLEFormatLogArgs(const MIPSState *mips, char *message, size_t sz, const char *argmask);
+// Runs a printf-style format string from the emulated program, pulling the varargs out of the PSP's
+// registers and stack. firstVarArg is the index of the first vararg, counting a0 as 0 - so 1 for a
+// printf(fmt, ...), 2 for an sprintf(dst, fmt, ...). Returns false, having logged why, if the format
+// string or an argument couldn't be read; the caller shouldn't use the result then.
+bool HLEFormatPrintf(u32 fmtAddr, int firstVarArg, std::string *result);
 u32 GetSyscallOp(std::string_view module, u32 nib);
 bool WriteHLESyscall(std::string_view module, u32 nib, u32 address);
 void CallSyscall(MIPSOpcode op);
+void CallSyscallWithPC(MIPSOpcode op, u32 pc);  // better diagnostics
+void CallSyscallUnresolvedAtPC(u32 pc);
 void WriteFuncStub(u32 stubAddr, u32 symAddr);
 void WriteFuncMissingStub(u32 stubAddr, u32 nid);
 
 void HLEReturnFromMipsCall();
 
-const HLEFunction *GetSyscallFuncPointer(MIPSOpcode op);
-// For jit, takes arg: const HLEFunction *
-void *GetQuickSyscallFunc(MIPSOpcode op);
+const HLEFunction *GetSyscallFunctionData(MIPSOpcode op, u32 pcForDiagnostics);
+// For jit, the returned function takes the arg: const HLEFunction *
+void *GetQuickSyscallFunc(const HLEFunction *info, MIPSOpcode op);
 
 void hleDoLogInternal(Log t, LogLevel level, u64 res, const char *file, int line, const char *reportTag, const char *reason, const char *formatted_reason);
 
 template <bool leave, bool convert_code, typename T>
 [[nodiscard]]
-#ifdef __GNUC__
-__attribute__((format(printf, 7, 8)))
-#endif
 NO_INLINE
-T hleDoLog(Log t, LogLevel level, T res, const char *file, int line, const char *reportTag, const char *reasonFmt, ...) {
+ATTR_FORMAT_PRINTF(7, 8) T hleDoLog(Log t, LogLevel level, T res, const char *file, int line, const char *reportTag, MSVC_FORMAT_PRINTF const char *reasonFmt, ...) {
 	if (!GenericLogEnabled(t, level)) {
 		if (leave) {
 			hleLeave();

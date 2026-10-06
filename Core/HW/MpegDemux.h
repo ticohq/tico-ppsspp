@@ -16,6 +16,7 @@ public:
 
 	bool addStreamData(const u8 *buf, int addSize);
 	bool demux(int audioChannel);
+	void setAudioChannel(int audioChannel);
 
 	// return its framesize
 	int getNextAudioFrame(u8 **buf, int *headerCode1, int *headerCode2, s64 *pts = NULL);
@@ -41,6 +42,13 @@ private:
 	};
 
 	int read8() {
+		// PES header field lengths (e.g. readPesHeader()'s headerLength byte) are
+		// only cross-checked against the outer packet length, not against how much
+		// data is actually available - a crafted stream can claim more than that,
+		// so guard the actual buffer access here rather than in every caller.
+		if (m_index >= m_len) {
+			return 0;
+		}
 		return m_buf[m_index++];
 	}
 	int read16() {
@@ -61,6 +69,9 @@ private:
 	void skip(int n) {
 		if (n > 0) {
 			m_index += n;
+			if (m_index > m_len) {
+				m_index = m_len;
+			}
 		}
 	}
 	int readPesHeader(PesHeader &pesHeader, int length, int startCode);

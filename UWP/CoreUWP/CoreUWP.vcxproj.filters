@@ -11,6 +11,7 @@
     <ClCompile Include="..\..\Core\CwCheat.cpp" />
     <ClCompile Include="..\..\Core\Debugger\Breakpoints.cpp" />
     <ClCompile Include="..\..\Core\Debugger\DisassemblyManager.cpp" />
+    <ClCompile Include="..\..\Core\Debugger\LineInfo.cpp" />
     <ClCompile Include="..\..\Core\Debugger\MemBlockInfo.cpp" />
     <ClCompile Include="..\..\Core\Debugger\SymbolMap.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket.cpp" />
@@ -21,12 +22,15 @@
     <ClCompile Include="..\..\Core\Debugger\WebSocket\GameBroadcaster.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\GameSubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\GPUBufferSubscriber.cpp" />
+    <ClCompile Include="..\..\Core\Debugger\WebSocket\GPUDisasmSubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\GPURecordSubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\GPUStatsSubscriber.cpp" />
+    <ClCompile Include="..\..\Core\Debugger\WebSocket\HLEKernelObjectSubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\HLESubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\InputBroadcaster.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\InputSubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\LogBroadcaster.cpp" />
+    <ClCompile Include="..\..\Core\Debugger\WebSocket\LogConfigSubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\MemorySubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\MemoryInfoSubscriber.cpp" />
     <ClCompile Include="..\..\Core\Debugger\WebSocket\ReplaySubscriber.cpp" />
@@ -38,6 +42,7 @@
     <ClCompile Include="..\..\Core\Dialog\PSPMsgDialog.cpp" />
     <ClCompile Include="..\..\Core\Dialog\PSPNetconfDialog.cpp" />
     <ClCompile Include="..\..\Core\Dialog\PSPNpSigninDialog.cpp" />
+    <ClCompile Include="..\..\Core\Dialog\PSPHtmlViewerDialog.cpp" />
     <ClCompile Include="..\..\Core\Dialog\PSPOskConstants.cpp" />
     <ClCompile Include="..\..\Core\Dialog\PSPOskDialog.cpp" />
     <ClCompile Include="..\..\Core\Dialog\PSPPlaceholderDialog.cpp" />
@@ -123,7 +128,9 @@
     <ClCompile Include="..\..\Core\HLE\sceMp3.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceMp4.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceAac.cpp" />
+    <ClCompile Include="..\..\Core\HLE\sceVideocodec.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceMpeg.cpp" />
+    <ClCompile Include="..\..\Core\HLE\sceMpegbase.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceMt19937.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceNet.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceNet_lib.cpp" />
@@ -132,6 +139,7 @@
     <ClCompile Include="..\..\Core\HLE\sceNetAdhocMatching.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceNp.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceOpenPSID.cpp" />
+    <ClCompile Include="..\..\Core\HLE\sceResmgr.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceP3da.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceParseHttp.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceParseUri.cpp" />
@@ -158,6 +166,8 @@
     <ClCompile Include="..\..\Core\HW\BufferQueue.cpp" />
     <ClCompile Include="..\..\Core\HW\Camera.cpp" />
     <ClCompile Include="..\..\Core\HW\Display.cpp" />
+    <ClCompile Include="..\..\Core\HW\GpioMMIO.cpp" />
+    <ClCompile Include="..\..\Core\HW\AvcDecoder.cpp" />
     <ClCompile Include="..\..\Core\HW\MediaEngine.cpp" />
     <ClCompile Include="..\..\Core\HW\MemoryStick.cpp" />
     <ClCompile Include="..\..\Core\HW\MpegDemux.cpp" />
@@ -225,11 +235,11 @@
     <ClCompile Include="..\..\Core\MIPS\MIPSDebugInterface.cpp" />
     <ClCompile Include="..\..\Core\MIPS\MIPSDis.cpp" />
     <ClCompile Include="..\..\Core\MIPS\MIPSDisVFPU.cpp" />
-    <ClCompile Include="..\..\Core\MIPS\MIPSInt.cpp" />
-    <ClCompile Include="..\..\Core\MIPS\MIPSIntVFPU.cpp" />
+    <ClCompile Include="..\..\Core\MIPS\Interpreter.cpp" />
+    <ClCompile Include="..\..\Core\MIPS\InterpreterDispatch.cpp" />
+    <ClCompile Include="..\..\Core\MIPS\InterpreterVFPU.cpp" />
     <ClCompile Include="..\..\Core\MIPS\MIPSStackWalk.cpp" />
     <ClCompile Include="..\..\Core\MIPS\MIPSTables.cpp" />
-    <ClCompile Include="..\..\Core\MIPS\MIPSVFPUFallbacks.cpp" />
     <ClCompile Include="..\..\Core\MIPS\MIPSVFPUUtils.cpp" />
     <ClCompile Include="..\..\Core\MIPS\MIPSTracer.cpp" />
     <ClCompile Include="..\..\Core\MIPS\x86\Asm.cpp" />
@@ -272,6 +282,9 @@
     <ClCompile Include="..\..\Core\Util\DisArm64.cpp" />
     <ClCompile Include="..\..\Core\Util\GameManager.cpp" />
     <ClCompile Include="..\..\Core\Util\PPGeDraw.cpp" />
+    <ClCompile Include="..\..\Core\Util\KL4E.cpp" />
+    <ClCompile Include="..\..\Core\Util\PSARUnpack.cpp" />
+    <ClCompile Include="..\..\Core\Util\PkgUnpack.cpp" />
     <ClCompile Include="..\..\Core\WaveFile.cpp" />
     <ClCompile Include="..\..\ext\cityhash\city.cpp" />
     <ClCompile Include="..\..\ext\disarm.cpp" />
@@ -411,6 +424,10 @@
     <ClCompile Include="..\..\Core\Util\PathUtil.cpp" />
     <ClCompile Include="..\..\Core\SaveStateRewind.cpp" />
     <ClCompile Include="..\..\Core\Util\VideoPlayer.cpp" />
+    <ClCompile Include="..\..\Core\CmdLine.cpp" />
+    <ClCompile Include="..\..\Core\EmuThread.cpp" />
+    <ClCompile Include="..\..\Core\HLE\sceChkreg.cpp" />
+    <ClCompile Include="..\..\Core\HLE\sceVshBridge.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Core\AVIDump.h" />
@@ -425,6 +442,7 @@
     <ClInclude Include="..\..\Core\Debugger\Breakpoints.h" />
     <ClInclude Include="..\..\Core\Debugger\DebugInterface.h" />
     <ClInclude Include="..\..\Core\Debugger\DisassemblyManager.h" />
+    <ClInclude Include="..\..\Core\Debugger\LineInfo.h" />
     <ClInclude Include="..\..\Core\Debugger\MemBlockInfo.h" />
     <ClInclude Include="..\..\Core\Debugger\SymbolMap.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket.h" />
@@ -435,12 +453,15 @@
     <ClInclude Include="..\..\Core\Debugger\WebSocket\GameBroadcaster.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\GameSubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\GPUBufferSubscriber.h" />
+    <ClInclude Include="..\..\Core\Debugger\WebSocket\GPUDisasmSubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\GPURecordSubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\GPUStatsSubscriber.h" />
+    <ClInclude Include="..\..\Core\Debugger\WebSocket\HLEKernelObjectSubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\HLESubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\InputBroadcaster.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\InputSubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\LogBroadcaster.h" />
+    <ClInclude Include="..\..\Core\Debugger\WebSocket\LogConfigSubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\MemorySubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\MemoryInfoSubscriber.h" />
     <ClInclude Include="..\..\Core\Debugger\WebSocket\ReplaySubscriber.h" />
@@ -452,6 +473,7 @@
     <ClInclude Include="..\..\Core\Dialog\PSPMsgDialog.h" />
     <ClInclude Include="..\..\Core\Dialog\PSPNetconfDialog.h" />
     <ClInclude Include="..\..\Core\Dialog\PSPNpSigninDialog.h" />
+    <ClInclude Include="..\..\Core\Dialog\PSPHtmlViewerDialog.h" />
     <ClInclude Include="..\..\Core\Dialog\PSPOskConstants.h" />
     <ClInclude Include="..\..\Core\Dialog\PSPOskDialog.h" />
     <ClInclude Include="..\..\Core\Dialog\PSPPlaceholderDialog.h" />
@@ -504,6 +526,9 @@
     <ClInclude Include="..\..\Core\HLE\sceAtrac.h" />
     <ClInclude Include="..\..\Core\HLE\sceAudio.h" />
     <ClInclude Include="..\..\Core\HLE\sceAudiocodec.h" />
+    <ClInclude Include="..\..\Core\HLE\sceMpegbase.h" />
+    <ClInclude Include="..\..\Core\HLE\sceVideocodec.h" />
+    <ClInclude Include="..\..\Core\HW\AvcDecoder.h" />
     <ClInclude Include="..\..\Core\HLE\sceAudioRouting.h" />
     <ClInclude Include="..\..\Core\HLE\sceCcc.h" />
     <ClInclude Include="..\..\Core\HLE\sceChnnlsv.h" />
@@ -548,6 +573,7 @@
     <ClInclude Include="..\..\Core\HLE\sceNetAdhocMatching.h" />
     <ClInclude Include="..\..\Core\HLE\sceNp.h" />
     <ClInclude Include="..\..\Core\HLE\sceOpenPSID.h" />
+    <ClInclude Include="..\..\Core\HLE\sceResmgr.h" />
     <ClInclude Include="..\..\Core\HLE\sceP3da.h" />
     <ClInclude Include="..\..\Core\HLE\sceParseHttp.h" />
     <ClInclude Include="..\..\Core\HLE\sceParseUri.h" />
@@ -575,6 +601,7 @@
     <ClInclude Include="..\..\Core\HW\BufferQueue.h" />
     <ClInclude Include="..\..\Core\HW\Camera.h" />
     <ClInclude Include="..\..\Core\HW\Display.h" />
+    <ClInclude Include="..\..\Core\HW\GpioMMIO.h" />
     <ClInclude Include="..\..\Core\HW\MediaEngine.h" />
     <ClInclude Include="..\..\Core\HW\MemoryStick.h" />
     <ClInclude Include="..\..\Core\HW\MpegDemux.h" />
@@ -616,11 +643,11 @@
     <ClInclude Include="..\..\Core\MIPS\MIPSDebugInterface.h" />
     <ClInclude Include="..\..\Core\MIPS\MIPSDis.h" />
     <ClInclude Include="..\..\Core\MIPS\MIPSDisVFPU.h" />
-    <ClInclude Include="..\..\Core\MIPS\MIPSInt.h" />
-    <ClInclude Include="..\..\Core\MIPS\MIPSIntVFPU.h" />
+    <ClInclude Include="..\..\Core\MIPS\Interpreter.h" />
+    <ClInclude Include="..\..\Core\MIPS\InterpreterDispatch.h" />
+    <ClInclude Include="..\..\Core\MIPS\InterpreterVFPU.h" />
     <ClInclude Include="..\..\Core\MIPS\MIPSStackWalk.h" />
     <ClInclude Include="..\..\Core\MIPS\MIPSTables.h" />
-    <ClInclude Include="..\..\Core\MIPS\MIPSVFPUFallbacks.h" />
     <ClInclude Include="..\..\Core\MIPS\MIPSVFPUUtils.h" />
     <ClInclude Include="..\..\Core\MIPS\MIPSTracer.h" />
     <ClInclude Include="..\..\Core\MIPS\x86\Jit.h" />
@@ -650,6 +677,8 @@
     <ClInclude Include="..\..\Core\Util\DisArm64.h" />
     <ClInclude Include="..\..\Core\Util\GameManager.h" />
     <ClInclude Include="..\..\Core\Util\PPGeDraw.h" />
+    <ClInclude Include="..\..\Core\Util\PSARUnpack.h" />
+    <ClInclude Include="..\..\Core\Util\PkgUnpack.h" />
     <ClInclude Include="..\..\Core\WaveFile.h" />
     <ClInclude Include="..\..\ext\cityhash\city.h" />
     <ClInclude Include="..\..\ext\cityhash\citycrc.h" />
@@ -684,6 +713,10 @@
     <ClInclude Include="..\..\Core\Util\PathUtil.h" />
     <ClInclude Include="..\..\Core\SaveStateRewind.h" />
     <ClInclude Include="..\..\Core\Util\VideoPlayer.h" />
+    <ClInclude Include="..\..\Core\CmdLine.h" />
+    <ClInclude Include="..\..\Core\EmuThread.h" />
+    <ClInclude Include="..\..\Core\HLE\sceChkreg.h" />
+    <ClInclude Include="..\..\Core\HLE\sceVshBridge.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\ext\gason\LICENSE" />

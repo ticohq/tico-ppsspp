@@ -69,20 +69,26 @@ static void __MicBlockingResume(u64 userdata, int cyclesLate) {
 		}
 
 		if (Microphone::isHaveDevice()) {
-			if (Microphone::getReadMicDataLength() >= iter->needSize) {
-				u32 ret = __KernelGetWaitValue(threadID, error);
-				DEBUG_LOG(Log::HLE, "sceUsbMic: Waking up thread(%d)", (int)iter->threadID);
-				__KernelResumeThreadFromWait(threadID, ret);
-				iter = waitingThreads.erase(iter);
-			} else {
-				u64 waitTimeus = (iter->needSize - Microphone::getReadMicDataLength()) * 1000000 / 2 / iter->sampleRate;
-				CoreTiming::ScheduleEvent(usToCycles(waitTimeus), eventMicBlockingResume, userdata);
-				iter++;
+			// The PSP's mic delivers in real time, so the read completes when the samples are due in
+			// emulated time. Waiting for the host instead hangs the game if its mic never delivers
+			// (Go!Edit's recording stalled that way), so fill what's missing with silence.
+			const u32 needSize = (u32)iter->needSize;
+			const u32 have = std::min((u32)Microphone::getReadMicDataLength(), needSize);
+			if (have < needSize) {
+				DEBUG_LOG(Log::HLE, "sceUsbMic: host mic only delivered %d of %d bytes, padding with silence", have, needSize);
+				if (Memory::IsValidRange(iter->addr + have, needSize - have)) {
+					Memory::Memset(iter->addr + have, 0, needSize - have, "MicSilence");
+				}
+				readMicDataLength = needSize;
 			}
+			u32 ret = __KernelGetWaitValue(threadID, error);
+			DEBUG_LOG(Log::HLE, "sceUsbMic: Waking up thread(%d)", (int)iter->threadID);
+			__KernelResumeThreadFromWait(threadID, ret);
+			iter = waitingThreads.erase(iter);
 		} else {
 			for (int i = 0; i < iter->needSize; i++) {
 				if (Memory::IsValidAddress(iter->addr + i)) {
-					Memory::Write_U8(i & 0xFF, iter->addr + i);
+					Memory::WriteUnchecked_U8(i & 0xFF, iter->addr + i);
 				}
 			}
 			u32 ret = __KernelGetWaitValue(threadID, error);
@@ -121,10 +127,20 @@ void __UsbMicShutdown() {
 void __UsbMicDoState(PointerWrap &p) {
 	auto s = p.Section("sceUsbMic", 0, 3);
 	if (!s) {
-		// Still need to restore the event.
-		eventMicBlockingResume = -1;
-		CoreTiming::RestoreRegisterEvent(eventMicBlockingResume, "MicBlockingResume", &__MicBlockingResume);
-		waitingThreads.clear();
+		// Still need to restore the event (unless this is a save that failed earlier.)
+		if (p.mode == p.MODE_READ) {
+			eventMicBlockingResume = -1;
+			CoreTiming::RestoreRegisterEvent(eventMicBlockingResume, "MicBlockingResume", &__MicBlockingResume);
+			waitingThreads.clear();
+			// Nor was the mic, so leave it off.
+			if (Microphone::isMicStarted()) {
+				Microphone::stopMic();
+			}
+			numNeedSamples = 0;
+			curTargetAddr = 0;
+			readMicDataLength = 0;
+			micState = 0;
+		}
 		return;
 	}
 	bool isMicStartedNow = Microphone::isMicStarted();
@@ -144,6 +160,10 @@ void __UsbMicDoState(PointerWrap &p) {
 	if (s > 2) {
 		Do(p, curTargetAddr);
 		Do(p, readMicDataLength);
+	} else if (p.mode == p.MODE_READ) {
+		// The host mic thread writes to curTargetAddr, so don't leave the one from before the load.
+		curTargetAddr = 0;
+		readMicDataLength = 0;
 	}
 	if (!audioBuf && numNeedSamples > 0) {
 		audioBuf = new QueueBuf(numNeedSamples << 1);
@@ -299,7 +319,7 @@ static int sceUsbMicInputInit(int unknown1, int inputVolume, int unknown2) {
 }
 
 static int sceUsbMicWaitInputEnd() {
-	ERROR_LOG(Log::HLE, "UNIMPL sceUsbMicWaitInputEnd");
+	WARN_LOG(Log::HLE, "UNIMPL sceUsbMicWaitInputEnd");
 	// Hack: Just task switch so other threads get to do work. Helps Beaterator (although recording does not appear to work correctly).
 	return hleDelayResult(0, "MicWait", 100);
 }
@@ -332,7 +352,8 @@ int Microphone::stopMic() {
 
 bool Microphone::isHaveDevice() {
 #ifdef HAVE_WIN32_MICROPHONE
-	return winMic->getDeviceCounts() >= 1;
+	// Only the app creates winMic, headless doesn't.
+	return winMic && winMic->getDeviceCounts() >= 1;
 #elif PPSSPP_PLATFORM(ANDROID)
 	return System_AudioRecordingIsAvailable();
 #endif

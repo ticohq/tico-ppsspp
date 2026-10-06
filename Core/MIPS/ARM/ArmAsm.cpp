@@ -159,7 +159,7 @@ void ArmJit::GenerateFixedCode() {
 	outerLoop = GetCodePtr();
 		SaveDowncount();
 		RestoreRoundingMode(true);
-		QuickCallFunction(R0, &CoreTiming::Advance);
+		QuickCallFunctionR(R1, &CoreTiming::Advance, CTXREG);
 		ApplyRoundingMode(true);
 		RestoreDowncount();
 		FixupBranch skipToCoreStateCheck = B(); //skip the downcount check
@@ -222,7 +222,7 @@ void ArmJit::GenerateFixedCode() {
 			// No block found, let's jit
 			SaveDowncount();
 			RestoreRoundingMode(true);
-			QuickCallFunction(R2, (void *)&MIPSComp::JitAt);
+			QuickCallFunctionR(R2, (void *)&MIPSComp::JitAt, CTXREG);
 			ApplyRoundingMode(true);
 			RestoreDowncount();
 

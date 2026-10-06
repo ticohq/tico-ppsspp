@@ -3,6 +3,7 @@
 
 #include "Common/Math/math_util.h"
 #include "Common/TimeUtil.h"
+#include "Common/Data/Text/StringWriter.h"
 #include "Common/StringUtils.h"
 #include "Common/Log.h"
 
@@ -105,28 +106,66 @@ static bool IsSignedAxis(int axis) {
 	}
 }
 
+// Apply a response curve to a 0-1 magnitude value.
+static float ApplyResponseCurve(float v, int curveType) {
+	switch (curveType) {
+	case 1:  // Aggressive - fast response, reaches high output quickly
+		return sqrtf(v);
+	case 2:  // Relaxed - more range devoted to fine/slow movement
+		return v * v;
+	case 3:  // Wide - even more precision at low end
+		return v * v * v;
+	default: // Linear (0) - 1:1 mapping
+		return v;
+	}
+}
+
+// Apply axial anti-deadzone to a single axis value.
+// For non-zero inputs, boosts the output to at least the threshold value.
+// This makes the output "skip" the zone near each axis, preventing the stick
+// from lingering in the near-cardinal region. Pure cardinal (0.0) is still reachable.
+static float ApplyAxialAntiDeadzone(float v, float antiDZ) {
+	if (antiDZ <= 0.0f || v == 0.0f)
+		return v;
+	float sign = v >= 0.0f ? 1.0f : -1.0f;
+	float absV = fabsf(v);
+	// Remap (0, 1] -> [antiDZ, 1]: any non-zero input jumps past the anti-deadzone threshold.
+	float remapped = antiDZ + absV * (1.0f - antiDZ);
+	return sign * Clamp(remapped, 0.0f, 1.0f);
+}
+
 // This is applied on the circular radius, not directly on the axes.
-// TODO: Share logic with tilt?
+// Adds a response curve stage on top of the legacy inner-deadzone + sensitivity processing.
 
 static float MapAxisValue(float v) {
 	const float deadzone = g_Config.fAnalogDeadzone;
 	const float invDeadzone = g_Config.fAnalogInverseDeadzone;
 	const float sensitivity = g_Config.fAnalogSensitivity;
+	const int responseCurve = g_Config.iAnalogResponseCurve;
 	const float sign = v >= 0.0f ? 1.0f : -1.0f;
 
-	// Apply deadzone.
-	v = Clamp((fabsf(v) - deadzone) / (1.0f - deadzone), 0.0f, 1.0f);
+	float absV = fabsf(v);
 
-	// Apply sensitivity and inverse deadzone.
-	if (v != 0.0f) {
-		v = Clamp(invDeadzone + v * (sensitivity - invDeadzone), 0.0f, 1.0f);
+	// Stage 1: Apply inner deadzone and rescale to [0, 1].
+	absV = Clamp((absV - deadzone) / (1.0f - deadzone), 0.0f, 1.0f);
+
+	// Stage 2: Apply sensitivity (legacy, matches prior behavior when response curve is Linear).
+	if (absV != 0.0f) {
+		absV = Clamp(invDeadzone + absV * (sensitivity - invDeadzone), 0.0f, 1.0f);
 	}
 
-	return sign * v;
+	// Stage 3: Apply response curve.
+	if (absV != 0.0f) {
+		absV = ApplyResponseCurve(absV, responseCurve);
+	}
+
+	return sign * Clamp(absV, 0.0f, 1.0f);
 }
 
 void ConvertAnalogStick(float x, float y, float *outX, float *outY) {
 	const bool isCircular = g_Config.bAnalogIsCircular;
+	const int deadzoneShape = g_Config.iAnalogDeadzoneShape;
+	const float axialDZ = g_Config.fAnalogAxialDeadzone;
 
 	float norm = std::max(fabsf(x), fabsf(y));
 	if (norm == 0.0f) {
@@ -135,17 +174,30 @@ void ConvertAnalogStick(float x, float y, float *outX, float *outY) {
 		return;
 	}
 
-	if (isCircular) {
+	if (isCircular || deadzoneShape == 0) {
+		// Circle shape or legacy circular mode: use Euclidean norm.
 		float newNorm = sqrtf(x * x + y * y);
 		float factor = newNorm / norm;
 		x *= factor;
 		y *= factor;
 		norm = newNorm;
 	}
+	// deadzoneShape == 1 (Square) uses max norm (the default path, no conversion needed).
+	// deadzoneShape == 2 (Cross) also uses max norm for the radial processing.
 
 	float mappedNorm = MapAxisValue(norm);
 	*outX = Clamp(x / norm * mappedNorm, -1.0f, 1.0f);
 	*outY = Clamp(y / norm * mappedNorm, -1.0f, 1.0f);
+
+	// Final stage: Apply cross-shaped axial anti-deadzone.
+	// This boosts small non-zero axis values past the threshold, making the output
+	// "skip" the zone near each cardinal axis. This prevents the stick from lingering
+	// near cardinals and opens up the full diagonal range.
+	// Pure cardinals (0.0 on an axis) are still reachable.
+	if (deadzoneShape == 2 && axialDZ > 0.0f) {
+		*outX = ApplyAxialAntiDeadzone(*outX, axialDZ);
+		*outY = ApplyAxialAntiDeadzone(*outY, axialDZ);
+	}
 }
 
 void ControlMapper::SetPSPAxis(int device, int stick, char axis, float value) {
@@ -251,7 +303,7 @@ void ControlMapper::ReleaseAll() {
 
 	Axis(axes.data(), axes.size());;
 	for (const auto &key : keys) {
-		Key(key, nullptr);
+		Key(key);
 	}
 }
 
@@ -339,6 +391,93 @@ void ControlMapper::SwapMappingIfEnabled(uint32_t *vkey) {
 	}
 }
 
+// Works out which mappings are currently being overridden by a longer one. If you map something
+// to L2+R2, you don't want whatever L2 and R2 are mapped to on their own to fire as well, so while
+// a combo is fully held, the shorter mappings sharing an input with it are suppressed.
+// mutex_ should be locked, and also KeyMap::LockMappings().
+void ControlMapper::UpdateComboSuppression() {
+	if (KeyMap::HasChanged(comboMappingsGeneration_)) {
+		KeyMap::GetAllComboMappingsNoLock(&comboMappings_);
+	}
+
+	comboSuppressionChanged_.clear();
+	if (comboMappings_.empty() && comboSuppression_.empty()) {
+		// By far the common case - nobody has mapped a combo, so there's nothing to suppress.
+		return;
+	}
+
+	std::map<InputMapping, size_t> prevSuppression = std::move(comboSuppression_);
+	comboSuppression_.clear();
+
+	for (const auto &combo : comboMappings_) {
+		// Is every input of the combo held down? Same conditions as the main loops below.
+		bool all = true;
+		double curTime = 0.0;
+		for (const auto &mapping : combo.mappings) {
+			auto iter = curInput_.find(mapping);
+			if (iter == curInput_.end()) {
+				all = false;
+				break;
+			}
+			// Stop reverse ordering from triggering.
+			if (g_Config.bStrictComboOrder && iter->second.timestamp < curTime) {
+				all = false;
+				break;
+			}
+			curTime = iter->second.timestamp;
+			if (iter->second.value <= 0.0f || iter->second.value <= GetDeviceAxisThreshold(iter->first.deviceId, mapping)) {
+				all = false;
+				break;
+			}
+		}
+		if (!all) {
+			continue;
+		}
+		// It is, so record it as the one to beat for each of its inputs.
+		for (const auto &mapping : combo.mappings) {
+			size_t &longest = comboSuppression_[mapping];
+			longest = std::max(longest, combo.mappings.size());
+		}
+	}
+
+	// Outputs are only re-evaluated when an input they use has changed, so when suppression
+	// starts or stops for an input, we have to treat that input as changed too. Otherwise
+	// releasing one button of a held combo wouldn't bring back what the others map to alone.
+	for (const auto &[mapping, size] : comboSuppression_) {
+		auto iter = prevSuppression.find(mapping);
+		if (iter == prevSuppression.end() || iter->second != size) {
+			comboSuppressionChanged_.push_back(mapping);
+		}
+	}
+	for (const auto &[mapping, size] : prevSuppression) {
+		if (!comboSuppression_.count(mapping)) {
+			comboSuppressionChanged_.push_back(mapping);
+		}
+	}
+}
+
+bool ControlMapper::SuppressionChanged(const KeyMap::MultiInputMapping &multiMapping) const {
+	for (const auto &changed : comboSuppressionChanged_) {
+		if (multiMapping.mappings.contains(changed)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ControlMapper::IsSuppressedByCombo(const KeyMap::MultiInputMapping &multiMapping) const {
+	if (comboSuppression_.empty()) {
+		return false;
+	}
+	for (const auto &mapping : multiMapping.mappings) {
+		auto iter = comboSuppression_.find(mapping);
+		if (iter != comboSuppression_.end() && multiMapping.mappings.size() < iter->second) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Can only be called from Key or Axis.
 // mutex_ should be locked, and also KeyMap::LockMappings().
 // TODO: We should probably make a batched version of this.
@@ -353,6 +492,8 @@ bool ControlMapper::UpdatePSPState(const InputMapping &changedMapping, double no
 	case ROTATION_LOCKED_VERTICAL:      rotations = 1; break;
 	case ROTATION_LOCKED_VERTICAL180:   rotations = 3; break;
 	}
+
+	UpdateComboSuppression();
 
 	// For the PSP's digital button inputs, we just go through and put the flags together.
 	uint32_t buttonMask = 0;
@@ -377,7 +518,7 @@ bool ControlMapper::UpdatePSPState(const InputMapping &changedMapping, double no
 		// If a mapping could consist of a combo, we could trivially check it here.
 		for (auto &multiMapping : inputMappings) {
 			// Check if the changed mapping was involved in this PSP key.
-			if (multiMapping.mappings.contains(changedMapping)) {
+			if (multiMapping.mappings.contains(changedMapping) || SuppressionChanged(multiMapping)) {
 				changedButtonMask |= mask;
 			}
 			// Check if all inputs are "on".
@@ -400,7 +541,7 @@ bool ControlMapper::UpdatePSPState(const InputMapping &changedMapping, double no
 				if (!down)
 					all = false;
 			}
-			if (all) {
+			if (all && !IsSuppressedByCombo(multiMapping)) {
 				buttonMask |= mask;
 			}
 		}
@@ -432,8 +573,12 @@ bool ControlMapper::UpdatePSPState(const InputMapping &changedMapping, double no
 		bool touchedByMapping = false;
 		float value = 0.0f;
 		for (auto &multiMapping : inputMappings) {
-			if (multiMapping.mappings.contains(changedMapping)) {
+			if (multiMapping.mappings.contains(changedMapping) || SuppressionChanged(multiMapping)) {
 				touchedByMapping = true;
+			}
+
+			if (IsSuppressedByCombo(multiMapping)) {
+				continue;
 			}
 
 			float product = 1.0f;  // We multiply the various inputs in a combo mapping with each other.
@@ -534,7 +679,7 @@ bool ControlMapper::UpdatePSPState(const InputMapping &changedMapping, double no
 	return keyInputUsed;
 }
 
-bool ControlMapper::Key(const KeyInput &key, bool *pauseTrigger) {
+bool ControlMapper::Key(const KeyInput &key) {
 	double now = time_now_d();
 	InputMapping mapping(key.deviceId, key.keyCode);
 
@@ -555,7 +700,7 @@ bool ControlMapper::Key(const KeyInput &key, bool *pauseTrigger) {
 		bool mappingFound = KeyMap::InputMappingToPspButton(mapping, nullptr);
 		DEBUG_LOG(Log::System, "Key: %d DeviceId: %d", key.keyCode, key.deviceId);
 		if (!mappingFound || key.deviceId == DEVICE_ID_DEFAULT) {
-			*pauseTrigger = true;
+			pauseTrigger_ = true;
 			return true;
 		}
 	}
@@ -631,7 +776,10 @@ void ControlMapper::Axis(const AxisInput *axes, size_t count) {
 		if (deviceIndex < (size_t)DEVICE_ID_COUNT) {
 			deviceTimestamps_[deviceIndex] = now;
 		}
-		rawAxisValue_[axis.axisId] = axis.value;  // these are only used for co-axis mapping
+		// Same as deviceId above, axisId comes straight from the device and can be out of range.
+		if ((size_t)axis.axisId < JOYSTICK_AXIS_MAX) {
+			rawAxisValue_[axis.axisId] = axis.value;  // these are only used for co-axis mapping
+		}
 		if (axis.value >= 0.0f) {
 			InputMapping mapping(axis.deviceId, axis.axisId, 1);
 			InputMapping opposite(axis.deviceId, axis.axisId, -1);
@@ -765,21 +913,25 @@ void ControlMapper::onVKey(VirtKey vkey, bool down) {
 	}
 }
 
-void ControlMapper::GetDebugString(char *buffer, size_t bufSize) const {
-	std::stringstream str;
+void ControlMapper::GetDebugString(StringWriter &w) const {
 	for (auto &iter : curInput_) {
 		char temp[256];
 		iter.first.FormatDebug(temp, sizeof(temp));
-		str << temp << ": " << iter.second.value << std::endl;
+		w.F("%s: %f\n", temp, iter.second.value);
 	}
 	for (int i = 0; i < ARRAY_SIZE(virtKeys_); i++) {
 		int vkId = VIRTKEY_FIRST + i;
 		if ((vkId >= VIRTKEY_AXIS_X_MIN && vkId <= VIRTKEY_AXIS_Y_MAX) || vkId == VIRTKEY_ANALOG_LIGHTLY || vkId == VIRTKEY_SPEED_ANALOG) {
-			str << KeyMap::GetPspButtonName(vkId) << ": " << virtKeys_[i] << std::endl;
+			w.F("%s: %f\n", KeyMap::GetPspButtonName(vkId).c_str(), virtKeys_[i]);
 		}
 	}
-	str << "Lstick: " << converted_[0][0] << ", " << converted_[0][1] << std::endl;
-	truncate_cpy(buffer, bufSize, str.str().c_str());
+	w.F("Lstick: %f, %f\n", converted_[0][0], converted_[0][1]);
+	w.F("Rstick: %f, %f\n", converted_[1][0], converted_[1][1]);
+}
+
+void ControlMapper::AddListener(ControlListener *listener) {
+	std::lock_guard<std::mutex> guard(mutex_);
+	listeners_.push_back(listener);
 }
 
 void ControlMapper::RemoveListener(ControlListener *listener) {

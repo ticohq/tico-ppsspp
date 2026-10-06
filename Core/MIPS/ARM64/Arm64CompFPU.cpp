@@ -83,13 +83,19 @@ void Arm64Jit::Comp_FPULS(MIPSOpcode op)
 	CONDITIONAL_DISABLE(LSU_FPU);
 	CheckMemoryBreakpoint();
 
+	if (js.kernelMode) {
+		// Send all memory accesses to the interpreter in kernel mode.
+		// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+		DISABLE;
+		return;
+	}
+
 	s32 offset = SignExtend16ToS32(op & 0xFFFF);
 	int ft = _FT;
 	MIPSGPReg rs = _RS;
-	// u32 addr = R(rs) + offset;
 	std::vector<FixupBranch> skips;
 	switch (op >> 26) {
-	case 49: //FI(ft) = Memory::Read_U32(addr); break; //lwc1
+	case 49: // lwc1
 		if (!gpr.IsImm(rs) && jo.cachePointers && g_Config.bFastMemory && (offset & 3) == 0 && offset <= 16380 && offset >= 0) {
 			gpr.MapRegAsPointer(rs);
 			fpr.MapReg(ft, MAP_NOINIT | MAP_DIRTY);
@@ -121,7 +127,7 @@ void Arm64Jit::Comp_FPULS(MIPSOpcode op)
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 		break;
 
-	case 57: //Memory::Write_U32(FI(ft), addr); break; //swc1
+	case 57: // swc1
 		if (!gpr.IsImm(rs) && jo.cachePointers && g_Config.bFastMemory && (offset & 3) == 0 && offset <= 16380 && offset >= 0) {
 			gpr.MapRegAsPointer(rs);
 			fpr.MapReg(ft, 0);
@@ -390,9 +396,9 @@ void Arm64Jit::Comp_mxc1(MIPSOpcode op)
 				gpr.MapDirtyIn(MIPS_REG_FPCOND, rt);
 			}
 
-			// Update MIPS state
-			// TODO: Technically, should mask by 0x0181FFFF.  Maybe just put all of FCR31 in the reg?
-			STR(INDEX_UNSIGNED, gpr.R(rt), CTXREG, offsetof(MIPSState, fcr31));
+			// Update MIPS state. Only these bits can be written (pspautotests cpu/fpu/fcr).
+			ANDI2R(SCRATCH1, gpr.R(rt), 0x0181FFFF, SCRATCH2);
+			STR(INDEX_UNSIGNED, SCRATCH1, CTXREG, offsetof(MIPSState, fcr31));
 			if (!wasImm) {
 				UBFX(gpr.R(MIPS_REG_FPCOND), gpr.R(rt), 23, 1);
 				// TODO: We do have the fcr31 value in a register here, could use that in UpdateRoundingMode to avoid reloading it.

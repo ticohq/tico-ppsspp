@@ -9,9 +9,13 @@
 #include "Common/System/Display.h"
 #include "Common/Log.h"
 #include "Common/GPU/Shader.h"
+#include "Common/GPU/MiscTypes.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/GPU/Vulkan/VulkanDebug.h"
+#include "Common/GPU/Vulkan/FixedSPIRVCache.h"
 #include "Common/StringUtils.h"
+#include "Common/File/FileUtil.h"
+#include "ext/xxhash.h"
 
 #ifdef USE_CRT_DBG
 #undef new
@@ -90,6 +94,23 @@ const char *VulkanImageLayoutToString(VkImageLayout imageLayout) {
 	}
 }
 
+const char *WindowSystemToString(WindowSystem winsys) {
+	switch (winsys) {
+	case WINDOWSYSTEM_UNINITIALIZED: return "UNINITIALIZED";
+	case WINDOWSYSTEM_WIN32: return "WIN32";
+	case WINDOWSYSTEM_ANDROID: return "ANDROID";
+	case WINDOWSYSTEM_METAL_EXT: return "METAL_EXT";
+	case WINDOWSYSTEM_XLIB: return "XLIB";
+	case WINDOWSYSTEM_XCB: return "XCB";
+	case WINDOWSYSTEM_WAYLAND: return "WAYLAND";
+	case WINDOWSYSTEM_DISPLAY: return "DISPLAY";
+	case WINDOWSYSTEM_SDL: return "SDL";
+	case WINDOWSYSTEM_NONE: return "NONE";
+	default:
+		return "UNKNOWN";
+	}
+}
+
 VulkanContext::VulkanContext() {
 	// Do nothing here.
 }
@@ -113,16 +134,7 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 #endif
 	}
 
-	// Check which Vulkan version we should request.
-	// Our code is fine with any version from 1.0 to 1.2, we don't know about higher versions.
-	vulkanInstanceApiVersion_ = VK_API_VERSION_1_0;
-	if (vkEnumerateInstanceVersion) {
-		vkEnumerateInstanceVersion(&vulkanInstanceApiVersion_);
-		vulkanInstanceApiVersion_ &= 0xFFFFF000;  // Remove patch version.
-		vulkanInstanceApiVersion_ = std::min(VK_API_VERSION_1_4, vulkanInstanceApiVersion_);
-		std::string versionString = FormatAPIVersion(vulkanInstanceApiVersion_);
-		INFO_LOG(Log::G3D, "Detected Vulkan API version: %s", versionString.c_str());
-	}
+	DetectInstanceApiVersion();
 
 	instance_layer_names_.clear();
 
@@ -133,6 +145,7 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 
 	if (!IsInstanceExtensionAvailable(VK_KHR_SURFACE_EXTENSION_NAME)) {
 		// Cannot create a Vulkan display without VK_KHR_SURFACE_EXTENSION.
+		// Technically we could allow this for headless builds, but meh.
 		init_error_ = "Vulkan not loaded - no surface extension";
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
@@ -190,6 +203,11 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 		}
 	}
 
+	if (IsInstanceExtensionAvailable(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
+		instance_extensions_enabled_.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+		extensionsLookup_.KHR_get_surface_capabilities2 = true;
+	}
+
 	// Uncomment to test GPU backend fallback
 	// abort();
 
@@ -203,8 +221,9 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 
 	// Validate that all the instance extensions we ask for are actually available.
 	for (auto ext : instance_extensions_enabled_) {
-		if (!IsInstanceExtensionAvailable(ext))
+		if (!IsInstanceExtensionAvailable(ext)) {
 			WARN_LOG(Log::G3D, "WARNING: Does not seem that instance extension '%s' is available. Trying to proceed anyway.", ext);
+		}
 	}
 
 	VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
@@ -251,6 +270,42 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 		return res;
 	}
 
+	return FinishInstanceInit();
+}
+
+VkResult VulkanContext::CreateInstanceExternal(VkInstance instance) {
+	instance_ = instance;
+	ownsInstance_ = false;
+	DetectInstanceApiVersion();
+
+	// We didn't go through the normal extension-selection dance in CreateInstance() (there's nothing to
+	// enable - the instance already exists), but IsInstanceExtensionAvailable() and the properties2 codepath
+	// below still want these populated, so gather them the same way CreateInstance() does.
+	GetInstanceLayerProperties();
+	GetInstanceLayerExtensionList(nullptr, &instance_extension_properties_);
+
+	// vkGetPhysicalDeviceProperties2/Features2 are core as of Vulkan 1.1, so an adopted 1.1+ instance can
+	// always use them regardless of whether the owning application explicitly enabled the KHR extension.
+	extensionsLookup_.KHR_get_physical_device_properties2 =
+		vulkanInstanceApiVersion_ >= VK_API_VERSION_1_1 || IsInstanceExtensionAvailable(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
+	return FinishInstanceInit();
+}
+
+void VulkanContext::DetectInstanceApiVersion() {
+	// Check which Vulkan version we should request.
+	// Our code is fine with any version from 1.0 to 1.2, we don't know about higher versions.
+	vulkanInstanceApiVersion_ = VK_API_VERSION_1_0;
+	if (vkEnumerateInstanceVersion) {
+		vkEnumerateInstanceVersion(&vulkanInstanceApiVersion_);
+		vulkanInstanceApiVersion_ &= 0xFFFFF000;  // Remove patch version.
+		vulkanInstanceApiVersion_ = std::min(VK_API_VERSION_1_4, vulkanInstanceApiVersion_);
+		std::string versionString = FormatAPIVersion(vulkanInstanceApiVersion_);
+		INFO_LOG(Log::G3D, "Detected Vulkan API version: %s", versionString.c_str());
+	}
+}
+
+VkResult VulkanContext::FinishInstanceInit() {
 	VulkanLoadInstanceFunctions(instance_, extensionsLookup_, vulkanInstanceApiVersion_);
 	if (!CheckLayers(instance_layer_properties_, instance_layer_names_)) {
 		WARN_LOG(Log::G3D, "CheckLayers for instance failed");
@@ -262,12 +317,14 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 #if SIMULATE_VULKAN_FAILURE == 3
 	gpu_count = 0;
 #else
-	res = vkEnumeratePhysicalDevices(instance_, &gpu_count, nullptr);
+	VkResult res = vkEnumeratePhysicalDevices(instance_, &gpu_count, nullptr);
 #endif
 	if (gpu_count <= 0) {
 		ERROR_LOG(Log::G3D, "Vulkan driver found but no supported GPU is available");
 		init_error_ = "No Vulkan physical devices found";
-		vkDestroyInstance(instance_, nullptr);
+		if (ownsInstance_) {
+			vkDestroyInstance(instance_, nullptr);
+		}
 		instance_ = nullptr;
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
@@ -278,13 +335,26 @@ VkResult VulkanContext::CreateInstance(const CreateInfo &info) {
 	res = vkEnumeratePhysicalDevices(instance_, &gpu_count, physical_devices_.data());
 	if (res != VK_SUCCESS) {
 		init_error_ = "Failed to enumerate physical devices";
-		vkDestroyInstance(instance_, nullptr);
+		if (ownsInstance_) {
+			vkDestroyInstance(instance_, nullptr);
+		}
 		instance_ = nullptr;
 		return res;
 	}
 
 	if (extensionsLookup_.KHR_get_physical_device_properties2 && vkGetPhysicalDeviceProperties2) {
 		for (uint32_t i = 0; i < gpu_count; i++) {
+			// Now, we need to do a special check for vkGetPhysicalDeviceProperties2. Unfortunately, it is not valid to call it
+			// if the *device* is below 1.1.
+
+			VkPhysicalDeviceProperties tempProps{};
+			vkGetPhysicalDeviceProperties(physical_devices_[i], &tempProps);
+			if (tempProps.apiVersion < VK_API_VERSION_1_1) {
+				// This device is too old to support vkGetPhysicalDeviceProperties2, so we will just use the old function.
+				vkGetPhysicalDeviceProperties(physical_devices_[i], &physicalDeviceProperties_[i].properties);
+				continue;
+			}
+
 			VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 			VkPhysicalDevicePushDescriptorPropertiesKHR pushProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
 			VkPhysicalDeviceExternalMemoryHostPropertiesEXT extHostMemProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
@@ -336,7 +406,9 @@ void VulkanContext::DestroyInstance() {
 		}
 	}
 
-	vkDestroyInstance(instance_, nullptr);
+	if (ownsInstance_) {
+		vkDestroyInstance(instance_, nullptr);
+	}
 	VulkanFree();
 	instance_ = VK_NULL_HANDLE;
 }
@@ -369,7 +441,9 @@ void VulkanContext::UpdateInflightFrames(int n) {
 
 void VulkanContext::WaitUntilQueueIdle() {
 	// Should almost never be used
+	LockQueue();
 	vkQueueWaitIdle(gfx_queue_);
+	UnlockQueue();
 }
 
 bool VulkanContext::MemoryTypeFromProperties(uint32_t typeBits, VkFlags requirements_mask, uint32_t *typeIndex) {
@@ -545,6 +619,11 @@ bool VulkanContext::EnableDeviceExtension(const char *extension, uint32_t coreVe
 	if (coreVersion != 0 && vulkanDeviceApiVersion_ >= coreVersion) {
 		return true;
 	}
+	for (const char *alreadyEnabled : device_extensions_enabled_) {
+		if (!strcmp(alreadyEnabled, extension)) {
+			return true;
+		}
+	}
 	for (auto &iter : device_extension_properties_) {
 		if (!strcmp(iter.extensionName, extension)) {
 			device_extensions_enabled_.push_back(extension);
@@ -567,7 +646,7 @@ bool VulkanContext::EnableInstanceExtension(const char *extension, uint32_t core
 	return false;
 }
 
-VkResult VulkanContext::CreateDevice(int physical_device) {
+VkResult VulkanContext::CreateDevice(int physical_device, const std::vector<const char *> &extraDeviceExtensions, const VkPhysicalDeviceFeatures *extraRequiredFeatures) {
 	physical_device_ = physical_device;
 	INFO_LOG(Log::G3D, "Chose physical device %d: %s", physical_device, physicalDeviceProperties_[physical_device].properties.deviceName);
 
@@ -625,6 +704,12 @@ VkResult VulkanContext::CreateDevice(int physical_device) {
 
 	device_extensions_enabled_.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
+	// A host application (e.g. a libretro frontend) may require extra device extensions on top of what we'd
+	// normally ask for.
+	for (const char *extraExtension : extraDeviceExtensions) {
+		EnableDeviceExtension(extraExtension, 0);
+	}
+
 	if (!init_error_.empty() || physical_device_ < 0) {
 		ERROR_LOG(Log::G3D, "Vulkan init failed: %s", init_error_.c_str());
 		return VK_ERROR_INITIALIZATION_FAILED;
@@ -675,7 +760,11 @@ VkResult VulkanContext::CreateDevice(int physical_device) {
 	}
 
 	extensionsLookup_.EXT_provoking_vertex = EnableDeviceExtension(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, 0);
-
+	if (extensionsLookup_.KHR_get_surface_capabilities2) {
+#ifdef VK_EXT_full_screen_exclusive
+		extensionsLookup_.EXT_full_screen_exclusive = EnableDeviceExtension(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME, 0);
+#endif
+	}
 	extensionsLookup_.KHR_present_mode_fifo_latest_ready = EnableDeviceExtension(VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME, 0);
 	if (!extensionsLookup_.KHR_present_mode_fifo_latest_ready) {
 		// Enable the EXT extension instead if available, it's equivalent (was promoted).
@@ -741,9 +830,19 @@ VkResult VulkanContext::CreateDevice(int physical_device) {
 	deviceFeatures_.enabled.standard.samplerAnisotropy = deviceFeatures_.available.standard.samplerAnisotropy;
 	deviceFeatures_.enabled.standard.shaderClipDistance = deviceFeatures_.available.standard.shaderClipDistance;
 	deviceFeatures_.enabled.standard.shaderCullDistance = deviceFeatures_.available.standard.shaderCullDistance;
-	deviceFeatures_.enabled.standard.geometryShader = deviceFeatures_.available.standard.geometryShader;
 	deviceFeatures_.enabled.standard.sampleRateShading = deviceFeatures_.available.standard.sampleRateShading;
-	
+
+	// A host application (e.g. a libretro frontend) may require some additional features to be enabled.
+	if (extraRequiredFeatures) {
+		VkBool32 *enabled = (VkBool32 *)&deviceFeatures_.enabled.standard;
+		const VkBool32 *required = (const VkBool32 *)extraRequiredFeatures;
+		for (size_t i = 0; i < sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32); i++) {
+			if (required[i]) {
+				enabled[i] = VK_TRUE;
+			}
+		}
+	}
+
 #ifdef _DEBUG
 	// For debugging! Although, it might hide problems, so turning it off. Can be useful to rule out classes of issues.
 	// deviceFeatures_.enabled.standard.robustBufferAccess = deviceFeatures_.available.standard.robustBufferAccess;
@@ -815,9 +914,13 @@ VkResult VulkanContext::CreateDevice(int physical_device) {
 	if (res != VK_SUCCESS) {
 		init_error_ = "Unable to create Vulkan device";
 		ERROR_LOG(Log::G3D, "%s", init_error_.c_str());
-	} else {
-		VulkanLoadDeviceFunctions(device_, extensionsLookup_, vulkanDeviceApiVersion_);
+		// Don't fall through - there's nothing below that makes sense without a device, and creating the
+		// VMA allocator on a null one asserts. The caller falls back to another backend on failure.
+		return res;
 	}
+
+	VulkanLoadDeviceFunctions(device_, extensionsLookup_, vulkanDeviceApiVersion_);
+
 	INFO_LOG(Log::G3D, "Vulkan Device created: %s", physicalDeviceProperties_[physical_device_].properties.deviceName);
 
 	// Since we successfully created a device (however we got here, might be interesting in debug), we force the choice to be visible in the menu.
@@ -898,13 +1001,15 @@ VkResult VulkanContext::InitDebugUtilsCallback() {
 	return res;
 }
 
-bool VulkanContext::CreateInstanceAndDevice(const CreateInfo &info) {
+bool VulkanContext::CreateInstanceAndDevice(const CreateInfo &info, std::string *deviceName) {
 	VkResult res = CreateInstance(info);
 	if (res != VK_SUCCESS) {
 		ERROR_LOG(Log::G3D, "Failed to create vulkan context: %s", InitError().c_str());
 		VulkanSetAvailable(false);
 		return false;
 	}
+
+	// TODO: Take the device name into account.
 
 	int physicalDevice = GetBestPhysicalDevice();
 	if (physicalDevice < 0) {
@@ -950,9 +1055,9 @@ VkResult VulkanContext::ReinitSurface() {
 		surface_ = VK_NULL_HANDLE;
 	}
 
-	INFO_LOG(Log::G3D, "Creating Vulkan surface for window (data1=%p data2=%p)", winsysData1_, winsysData2_);
+	INFO_LOG(Log::G3D, "Creating Vulkan surface for window (winsys=%s data1=%p data2=%p)", WindowSystemToString(winsys_), winsysData1_, winsysData2_);
 
-	VkResult retval = VK_SUCCESS;
+		VkResult retval = VK_SUCCESS;
 
 	switch (winsys_) {
 #ifdef _WIN32
@@ -960,8 +1065,8 @@ VkResult VulkanContext::ReinitSurface() {
 	{
 		VkWin32SurfaceCreateInfoKHR win32{ VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
 		win32.flags = 0;
-		win32.hwnd = (HWND)winsysData2_;
 		win32.hinstance = (HINSTANCE)winsysData1_;
+		win32.hwnd = (HWND)winsysData2_;
 		retval = vkCreateWin32SurfaceKHR(instance_, &win32, nullptr, &surface_);
 		break;
 	}
@@ -1232,15 +1337,19 @@ VkResult VulkanContext::ReinitSurface() {
 #endif
 
 	default:
-		_assert_msg_(false, "Vulkan support for chosen window system not implemented");
+		_assert_msg_(false, "Vulkan support for chosen window system (%s) not implemented", WindowSystemToString(winsys_));
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
 
 	if (retval != VK_SUCCESS) {
+		init_error_ = StringFromFormat("Failed to create a Vulkan surface for window system %s: %s", WindowSystemToString(winsys_), VulkanResultToString(retval));
+		ERROR_LOG(Log::G3D, "%s", init_error_.c_str());
 		return retval;
 	}
 
 	if (!ChooseQueue()) {
+		init_error_ = "Failed to find a Vulkan queue and surface format that can present to the window";
+		ERROR_LOG(Log::G3D, "%s", init_error_.c_str());
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
 
@@ -1257,6 +1366,13 @@ VkResult VulkanContext::ReinitSurface() {
 		availablePresentModes_.resize(presentModeCount);
 		res = vkGetPhysicalDeviceSurfacePresentModesKHR(physical_devices_[physical_device_], surface_, &presentModeCount, availablePresentModes_.data());
 		_dbg_assert_(res == VK_SUCCESS);
+	}
+	if (res != VK_SUCCESS || availablePresentModes_.empty()) {
+		// Should be impossible - the spec guarantees at least FIFO for any surface we could create.
+		availablePresentModes_.clear();
+		init_error_ = StringFromFormat("Failed to enumerate Vulkan present modes: %s (count %d)", VulkanResultToString(res), (int)presentModeCount);
+		ERROR_LOG(Log::G3D, "%s", init_error_.c_str());
+		return res != VK_SUCCESS ? res : VK_ERROR_INITIALIZATION_FAILED;
 	}
 	return VK_SUCCESS;
 }
@@ -1347,6 +1463,23 @@ bool VulkanContext::ChooseQueue() {
 	return true;
 }
 
+bool VulkanContext::ChooseGraphicsQueueWithoutSurface() {
+	uint32_t graphicsQueueNodeIndex = UINT32_MAX;
+	for (uint32_t i = 0; i < queue_count; i++) {
+		if ((queueFamilyProperties_[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+			graphicsQueueNodeIndex = i;
+			break;
+		}
+	}
+	if (graphicsQueueNodeIndex == UINT32_MAX) {
+		ERROR_LOG(Log::G3D, "Could not find a graphics queue");
+		return false;
+	}
+	graphics_queue_family_index_ = graphicsQueueNodeIndex;
+	vkGetDeviceQueue(device_, graphics_queue_family_index_, 0, &gfx_queue_);
+	return true;
+}
+
 int clamp(int x, int a, int b) {
 	if (x < a)
 		return a;
@@ -1396,13 +1529,17 @@ bool VulkanContext::InitSwapchain(VkPresentModeKHR desiredPresentMode) {
 	}
 
 	VkExtent2D currentExtent{ surfCapabilities_.currentExtent };
+
+	INFO_LOG(Log::G3D, "surfCapabilities_.current: %dx%d", currentExtent.width, currentExtent.height);
+
 	// https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkSurfaceCapabilitiesKHR.html
 	// currentExtent is the current width and height of the surface, or the special value (0xFFFFFFFF, 0xFFFFFFFF) indicating that the surface size will be determined by the extent of a swapchain targeting the surface.
 	if (currentExtent.width == 0xFFFFFFFFu || currentExtent.height == 0xFFFFFFFFu
-#if PPSSPP_PLATFORM(IOS)
+		#if PPSSPP_PLATFORM(IOS)
 		|| currentExtent.width == 0 || currentExtent.height == 0
-#endif
-		) {
+		#endif
+	) {
+		ERROR_LOG(Log::G3D, "using cbGetDrawSize_ to resolve surface size");
 		_dbg_assert_((bool)cbGetDrawSize_);
 		if (cbGetDrawSize_) {
 			currentExtent = cbGetDrawSize_();
@@ -1412,7 +1549,7 @@ bool VulkanContext::InitSwapchain(VkPresentModeKHR desiredPresentMode) {
 	swapChainExtent_.width = clamp(currentExtent.width, surfCapabilities_.minImageExtent.width, surfCapabilities_.maxImageExtent.width);
 	swapChainExtent_.height = clamp(currentExtent.height, surfCapabilities_.minImageExtent.height, surfCapabilities_.maxImageExtent.height);
 
-	INFO_LOG(Log::G3D, "surfCapabilities_.current: %dx%d min: %dx%d max: %dx%d computed: %dx%d",
+	INFO_LOG(Log::G3D, "surfCapabilities_.current after clamp: %dx%d min: %dx%d max: %dx%d computed: %dx%d cbdraw",
 		currentExtent.width, currentExtent.height,
 		surfCapabilities_.minImageExtent.width, surfCapabilities_.minImageExtent.height,
 		surfCapabilities_.maxImageExtent.width, surfCapabilities_.maxImageExtent.height,
@@ -1554,6 +1691,19 @@ bool VulkanContext::InitSwapchain(VkPresentModeKHR desiredPresentMode) {
 		swap_chain_info.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
 	}
 
+#ifdef VK_EXT_full_screen_exclusive
+	VkSurfaceFullScreenExclusiveInfoEXT fullScreenInfo{ VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT };
+	VkSurfaceFullScreenExclusiveWin32InfoEXT win32ExclusiveInfo{ VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT };
+	if (extensionsLookup_.EXT_full_screen_exclusive) {
+		fullScreenInfo.fullScreenExclusive = fullScreenExclusiveMode_;
+		if (fullScreenExclusiveMode_ == VK_FULL_SCREEN_EXCLUSIVE_ALLOWED_EXT) {
+			win32ExclusiveInfo.hmonitor = MonitorFromWindow((HWND)winsysData2_, MONITOR_DEFAULTTONEAREST);
+			fullScreenInfo.pNext = &win32ExclusiveInfo;
+		}
+		swap_chain_info.pNext = &fullScreenInfo;
+	}
+#endif
+
 	res = vkCreateSwapchainKHR(device_, &swap_chain_info, NULL, &swapchain_);
 	if (res != VK_SUCCESS) {
 		ERROR_LOG(Log::G3D, "vkCreateSwapchainKHR failed! %s", VulkanResultToString(res));
@@ -1606,7 +1756,9 @@ void VulkanContext::DestroyDevice() {
 	vmaDestroyAllocator(allocator_);
 	allocator_ = VK_NULL_HANDLE;
 
-	vkDestroyDevice(device_, nullptr);
+	if (ownsDevice_) {
+		vkDestroyDevice(device_, nullptr);
+	}
 	device_ = nullptr;
 }
 
@@ -1653,8 +1805,188 @@ EShLanguage FindLanguage(const VkShaderStageFlagBits shader_type) {
 
 // Compile a given string containing GLSL into SPV for use by VK
 // Return value of false means an error was encountered.
+// Bump when glslang or its options change, so that nothing it compiled differently is used.
+static const uint32_t SPIRV_CACHE_VERSION = 2;
+static const uint32_t SPIRV_CACHE_MAGIC = 0x43565053;  // "SPVC"
+static const uint32_t SPIRV_MAGIC = 0x07230203;
+
+struct SPIRVCacheHeader {
+	uint32_t magic;
+	uint32_t version;
+	uint32_t count;
+};
+
+struct SPIRVCacheEntryHeader {
+	uint32_t keyHash;
+	uint32_t keyLength;
+	uint32_t numWords;
+	uint32_t checksum;
+};
+
+SPIRVCache g_spirvCache;
+
+void SetFixedSPIRVCachePath(const Path &path, int maxEntries) {
+	g_spirvCache.SetPath(path, maxEntries);
+}
+
+void SaveFixedSPIRVCache() {
+	g_spirvCache.SaveIfDirty();
+}
+
+SPIRVCache::Key SPIRVCache::MakeKey(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source) {
+	const size_t length = strlen(source);
+	const uint32_t seed = (SPIRV_CACHE_VERSION << 16) | ((uint32_t)stage << 4) | (uint32_t)variant;
+	return Key{ XXH32(source, length, seed), (uint32_t)length };
+}
+
+bool SPIRVCache::Lookup(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source, std::vector<uint32_t> *spirv) {
+	const Key key = MakeKey(stage, variant, source);
+	std::lock_guard<std::mutex> guard(mutex_);
+	LoadIfNeededLocked();
+	auto iter = entries_.find(key);
+	if (iter == entries_.end()) {
+		return false;
+	}
+	iter->second.used = true;
+	*spirv = iter->second.spirv;
+	return true;
+}
+
+void SPIRVCache::Insert(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source, const std::vector<uint32_t> &spirv) {
+	const Key key = MakeKey(stage, variant, source);
+	std::lock_guard<std::mutex> guard(mutex_);
+	Entry &entry = entries_[key];
+	entry.spirv = spirv;
+	entry.used = true;
+	dirty_ = true;
+}
+
+void SPIRVCache::Clear() {
+	std::lock_guard<std::mutex> guard(mutex_);
+	entries_.clear();
+	dirty_ = false;
+}
+
+bool SPIRVCache::Read(FILE *f) {
+	std::lock_guard<std::mutex> guard(mutex_);
+	return ReadLocked(f);
+}
+
+// A bad entry is dropped rather than failing the whole read: it's only a cache, and the shader
+// gets compiled again. A truncated file keeps what came before the damage.
+bool SPIRVCache::ReadLocked(FILE *f) {
+	entries_.clear();
+	dirty_ = false;
+	SPIRVCacheHeader header{};
+	if (fread(&header, sizeof(header), 1, f) != 1 || header.magic != SPIRV_CACHE_MAGIC) {
+		return false;
+	}
+	if (header.version != SPIRV_CACHE_VERSION) {
+		INFO_LOG(Log::G3D, "SPIR-V cache version %d, expected %d - starting over", header.version, SPIRV_CACHE_VERSION);
+		return false;
+	}
+	for (uint32_t i = 0; i < header.count; i++) {
+		SPIRVCacheEntryHeader entryHeader{};
+		if (fread(&entryHeader, sizeof(entryHeader), 1, f) != 1 || entryHeader.numWords == 0 || entryHeader.numWords > 1024 * 1024) {
+			WARN_LOG(Log::G3D, "SPIR-V cache truncated or damaged after %d entries", i);
+			return false;
+		}
+		std::vector<uint32_t> spirv(entryHeader.numWords);
+		if (fread(spirv.data(), sizeof(uint32_t), spirv.size(), f) != spirv.size()) {
+			WARN_LOG(Log::G3D, "SPIR-V cache truncated after %d entries", i);
+			return false;
+		}
+		if (spirv[0] != SPIRV_MAGIC || (uint32_t)XXH3_64bits(spirv.data(), spirv.size() * sizeof(uint32_t)) != entryHeader.checksum) {
+			WARN_LOG(Log::G3D, "Bad entry in SPIR-V cache, skipping");
+			continue;
+		}
+		entries_[Key{ entryHeader.keyHash, entryHeader.keyLength }].spirv = std::move(spirv);
+	}
+	return true;
+}
+
+bool SPIRVCache::Write(FILE *f, bool onlyUsed) {
+	std::lock_guard<std::mutex> guard(mutex_);
+	SPIRVCacheHeader header{ SPIRV_CACHE_MAGIC, SPIRV_CACHE_VERSION, 0 };
+	for (const auto &[key, entry] : entries_) {
+		if (entry.used || !onlyUsed) {
+			header.count++;
+		}
+	}
+	bool ok = fwrite(&header, sizeof(header), 1, f) == 1;
+	for (const auto &[key, entry] : entries_) {
+		if (!ok) {
+			break;
+		}
+		if (!entry.used && onlyUsed) {
+			continue;
+		}
+		SPIRVCacheEntryHeader entryHeader{};
+		entryHeader.keyHash = key.hash;
+		entryHeader.keyLength = key.length;
+		entryHeader.numWords = (uint32_t)entry.spirv.size();
+		entryHeader.checksum = (uint32_t)XXH3_64bits(entry.spirv.data(), entry.spirv.size() * sizeof(uint32_t));
+		ok = fwrite(&entryHeader, sizeof(entryHeader), 1, f) == 1 &&
+			fwrite(entry.spirv.data(), sizeof(uint32_t), entry.spirv.size(), f) == entry.spirv.size();
+	}
+	if (ok) {
+		dirty_ = false;
+	}
+	return ok;
+}
+
+void SPIRVCache::SetPath(const Path &path, int maxEntries) {
+	std::lock_guard<std::mutex> guard(mutex_);
+	path_ = path;
+	maxEntries_ = maxEntries;
+	loaded_ = false;
+}
+
+void SPIRVCache::LoadIfNeededLocked() {
+	if (loaded_ || path_.empty()) {
+		return;
+	}
+	loaded_ = true;
+	FILE *f = File::OpenCFile(path_, "rb");
+	if (f) {
+		ReadLocked(f);
+		fclose(f);
+		INFO_LOG(Log::G3D, "Loaded %d shaders from the SPIR-V cache", (int)entries_.size());
+	}
+	// Entries for shaders that have since changed pile up, so start over once there are a lot of
+	// them. A few shaders compiling once more doesn't matter.
+	if (maxEntries_ > 0 && (int)entries_.size() >= maxEntries_) {
+		INFO_LOG(Log::G3D, "SPIR-V cache has %d entries, flushing it", (int)entries_.size());
+		entries_.clear();
+		dirty_ = true;
+	}
+}
+
+void SPIRVCache::SaveIfDirty() {
+	Path path;
+	{
+		std::lock_guard<std::mutex> guard(mutex_);
+		if (!dirty_ || path_.empty()) {
+			return;
+		}
+		path = path_;
+	}
+	FILE *f = File::OpenCFile(path, "wb");
+	if (!f) {
+		return;
+	}
+	// A small fixed set of shaders, so keep everything - including ones this run didn't need.
+	if (!Write(f, false)) {
+		ERROR_LOG(Log::G3D, "Failed to write the SPIR-V cache, disk full?");
+	}
+	fclose(f);
+}
+
 bool GLSLtoSPV(const VkShaderStageFlagBits shader_type, const char *sourceCode, GLSLVariant variant,
-			   std::vector<unsigned int> &spirv, std::string *errorMessage) {
+			   std::vector<unsigned int> &spirv, std::string *errorMessage, SPIRVCache *cache) {
+	if (cache && cache->Lookup(shader_type, variant, sourceCode, &spirv)) {
+		return true;
+	}
 
 	glslang::TProgram program;
 	const char *shaderStrings[1];
@@ -1723,6 +2055,9 @@ bool GLSLtoSPV(const VkShaderStageFlagBits shader_type, const char *sourceCode, 
 	options.optimizeSize = false;
 	options.generateDebugInfo = false;
 	glslang::GlslangToSpv(*program.getIntermediate(stage), spirv, &options);
+	if (cache && !spirv.empty()) {
+		cache->Insert(shader_type, variant, sourceCode, spirv);
+	}
 	return true;
 }
 
@@ -1734,7 +2069,12 @@ void finalize_glslang() {
 	glslang::FinalizeProcess();
 }
 
+// NOTE: Every vector in the class has to be listed both here and in PerformDeletes. If one is missing
+// from Take, the objects in it linger on the global list until device teardown instead of being deleted
+// a few frames later; if one is missing from PerformDeletes, they leak outright. Both are bugs.
 void VulkanDeleteList::Take(VulkanDeleteList &del) {
+	// The render thread can be queueing deletes into del (the global list) while we do this.
+	std::lock_guard<std::mutex> lock(del.mutex_);
 	_dbg_assert_(cmdPools_.empty());
 	_dbg_assert_(descPools_.empty());
 	_dbg_assert_(modules_.empty());
@@ -1751,6 +2091,7 @@ void VulkanDeleteList::Take(VulkanDeleteList &del) {
 	_dbg_assert_(framebuffers_.empty());
 	_dbg_assert_(pipelineLayouts_.empty());
 	_dbg_assert_(descSetLayouts_.empty());
+	_dbg_assert_(queryPools_.empty());
 	_dbg_assert_(callbacks_.empty());
 	cmdPools_ = std::move(del.cmdPools_);
 	descPools_ = std::move(del.descPools_);
@@ -1768,12 +2109,14 @@ void VulkanDeleteList::Take(VulkanDeleteList &del) {
 	framebuffers_ = std::move(del.framebuffers_);
 	pipelineLayouts_ = std::move(del.pipelineLayouts_);
 	descSetLayouts_ = std::move(del.descSetLayouts_);
+	queryPools_ = std::move(del.queryPools_);
 	callbacks_ = std::move(del.callbacks_);
 	del.cmdPools_.clear();
 	del.descPools_.clear();
 	del.modules_.clear();
 	del.buffers_.clear();
 	del.buffersWithAllocs_.clear();
+	del.bufferViews_.clear();
 	del.imageViews_.clear();
 	del.imagesWithAllocs_.clear();
 	del.deviceMemory_.clear();
@@ -1784,14 +2127,37 @@ void VulkanDeleteList::Take(VulkanDeleteList &del) {
 	del.framebuffers_.clear();
 	del.pipelineLayouts_.clear();
 	del.descSetLayouts_.clear();
+	del.queryPools_.clear();
 	del.callbacks_.clear();
 }
 
 void VulkanDeleteList::PerformDeletes(VulkanContext *vulkan, VmaAllocator allocator) {
+	// Drain into a local list before destroying anything - a callback is allowed to queue more deletes
+	// (~VKFramebuffer does, via ~VKRFramebuffer), and we mustn't append to a vector we're iterating.
+	// Anything queued back onto this list gets picked up by the next lap, so keep going until a lap
+	// comes up empty. In the normal per-frame case that's a single extra lap, since callbacks queue
+	// onto the global list rather than the frame's own list - the loop matters for
+	// VulkanContext::PerformPendingDeletes(), which drains the global list itself just before the
+	// device goes away, with no later pass to catch the stragglers.
+	int deleteCount = 0;
+	for (;;) {
+		VulkanDeleteList taken;
+		taken.Take(*this);
+		int count = taken.PerformDeletesInternal(vulkan, allocator);
+		if (!count) {
+			break;
+		}
+		deleteCount += count;
+	}
+	deleteCount_ = deleteCount;
+}
+
+// See the note on Take() - every vector in the class must be handled here too, or it leaks.
+int VulkanDeleteList::PerformDeletesInternal(VulkanContext *vulkan, VmaAllocator allocator) {
 	int deleteCount = 0;
 
 	for (auto &callback : callbacks_) {
-		callback.func(vulkan, callback.userdata);
+		callback(vulkan);
 		deleteCount++;
 	}
 	callbacks_.clear();
@@ -1882,7 +2248,7 @@ void VulkanDeleteList::PerformDeletes(VulkanContext *vulkan, VmaAllocator alloca
 		deleteCount++;
 	}
 	queryPools_.clear();
-	deleteCount_ = deleteCount;
+	return deleteCount;
 }
 
 void VulkanContext::GetImageMemoryRequirements(VkImage image, VkMemoryRequirements *mem_reqs, bool *dedicatedAllocation) {

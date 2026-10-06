@@ -370,14 +370,13 @@ int DepthRasterClipIndexedRectangles(int *tx, int *ty, float *tz, const float *t
 	return outCount;
 }
 
-int DepthRasterClipIndexedTriangles(int *tx, int *ty, float *tz, const float *transformed, const uint16_t *indexBuffer, const DepthDraw &draw, const DepthScissor scissor) {
+int DepthRasterClipIndexedTriangles(int *tx, int *ty, float *tz, const float *transformed, const uint16_t *indexBuffer, const DepthDraw &draw, const DepthScissor scissor, int maxOutCount) {
 	int outCount = 0;
 
 	int flipCull = 0;
 	if (draw.cullEnabled && draw.cullMode == GE_CULL_CW) {
 		flipCull = 3;
 	}
-	const bool cullEnabled = draw.cullEnabled;
 
 	static const float zerovec[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
@@ -450,6 +449,11 @@ int DepthRasterClipIndexedTriangles(int *tx, int *ty, float *tz, const float *tr
 
 		collected -= 12;
 
+		if (outCount + 12 > maxOutCount) {
+			// Out of room. With culling off we emit two triangles per input triangle, so this is reachable.
+			break;
+		}
+
 		// These names are wrong .. until we transpose.
 		Vec4F32 x0 = Vec4F32::Load(verts[0]);
 		Vec4F32 x1 = Vec4F32::Load(verts[1]);
@@ -518,7 +522,7 @@ int DepthRasterClipIndexedTriangles(int *tx, int *ty, float *tz, const float *tr
 		// Still good for backface culling early and pretty cheap to compute.
 		Vec4F32 doubleTriArea = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0) - Vec4F32::Splat((float)(MIN_TWICE_TRI_AREA));
 		if (!AnyZeroSignBit(doubleTriArea)) {
-			gpuStats.numDepthRasterEarlySize += 4;
+			gpuStats.perFrame.numDepthRasterEarlySize += 4;
 			continue;
 		}
 
@@ -543,25 +547,10 @@ int DepthRasterClipIndexedTriangles(int *tx, int *ty, float *tz, const float *tr
 #endif
 
 		outCount += 12;
-
-		if (!cullEnabled) {
-			// If culling is off, store the triangles again, with the first two vertices swapped.
-			(Vec4S32FromF32(x0) & inGuardBand).Store(tx + outCount);
-			(Vec4S32FromF32(x2) & inGuardBand).Store(tx + outCount + 4);
-			(Vec4S32FromF32(x1) & inGuardBand).Store(tx + outCount + 8);
-			Vec4S32FromF32(y0).Store(ty + outCount);
-			Vec4S32FromF32(y2).Store(ty + outCount + 4);
-			Vec4S32FromF32(y1).Store(ty + outCount + 8);
-			z0.Store(tz + outCount);
-			z2.Store(tz + outCount + 4);
-			z1.Store(tz + outCount + 8);
-
-			outCount += 12;
-		}
 	}
 
-	gpuStats.numDepthRasterZCulled += planeCulled;
-	gpuStats.numDepthEarlyBoxCulled += boxCulled;
+	gpuStats.perFrame.numDepthRasterZCulled += planeCulled;
+	gpuStats.perFrame.numDepthEarlyBoxCulled += boxCulled;
 	return outCount;
 }
 
@@ -578,7 +567,7 @@ void DepthRasterScreenVerts(uint16_t *depth, int depthStride, const int *tx, con
 			// We remove the subpixel information here.
 			DepthRasterRect(depth, depthStride, scissor, tx[i], ty[i], tx[i + 1], ty[i + 1], z, draw.compareMode);
 		}
-		gpuStats.numDepthRasterPrims += count / 2;
+		gpuStats.perFrame.numDepthRasterPrims += count / 2;
 		break;
 	case GE_PRIM_TRIANGLES:
 	{
@@ -633,9 +622,9 @@ void DepthRasterScreenVerts(uint16_t *depth, int depthStride, const int *tx, con
 			}
 			}
 		}
-		gpuStats.numDepthRasterNoPixels += stats[(int)TriangleStat::NoPixels];
-		gpuStats.numDepthRasterTooSmall += stats[(int)TriangleStat::SmallOrBackface];
-		gpuStats.numDepthRasterPrims += stats[(int)TriangleStat::OK];
+		gpuStats.perFrame.numDepthRasterNoPixels += stats[(int)TriangleStat::NoPixels];
+		gpuStats.perFrame.numDepthRasterTooSmall += stats[(int)TriangleStat::SmallOrBackface];
+		gpuStats.perFrame.numDepthRasterPrims += stats[(int)TriangleStat::OK];
 		break;
 	}
 	default:

@@ -123,6 +123,14 @@ void Jit::Comp_FPU3op(MIPSOpcode op) {
 
 void Jit::Comp_FPULS(MIPSOpcode op) {
 	CONDITIONAL_DISABLE(LSU_FPU);
+
+	if (js.kernelMode) {
+		// Send all memory accesses to the interpreter in kernel mode.
+		// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+		DISABLE;
+		return;
+	}
+
 	s32 offset = _IMM16;
 	int ft = _FT;
 	MIPSGPReg rs = _RS;
@@ -130,7 +138,7 @@ void Jit::Comp_FPULS(MIPSOpcode op) {
 	CheckMemoryBreakpoint(0, rs, offset);
 
 	switch (op >> 26) {
-	case 49: //FI(ft) = Memory::Read_U32(addr); break; //lwc1
+	case 49: // lwc1
 		{
 			gpr.Lock(rs);
 			fpr.SpillLock(ft);
@@ -148,7 +156,7 @@ void Jit::Comp_FPULS(MIPSOpcode op) {
 			fpr.ReleaseSpillLocks();
 		}
 		break;
-	case 57: //Memory::Write_U32(FI(ft), addr); break; //swc1
+	case 57: // swc1
 		{
 			gpr.Lock(rs);
 			fpr.SpillLock(ft);
@@ -339,7 +347,19 @@ void Jit::Comp_FPU2op(MIPSOpcode op) {
 	case 4:	//F(fd)	= sqrtf(F(fs)); break; //sqrt
 		fpr.SpillLock(fd, fs);
 		fpr.MapReg(fd, fd == fs, true);
+		// x86 gives a negative NaN for a negative input, the PSP a positive one: clear the sign
+		// where the input was negative. -0 and NaN inputs come through as they are.
+		XORPS(XMM1, R(XMM1));
+		CopyFPReg(XMM0, fpr.R(fs));
+		CMPSS(XMM0, R(XMM1), CMP_LT);
+		if (RipAccessible(&ssSignBits2[0])) {
+			ANDPS(XMM0, M(&ssSignBits2[0]));  // rip accessible
+		} else {
+			MOV(PTRBITS, R(TEMPREG), ImmPtr(&ssSignBits2[0]));
+			ANDPS(XMM0, MatR(TEMPREG));
+		}
 		SQRTSS(fpr.RX(fd), fpr.R(fs));
+		XORPS(fpr.RX(fd), R(XMM0));
 		break;
 
 	case 13: //FsI(fd) = F(fs)>=0 ? (int)floorf(F(fs)) : (int)ceilf(F(fs)); break; //trunc.w.s

@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "Common/CommonWindows.h"
+
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <wrl/client.h>
@@ -34,22 +36,6 @@ class D3D11VertexShader;
 class ShaderManagerD3D11;
 class TextureCacheD3D11;
 class FramebufferManagerD3D11;
-
-class TessellationDataTransferD3D11 : public TessellationDataTransfer {
-private:
-	ID3D11DeviceContext *context_;
-	ID3D11Device *device_;
-	Microsoft::WRL::ComPtr<ID3D11Buffer> buf[3]{};
-	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view[3]{};
-	D3D11_BUFFER_DESC desc{};
-	int prevSize = 0;
-	int prevSizeWU = 0, prevSizeWV = 0;
-public:
-	TessellationDataTransferD3D11(ID3D11DeviceContext *context, ID3D11Device *device);
-	~TessellationDataTransferD3D11();
-	// Send spline/bezier's control points and weights to vertex shader through structured shader buffer.
-	void SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) override;
-};
 
 // Handles transform, lighting and drawing.
 class DrawEngineD3D11 : public DrawEngineCommon {
@@ -77,7 +63,9 @@ public:
 	void Flush() override;
 
 	void FinishDeferred() {
-		DecodeVerts(dec_, decoded_);
+		// Decoding only the vertices isn't enough: the indices are still read from PSP memory at flush
+		// time, and the game may change them once it regains control (#10095).
+		Flush();
 	}
 
 	void NotifyConfigChanged() override;
@@ -122,6 +110,9 @@ private:
 	PushBufferD3D11 *pushInds_ = nullptr;
 
 	// D3D11 state object caches. Previously had smart pointers but they were harder to deal with.
+	// These are never trimmed, although D3D11 allows only 4096 unique state objects per type and a
+	// failed create is fatal. That's deliberate: games use far fewer combinations, so it isn't an
+	// issue in practice, and eviction would cost more than it's worth.
 	DenseHashMap<uint64_t, ID3D11BlendState *> blendCache_;
 	DenseHashMap<uint64_t, ID3D11BlendState1 *> blendCache1_;
 	DenseHashMap<uint64_t, ID3D11DepthStencilState *> depthStencilCache_;
@@ -137,9 +128,6 @@ private:
 	// State keys
 	D3D11StateKeys keys_{};
 	D3D11DynamicState dynState_{};
-
-	// Hardware tessellation
-	TessellationDataTransferD3D11 *tessDataTransferD3D11 = nullptr;
 
 	int lastRenderStepId_ = -1;
 };

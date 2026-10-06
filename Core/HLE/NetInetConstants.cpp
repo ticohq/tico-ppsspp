@@ -809,30 +809,16 @@ int convertInetErrnoHost2PSP(int error) {
 		return ERROR_INET_ENOSPC;
 	case EPIPE:
 		return ERROR_INET_EPIPE;
-	case ENOMSG:
-		return ERROR_INET_ENOMSG;
-	case ENOLINK:
-		return ERROR_INET_ENOLINK;
-	case EPROTO:
-		return ERROR_INET_EPROTO;
-	case EBADMSG:
-		return ERROR_INET_EBADMSG;
 	case EOPNOTSUPP:
 		return ERROR_INET_EOPNOTSUPP;
 	case EPFNOSUPPORT:
 		return ERROR_INET_EPFNOSUPPORT;
 	case ECONNRESET:
 		return ERROR_INET_ECONNRESET;
-	case ENOBUFS:
-		return ERROR_INET_ENOBUFS;
 	case EAFNOSUPPORT:
 		return ERROR_INET_EAFNOSUPPORT;
-	case EPROTOTYPE:
-		return ERROR_INET_EPROTOTYPE;
 	case ENOTSOCK:
 		return ERROR_INET_ENOTSOCK;
-	case ENOPROTOOPT:
-		return ERROR_INET_ENOPROTOOPT;
 	case ESHUTDOWN:
 		return ERROR_INET_ESHUTDOWN;
 #if ESHUTDOWN != ENETDOWN
@@ -855,8 +841,6 @@ int convertInetErrnoHost2PSP(int error) {
 		return ERROR_INET_EHOSTUNREACH;
 	case EALREADY:
 		return ERROR_INET_EALREADY;
-	case EMSGSIZE:
-		return ERROR_INET_EMSGSIZE;
 	case EPROTONOSUPPORT:
 		return ERROR_INET_EPROTONOSUPPORT;
 #if defined(ESOCKTNOSUPPORT)
@@ -865,8 +849,6 @@ int convertInetErrnoHost2PSP(int error) {
 #endif
 	case EADDRNOTAVAIL:
 		return ERROR_INET_EADDRNOTAVAIL;
-	case ENETRESET:
-		return ERROR_INET_ENETRESET;
 	case EISCONN:
 		return ERROR_INET_EISCONN;
 	case ENOTCONN:
@@ -876,7 +858,27 @@ int convertInetErrnoHost2PSP(int error) {
 #if !defined(_WIN32)
 	case EINPROGRESS:
 		return ERROR_INET_EINPROGRESS;
+	case ENOMSG:
+		return ERROR_INET_ENOMSG;
+	case ENOLINK:
+		return ERROR_INET_ENOLINK;
+	case EPROTO:
+		return ERROR_INET_EPROTO;
+	case EBADMSG:
+		return ERROR_INET_EBADMSG;
+	case ENOBUFS:
+		return ERROR_INET_ENOBUFS;
+	case EPROTOTYPE:
+		return ERROR_INET_EPROTOTYPE;
+	case ENOPROTOOPT:
+		return ERROR_INET_ENOPROTOOPT;
+	case EMSGSIZE:
+		return ERROR_INET_EMSGSIZE;
+	case ENETRESET:
+		return ERROR_INET_ENETRESET;
 #endif
+	default:
+		break;
 	}
 	if (error != 0)
 		return hleLogError(Log::sceNet, error, "Unknown Host Error Number (%d)", error);

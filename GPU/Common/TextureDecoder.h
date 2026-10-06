@@ -24,12 +24,7 @@
 #include "Core/MemMap.h"
 #include "GPU/ge_constants.h"
 #include "GPU/GPUState.h"
-
-enum CheckAlphaResult {
-	// These are intended to line up with TexCacheEntry::STATUS_ALPHA_UNKNOWN, etc.
-	CHECKALPHA_FULL = 0,
-	CHECKALPHA_ANY = 4,
-};
+#include "GPU/Common/ImageCommon.h"
 
 // For both of these, pitch must be aligned to 16 bits (as is the case on a PSP).
 void DoSwizzleTex16(const u32 *ysrcp, u8 *texptr, int bxc, int byc, u32 pitch);
@@ -86,24 +81,24 @@ inline bool AlphaSumIsFull(u32 alphaSum, u32 fullAlphaMask) {
 	return fullAlphaMask != 0 && (alphaSum & fullAlphaMask) == fullAlphaMask;
 }
 
-inline CheckAlphaResult CheckAlpha16(const u16 *pixelData, int width, u32 fullAlphaMask) {
+inline TextureAlpha CheckAlpha16(const u16 *pixelData, int width, u32 fullAlphaMask) {
 	u32 alphaSum = 0xFFFFFFFF;
 	CheckMask16(pixelData, width, &alphaSum);
-	return AlphaSumIsFull(alphaSum, fullAlphaMask) ? CHECKALPHA_FULL : CHECKALPHA_ANY;
+	return AlphaSumIsFull(alphaSum, fullAlphaMask) ? TextureAlpha::Solid : TextureAlpha::Any;
 }
 
-inline CheckAlphaResult CheckAlpha32(const u32 *pixelData, int width, u32 fullAlphaMask) {
+inline TextureAlpha CheckAlpha32(const u32 *pixelData, int width, u32 fullAlphaMask) {
 	u32 alphaSum = 0xFFFFFFFF;
 	CheckMask32(pixelData, width, &alphaSum);
-	return AlphaSumIsFull(alphaSum, fullAlphaMask) ? CHECKALPHA_FULL : CHECKALPHA_ANY;
+	return AlphaSumIsFull(alphaSum, fullAlphaMask) ? TextureAlpha::Solid : TextureAlpha::Any;
 }
 
-inline CheckAlphaResult CheckAlpha32Rect(const u32 *pixelData, int stride, int width, int height, u32 fullAlphaMask) {
+inline TextureAlpha CheckAlpha32Rect(const u32 *pixelData, int stride, int width, int height, u32 fullAlphaMask) {
 	u32 alphaSum = 0xFFFFFFFF;
 	for (int y = 0; y < height; y++) {
 		CheckMask32(pixelData + stride * y, width, &alphaSum);
 	}
-	return AlphaSumIsFull(alphaSum, fullAlphaMask) ? CHECKALPHA_FULL : CHECKALPHA_ANY;
+	return AlphaSumIsFull(alphaSum, fullAlphaMask) ? TextureAlpha::Solid : TextureAlpha::Any;
 }
 
 template <typename IndexT, typename ClutT>
@@ -140,7 +135,7 @@ inline void DeIndexTexture(/*WRITEONLY*/ ClutT *dest, const IndexT *indexed, int
 
 template <typename IndexT, typename ClutT>
 inline void DeIndexTexture(/*WRITEONLY*/ ClutT *dest, const u32 texaddr, int length, const ClutT *clut, u32 *outAlphaSum) {
-	const IndexT *indexed = (const IndexT *) Memory::GetPointer(texaddr);
+	const IndexT *indexed = (const IndexT *) Memory::GetPointerOrException(texaddr);
 	DeIndexTexture(dest, indexed, length, clut, outAlphaSum);
 }
 
@@ -226,12 +221,12 @@ inline void DeIndexTexture4OptimalRev(u16 *dest, const u8 *indexed, int length, 
 
 template <typename ClutT>
 inline void DeIndexTexture4(ClutT *dest, const u32 texaddr, int length, const ClutT *clut) {
-	const u8 *indexed = (const u8 *) Memory::GetPointer(texaddr);
+	const u8 *indexed = (const u8 *) Memory::GetPointerOrException(texaddr);
 	DeIndexTexture4(dest, indexed, length, clut);
 }
 
 template <typename ClutT>
 inline void DeIndexTexture4Optimal(ClutT *dest, const u32 texaddr, int length, ClutT color) {
-	const u8 *indexed = (const u8 *) Memory::GetPointer(texaddr);
+	const u8 *indexed = (const u8 *) Memory::GetPointerOrException(texaddr);
 	DeIndexTexture4Optimal(dest, indexed, length, color);
 }

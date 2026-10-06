@@ -140,9 +140,17 @@ void CPUInfo::Detect()
 #else // __linux__
 	LoongArchCPUInfoParser parser;
 	num_cores = parser.ProcessorCount();
-	logical_cpu_count = parser.TotalLogicalCount() / num_cores;
-	if (logical_cpu_count <= 0)
+	if (num_cores <= 0) {
+		// ProcessorCount() is 0 when /proc/cpuinfo couldn't be read or didn't parse - dividing
+		// by it here raised SIGFPE during static init of cpu_info, before any handler exists.
+		// The guard below this was too late to help.
+		num_cores = 1;
 		logical_cpu_count = 1;
+	} else {
+		logical_cpu_count = parser.TotalLogicalCount() / num_cores;
+		if (logical_cpu_count <= 0)
+			logical_cpu_count = 1;
+	}
 #endif
 
 	unsigned long hwcap = getauxval(AT_HWCAP);
@@ -162,21 +170,25 @@ void CPUInfo::Detect()
 	LOONGARCH_PTW       = ExtensionSupported(hwcap, 13);
 
 #ifdef USE_CPU_FEATURES
+	// Only ever add to what the hwcaps said. GetLoongArchInfo reads /proc/cpuinfo and nothing
+	// else, so anywhere that isn't the real thing - under qemu-user, where /proc/cpuinfo belongs
+	// to the host - it reports no features at all, and letting it assign would turn off LSX and
+	// with it every vector path in the JIT.
 	cpu_features::LoongArchInfo info = cpu_features::GetLoongArchInfo();
 	LOONGARCH_CPUCFG    = true;
-	LOONGARCH_LAM       = info.features.LAM;
-	LOONGARCH_UAL       = info.features.UAL;
-	LOONGARCH_FPU       = info.features.FPU;
-	LOONGARCH_LSX       = info.features.LSX;
-	LOONGARCH_LASX      = info.features.LASX;
-	LOONGARCH_CRC32     = info.features.CRC32;
-	LOONGARCH_COMPLEX   = info.features.COMPLEX;
-	LOONGARCH_CRYPTO    = info.features.CRYPTO;
-	LOONGARCH_LVZ       = info.features.LVZ;
-	LOONGARCH_LBT_X86   = info.features.LBT_X86;
-	LOONGARCH_LBT_ARM   = info.features.LBT_ARM;
-	LOONGARCH_LBT_MIPS  = info.features.LBT_MIPS;
-	LOONGARCH_PTW       = info.features.PTW;
+	LOONGARCH_LAM       = LOONGARCH_LAM      || info.features.LAM;
+	LOONGARCH_UAL       = LOONGARCH_UAL      || info.features.UAL;
+	LOONGARCH_FPU       = LOONGARCH_FPU      || info.features.FPU;
+	LOONGARCH_LSX       = LOONGARCH_LSX      || info.features.LSX;
+	LOONGARCH_LASX      = LOONGARCH_LASX     || info.features.LASX;
+	LOONGARCH_CRC32     = LOONGARCH_CRC32    || info.features.CRC32;
+	LOONGARCH_COMPLEX   = LOONGARCH_COMPLEX  || info.features.COMPLEX;
+	LOONGARCH_CRYPTO    = LOONGARCH_CRYPTO   || info.features.CRYPTO;
+	LOONGARCH_LVZ       = LOONGARCH_LVZ      || info.features.LVZ;
+	LOONGARCH_LBT_X86   = LOONGARCH_LBT_X86  || info.features.LBT_X86;
+	LOONGARCH_LBT_ARM   = LOONGARCH_LBT_ARM  || info.features.LBT_ARM;
+	LOONGARCH_LBT_MIPS  = LOONGARCH_LBT_MIPS || info.features.LBT_MIPS;
+	LOONGARCH_PTW       = LOONGARCH_PTW      || info.features.PTW;
 #endif
 }
 

@@ -37,17 +37,15 @@ class VulkanRenderManager;
 class VulkanContext;
 class VulkanVertexShader;
 class VulkanFragmentShader;
-class VulkanGeometryShader;
 class ShaderManagerVulkan;
 class DrawEngineCommon;
 
+// Stored in the shader cache on disk: changing it requires bumping CACHE_VERSION in ShaderManagerVulkan.cpp.
 struct VulkanPipelineKey {
 	VulkanPipelineRasterStateKey raster;  // prim is included here
-	VKRRenderPass *renderPass;
-	Promise<VkShaderModule> *vShader;
-	Promise<VkShaderModule> *fShader;
-	Promise<VkShaderModule> *gShader;
-	uint32_t vtxFmtId;
+	VShaderID vid;
+	FShaderID fid;
+	uint32_t vtxFmtId;  // Note: This is the decoded format ID, not the source format!
 	bool useHWTransform;
 
 	void ToString(std::string *str) const {
@@ -57,7 +55,7 @@ struct VulkanPipelineKey {
 	void FromString(const std::string &str) {
 		memcpy(this, &str[0], sizeof(*this));
 	}
-	std::string GetDescription(DebugShaderStringType stringType, ShaderManagerVulkan *shaderManager) const;
+	std::string GetDescription(DebugShaderStringType stringType) const;
 
 private:
 	std::string GetRasterStateDesc(bool lineBreaks) const;
@@ -65,6 +63,9 @@ private:
 
 // Simply wraps a Vulkan pipeline, providing some metadata.
 struct VulkanPipeline {
+	VulkanPipeline() = default;
+	VulkanPipeline(const VulkanPipeline &) = delete;
+	VulkanPipeline &operator=(const VulkanPipeline &) = delete;
 	~VulkanPipeline() {
 		desc->Release();
 	}
@@ -75,7 +76,6 @@ struct VulkanPipeline {
 
 	bool UsesBlendConstant() const { return (pipelineFlags & PipelineFlags::USES_BLEND_CONSTANT) != 0; }
 	bool UsesDepthStencil() const { return (pipelineFlags & PipelineFlags::USES_DEPTH_STENCIL) != 0; }
-	bool UsesGeometryShader() const { return (pipelineFlags & PipelineFlags::USES_GEOMETRY_SHADER) != 0; }
 	bool UsesDiscard() const { return (pipelineFlags & PipelineFlags::USES_DISCARD) != 0; }
 	bool UsesFlatShading() const { return (pipelineFlags & PipelineFlags::USES_FLAT_SHADING) != 0; }
 
@@ -88,7 +88,8 @@ public:
 	~PipelineManagerVulkan();
 
 	// variantMask is only used when loading pipelines from cache.
-	VulkanPipeline *GetOrCreatePipeline(VulkanRenderManager *renderManager, VKRPipelineLayout *layout, const VulkanPipelineRasterStateKey &rasterKey, const DecVtxFormat *decFmt, VulkanVertexShader *vs, VulkanFragmentShader *fs, VulkanGeometryShader *gs, bool useHwTransform, u32 variantMask, int multiSampleLevel, bool cacheLoad);
+	VulkanPipeline *GetOrCreatePipeline(VulkanRenderManager *renderManager, ShaderManagerVulkan *shaderManager, VKRPipelineLayout *layout, const VulkanPipelineRasterStateKey &rasterKey, const DecVtxFormat *decFmt,
+		VShaderID vid, FShaderID fid, bool useHwTransform, u32 variantMask, int multiSampleLevel, bool cacheLoad);
 	int GetNumPipelines() const { return (int)pipelines_.size(); }
 
 	void Clear();
@@ -97,14 +98,16 @@ public:
 	void DeviceRestore(VulkanContext *vulkan);
 
 	void InvalidateMSAAPipelines();
-	void BlockUntilReady();
 
-	std::string DebugGetObjectString(const std::string &id, DebugShaderType type, DebugShaderStringType stringType, ShaderManagerVulkan *shaderManager);
+	std::string DebugGetObjectString(const std::string &id, DebugShaderType type, DebugShaderStringType stringType);
 	std::vector<std::string> DebugGetObjectIDs(DebugShaderType type) const;
 
 	// Saves data for faster creation next time.
 	void SavePipelineCache(FILE *file, bool saveRawPipelineCache, ShaderManagerVulkan *shaderManager, Draw::DrawContext *drawContext);
 	bool LoadPipelineCache(FILE *file, bool loadRawPipelineCache, ShaderManagerVulkan *shaderManager, Draw::DrawContext *drawContext, VKRPipelineLayout *layout, int multiSampleLevel);
+
+	// For analysis only.
+	const DenseHashMap<VulkanPipelineKey, VulkanPipeline *> &GetPipelines() const { return pipelines_; }
 
 private:
 	DenseHashMap<VulkanPipelineKey, VulkanPipeline *> pipelines_;

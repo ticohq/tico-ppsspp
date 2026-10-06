@@ -50,6 +50,11 @@ public:
 		views_.push_back(view);
 		return view;
 	}
+	template <class T>
+	T *Insert(int index, T *view) {
+		views_.insert(views_.begin() + index, view);
+		return view;
+	}
 
 	// Note: This deletes the old view, if found. Returns whether the view was found.
 	// If it fails, the newView is deleted.
@@ -65,6 +70,12 @@ public:
 	// Assumes that layout has taken place.
 	NeighborResult FindNeighbor(View *view, FocusMove direction, NeighborResult best);
 	virtual NeighborResult FindScrollNeighbor(View *view, const Point2D &target, FocusMove direction, NeighborResult best);
+
+	// Appends the views Tab/Shift+Tab step through, in the order they were added, depth first -
+	// so the order follows the hierarchy rather than the geometry, which is what makes tabbing
+	// predictable in a layout that arrow navigation has to guess its way around.
+	// Unlike FindNeighbor, this doesn't need layout to have taken place.
+	virtual void CollectTabOrder(std::vector<View *> *outViews) const;
 
 	bool CanBeFocused() const override { return false; }
 	bool IsViewGroup() const override { return true; }
@@ -111,7 +122,7 @@ public:
 	void Layout() override;
 };
 
-const float NONE = -FLT_MAX;
+constexpr float NONE = -FLT_MAX;
 
 enum class Centering {
 	None = 0,
