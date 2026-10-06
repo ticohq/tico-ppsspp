@@ -1,0 +1,34 @@
+{
+  "id": "ppsspp",
+  "name": "PPSSPP",
+  "nro": "tico-ppsspp.nro",
+  "launch": "\"{nro}\" \"{rom}\" \"{title}\"",
+  "settings": "config/modules/ppsspp/settings.json",
+  "config_file": "ppsspp.jsonc",
+  "is_libretro": true,
+  "systems": [
+    {
+      "slug": "psp",
+      "title": "PlayStation Portable",
+      "short_title": "PSP",
+      "extensions": [
+        ".iso",
+        ".cso",
+        ".pbp",
+        ".chd",
+        ".m3u"
+      ],
+      "disc_based": true,
+      "naming": "redump",
+      "games_file": "psp.json",
+      "retroachievements_id": 41,
+      "colors": {
+        "start": "E65FC8",
+        "end": "7A6FE6",
+        "start_dark": "A84490",
+        "end_dark": "574FA8"
+      }
+    }
+  ],
+  "achievements": true
+}

@@ -158,3 +158,6 @@ tico-ppsspp
 
 build_switch_tico
 build_switch_minimal
+
+# tico module bundle
+build_tico

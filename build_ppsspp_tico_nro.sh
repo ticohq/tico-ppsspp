@@ -68,3 +68,23 @@ else
 	echo "Error: tico-ppsspp.nro not found"
 	exit 1
 fi
+
+# The tico module: a directory that extracts to sdmc:/tico/modules/<id>/.
+# tico reads module.json, the settings definition and the strings from it,
+# and launches the NRO beside them.
+echo "--- Packaging the module ---"
+MODULE_SRC="${SCRIPT_DIR}/tico/module"
+MODULE_ID=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${MODULE_SRC}/module.json" | head -1)
+PACKAGE_DIR="${SCRIPT_DIR}/build_tico"
+MODULE_OUT="${PACKAGE_DIR}/module/${MODULE_ID}"
+rm -rf "${PACKAGE_DIR}"
+mkdir -p "${MODULE_OUT}"
+cp -r "${MODULE_SRC}/." "${MODULE_OUT}/"
+cp "${BUILD_DIR}/tico-ppsspp.nro" "${MODULE_OUT}/"
+cp -R "${SCRIPT_DIR}/tico/lang" "${MODULE_OUT}/"
+gzip -f -9 "${MODULE_OUT}"/gamelists/*.json 2>/dev/null || true
+BUNDLE="${PACKAGE_DIR}/tico-${MODULE_ID}-module.zip"
+( cd "${PACKAGE_DIR}/module" && zip -qr "${BUNDLE}" "${MODULE_ID}" )
+echo "Module: ${BUNDLE}"
+echo "        extracts to sdmc:/tico/modules/${MODULE_ID}/"
+find "${MODULE_OUT}" -type f | sed "s|${PACKAGE_DIR}/module/|    |"
