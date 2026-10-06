@@ -88,6 +88,10 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "ppsspp_min_timeout": "0",
     "ppsspp_mac_address": "",
     "ppsspp_nickname": "",
+    "ppsspp_lsfg": "disabled",
+    "ppsspp_lsfg_flow_scale": "0.25",
+    "ppsspp_lsfg_performance_mode": "enabled",
+    "ppsspp_buffer_filtering": "linear",
     "display_mode": "Display",
     "display_size": "16:9",
     "integer_scale": "Auto"
@@ -238,6 +242,11 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 		const std::string profileName = SwitchProfileNickname();
 		if (!profileName.empty())
 			g_Config.sNickName = profileName.substr(0, 32);
+	}
+	// Buffer filtering: how the game's picture is scaled to the screen
+	if (const std::string *value = FindOption(options, "ppsspp_buffer_filtering")) {
+		g_Config.GetDisplayLayoutConfig(DeviceOrientation::Landscape).iDisplayFilter =
+			(*value == "nearest") ? SCALE_NEAREST : SCALE_LINEAR;
 	}
 	applyBool("ppsspp_software_rendering", g_Config.bSoftwareRendering);
 	applyBool("ppsspp_cropto16x9", g_Config.bDisplayCropTo16x9);

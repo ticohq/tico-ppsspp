@@ -1,0 +1,1213 @@
+{
+  "core_id": "ppsspp",
+  "display_name": "PPSSPP",
+  "config_file": "ppsspp.jsonc",
+  "slugs": [
+    "psp"
+  ],
+  "tabs": [
+    {
+      "name": "settings_ppsspp_tab_system",
+      "sections": [
+        {
+          "title": "settings_ppsspp_section_system",
+          "options": [
+            {
+              "key": "ppsspp_cpu_core",
+              "label": "settings_ppsspp_cpu_core",
+              "type": "enum",
+              "default": "JIT",
+              "choices": [
+                {
+                  "label": "JIT",
+                  "value": "JIT"
+                },
+                {
+                  "label": "IR JIT",
+                  "value": "IR JIT"
+                },
+                {
+                  "label": "Interpreter",
+                  "value": "Interpreter"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_fast_memory",
+              "label": "settings_ppsspp_fast_memory",
+              "type": "bool",
+              "default": "enabled"
+            },
+            {
+              "key": "ppsspp_locked_cpu_speed",
+              "label": "settings_ppsspp_locked_cpu_speed",
+              "type": "enum",
+              "default": "disabled",
+              "choices": [
+                {
+                  "label": "Disabled",
+                  "value": "disabled"
+                },
+                {
+                  "label": "222MHz",
+                  "value": "222MHz"
+                },
+                {
+                  "label": "266MHz",
+                  "value": "266MHz"
+                },
+                {
+                  "label": "333MHz",
+                  "value": "333MHz"
+                },
+                {
+                  "label": "366MHz",
+                  "value": "366MHz"
+                },
+                {
+                  "label": "399MHz",
+                  "value": "399MHz"
+                },
+                {
+                  "label": "432MHz",
+                  "value": "432MHz"
+                },
+                {
+                  "label": "444MHz",
+                  "value": "444MHz"
+                },
+                {
+                  "label": "466MHz",
+                  "value": "466MHz"
+                },
+                {
+                  "label": "499MHz",
+                  "value": "499MHz"
+                },
+                {
+                  "label": "532MHz",
+                  "value": "532MHz"
+                },
+                {
+                  "label": "555MHz",
+                  "value": "555MHz"
+                },
+                {
+                  "label": "566MHz",
+                  "value": "566MHz"
+                },
+                {
+                  "label": "599MHz",
+                  "value": "599MHz"
+                },
+                {
+                  "label": "632MHz",
+                  "value": "632MHz"
+                },
+                {
+                  "label": "666MHz",
+                  "value": "666MHz"
+                },
+                {
+                  "label": "777MHz",
+                  "value": "777MHz"
+                },
+                {
+                  "label": "888MHz",
+                  "value": "888MHz"
+                },
+                {
+                  "label": "999MHz",
+                  "value": "999MHz"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_psp_model",
+              "label": "settings_ppsspp_psp_model",
+              "type": "enum",
+              "default": "psp_2000_3000",
+              "choices": [
+                {
+                  "label": "PSP-1000",
+                  "value": "psp_1000"
+                },
+                {
+                  "label": "PSP-2000/3000",
+                  "value": "psp_2000_3000"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_ignore_bad_memory_access",
+              "label": "settings_ppsspp_ignore_bad_memory_access",
+              "type": "bool",
+              "default": "enabled"
+            },
+            {
+              "key": "ppsspp_io_timing_method",
+              "label": "settings_ppsspp_i_o_timing_method",
+              "type": "enum",
+              "default": "Fast",
+              "choices": [
+                {
+                  "label": "Fast",
+                  "value": "Fast"
+                },
+                {
+                  "label": "Host",
+                  "value": "Host"
+                },
+                {
+                  "label": "Simulate UMD delays",
+                  "value": "Simulate UMD delays"
+                },
+                {
+                  "label": "Simulate UMD slow reading speed",
+                  "value": "Simulate UMD slow reading speed"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_memstick_inserted",
+              "label": "settings_ppsspp_memory_stick_inserted",
+              "type": "bool",
+              "default": "enabled"
+            },
+            {
+              "key": "ppsspp_cache_iso",
+              "label": "settings_ppsspp_cache_iso_in_ram",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_cheats",
+              "label": "settings_ppsspp_cheats",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_language",
+              "label": "settings_ppsspp_language",
+              "type": "enum",
+              "default": "Automatic",
+              "choices": [
+                {
+                  "label": "Automatic",
+                  "value": "Automatic"
+                },
+                {
+                  "label": "English",
+                  "value": "English"
+                },
+                {
+                  "label": "Japanese",
+                  "value": "Japanese"
+                },
+                {
+                  "label": "French",
+                  "value": "French"
+                },
+                {
+                  "label": "Spanish",
+                  "value": "Spanish"
+                },
+                {
+                  "label": "German",
+                  "value": "German"
+                },
+                {
+                  "label": "Italian",
+                  "value": "Italian"
+                },
+                {
+                  "label": "Dutch",
+                  "value": "Dutch"
+                },
+                {
+                  "label": "Portuguese",
+                  "value": "Portuguese"
+                },
+                {
+                  "label": "Russian",
+                  "value": "Russian"
+                },
+                {
+                  "label": "Korean",
+                  "value": "Korean"
+                },
+                {
+                  "label": "Chinese Traditional",
+                  "value": "Chinese Traditional"
+                },
+                {
+                  "label": "Chinese Simplified",
+                  "value": "Chinese Simplified"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "settings_ppsspp_tab_display",
+      "sections": [
+        {
+          "title": "settings_ppsspp_section_viewport",
+          "options": [
+            {
+              "key": "display_mode",
+              "label": "settings_ppsspp_display_mode",
+              "type": "enum",
+              "default": "Display",
+              "choices": [
+                {
+                  "label": "Integer",
+                  "value": "Integer"
+                },
+                {
+                  "label": "Display",
+                  "value": "Display"
+                }
+              ]
+            },
+            {
+              "key": "display_size",
+              "label": "settings_ppsspp_size",
+              "type": "enum",
+              "default": "16:9",
+              "depends_on": {
+                "key": "display_mode",
+                "value": "Display"
+              },
+              "choices": [
+                {
+                  "label": "Stretch",
+                  "value": "Stretch"
+                },
+                {
+                  "label": "4:3",
+                  "value": "4:3"
+                },
+                {
+                  "label": "16:9",
+                  "value": "16:9"
+                },
+                {
+                  "label": "Original",
+                  "value": "Original"
+                }
+              ]
+            },
+            {
+              "key": "integer_scale",
+              "label": "settings_ppsspp_integer_scale",
+              "type": "enum",
+              "default": "Auto",
+              "depends_on": {
+                "key": "display_mode",
+                "value": "Integer"
+              },
+              "choices": [
+                {
+                  "label": "1x",
+                  "value": "1x"
+                },
+                {
+                  "label": "2x",
+                  "value": "2x"
+                },
+                {
+                  "label": "Auto",
+                  "value": "Auto"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "settings_ppsspp_section_frame_generation",
+          "options": [
+            {
+              "key": "ppsspp_lsfg",
+              "label": "settings_ppsspp_lsfg",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_lsfg_flow_scale",
+              "label": "settings_ppsspp_lsfg_flow_scale",
+              "type": "enum",
+              "default": "0.25",
+              "depends_on": {
+                "key": "ppsspp_lsfg",
+                "value": "enabled"
+              },
+              "choices": [
+                {
+                  "label": "25%",
+                  "value": "0.25"
+                },
+                {
+                  "label": "50%",
+                  "value": "0.5"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_lsfg_performance_mode",
+              "label": "settings_ppsspp_lsfg_performance_mode",
+              "type": "bool",
+              "default": "enabled",
+              "depends_on": {
+                "key": "ppsspp_lsfg",
+                "value": "enabled"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "settings_ppsspp_tab_graphics",
+      "sections": [
+        {
+          "title": "settings_ppsspp_section_video",
+          "options": [
+            {
+              "key": "ppsspp_internal_resolution",
+              "label": "settings_ppsspp_internal_resolution",
+              "type": "enum",
+              "default": "480x272",
+              "choices": [
+                {
+                  "label": "1x (480x272)",
+                  "value": "480x272"
+                },
+                {
+                  "label": "2x (960x544)",
+                  "value": "960x544"
+                },
+                {
+                  "label": "3x (1440x816)",
+                  "value": "1440x816"
+                },
+                {
+                  "label": "4x (1920x1088)",
+                  "value": "1920x1088"
+                },
+                {
+                  "label": "5x (2400x1360)",
+                  "value": "2400x1360"
+                },
+                {
+                  "label": "6x (2880x1632)",
+                  "value": "2880x1632"
+                },
+                {
+                  "label": "7x (3360x1904)",
+                  "value": "3360x1904"
+                },
+                {
+                  "label": "8x (3840x2176)",
+                  "value": "3840x2176"
+                },
+                {
+                  "label": "9x (4320x2448)",
+                  "value": "4320x2448"
+                },
+                {
+                  "label": "10x (4800x2720)",
+                  "value": "4800x2720"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_mulitsample_level",
+              "label": "settings_ppsspp_msaa_antialiasing",
+              "type": "enum",
+              "default": "Disabled",
+              "choices": [
+                {
+                  "label": "Disabled",
+                  "value": "Disabled"
+                },
+                {
+                  "label": "x2",
+                  "value": "x2"
+                },
+                {
+                  "label": "x4",
+                  "value": "x4"
+                },
+                {
+                  "label": "x8",
+                  "value": "x8"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_cropto16x9",
+              "label": "settings_ppsspp_crop_to_16x9",
+              "type": "bool",
+              "default": "enabled"
+            },
+            {
+              "key": "ppsspp_gpu_hardware_transform",
+              "label": "settings_ppsspp_hardware_transform",
+              "type": "bool",
+              "default": "enabled"
+            },
+            {
+              "key": "ppsspp_buffer_filtering",
+              "label": "settings_ppsspp_buffer_filtering",
+              "type": "enum",
+              "default": "linear",
+              "choices": [
+                {
+                  "label": "Linear",
+                  "value": "linear"
+                },
+                {
+                  "label": "Nearest",
+                  "value": "nearest"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_frameskip",
+              "label": "settings_ppsspp_frame_skipping",
+              "type": "enum",
+              "default": "disabled",
+              "choices": [
+                {
+                  "label": "Off",
+                  "value": "disabled"
+                },
+                {
+                  "label": "1",
+                  "value": "1"
+                },
+                {
+                  "label": "2",
+                  "value": "2"
+                },
+                {
+                  "label": "3",
+                  "value": "3"
+                },
+                {
+                  "label": "4",
+                  "value": "4"
+                },
+                {
+                  "label": "5",
+                  "value": "5"
+                },
+                {
+                  "label": "6",
+                  "value": "6"
+                },
+                {
+                  "label": "7",
+                  "value": "7"
+                },
+                {
+                  "label": "8",
+                  "value": "8"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_auto_frameskip",
+              "label": "settings_ppsspp_auto_frame_skip",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_frame_duplication",
+              "label": "settings_ppsspp_frame_duplication",
+              "type": "bool",
+              "default": "enabled"
+            },
+            {
+              "key": "ppsspp_detect_vsync_swap_interval",
+              "label": "settings_ppsspp_detect_vsync",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_inflight_frames",
+              "label": "settings_ppsspp_in_flight_frames",
+              "type": "enum",
+              "default": "Up to 2",
+              "choices": [
+                {
+                  "label": "No buffer",
+                  "value": "No buffer"
+                },
+                {
+                  "label": "Up to 1",
+                  "value": "Up to 1"
+                },
+                {
+                  "label": "Up to 2",
+                  "value": "Up to 2"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_texture_scaling_type",
+              "label": "settings_ppsspp_texture_scaling_type",
+              "type": "enum",
+              "default": "xbrz",
+              "choices": [
+                {
+                  "label": "xBRZ",
+                  "value": "xbrz"
+                },
+                {
+                  "label": "Hybrid",
+                  "value": "hybrid"
+                },
+                {
+                  "label": "Bicubic",
+                  "value": "bicubic"
+                },
+                {
+                  "label": "Hybrid + Bicubic",
+                  "value": "hybrid_bicubic"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_texture_scaling_level",
+              "label": "settings_ppsspp_texture_scaling_level",
+              "type": "enum",
+              "default": "disabled",
+              "choices": [
+                {
+                  "label": "Off",
+                  "value": "disabled"
+                },
+                {
+                  "label": "2x",
+                  "value": "2x"
+                },
+                {
+                  "label": "3x",
+                  "value": "3x"
+                },
+                {
+                  "label": "4x",
+                  "value": "4x"
+                },
+                {
+                  "label": "5x",
+                  "value": "5x"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_texture_deposterize",
+              "label": "settings_ppsspp_deposterize",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_texture_shader",
+              "label": "settings_ppsspp_texture_shader",
+              "type": "enum",
+              "default": "disabled",
+              "choices": [
+                {
+                  "label": "Disabled",
+                  "value": "disabled"
+                },
+                {
+                  "label": "Tex2xBRZ",
+                  "value": "2xBRZ"
+                },
+                {
+                  "label": "Tex4xBRZ",
+                  "value": "4xBRZ"
+                },
+                {
+                  "label": "TexMMPX",
+                  "value": "MMPX"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_texture_anisotropic_filtering",
+              "label": "settings_ppsspp_anisotropic_filtering",
+              "type": "enum",
+              "default": "16x",
+              "choices": [
+                {
+                  "label": "Off",
+                  "value": "disabled"
+                },
+                {
+                  "label": "2x",
+                  "value": "2x"
+                },
+                {
+                  "label": "4x",
+                  "value": "4x"
+                },
+                {
+                  "label": "8x",
+                  "value": "8x"
+                },
+                {
+                  "label": "16x",
+                  "value": "16x"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_texture_filtering",
+              "label": "settings_ppsspp_texture_filtering",
+              "type": "enum",
+              "default": "Auto",
+              "choices": [
+                {
+                  "label": "Auto",
+                  "value": "Auto"
+                },
+                {
+                  "label": "Nearest",
+                  "value": "Nearest"
+                },
+                {
+                  "label": "Linear",
+                  "value": "Linear"
+                },
+                {
+                  "label": "Auto Max Quality",
+                  "value": "Auto max quality"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_smart_2d_texture_filtering",
+              "label": "settings_ppsspp_smart_2d_texture_filtering",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_texture_replacement",
+              "label": "settings_ppsspp_texture_replacement",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_lower_resolution_for_effects",
+              "label": "settings_ppsspp_lower_res_for_effects",
+              "type": "enum",
+              "default": "disabled",
+              "choices": [
+                {
+                  "label": "Off",
+                  "value": "disabled"
+                },
+                {
+                  "label": "Safe",
+                  "value": "Safe"
+                },
+                {
+                  "label": "Balanced",
+                  "value": "Balanced"
+                },
+                {
+                  "label": "Aggressive",
+                  "value": "Aggressive"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "settings_ppsspp_tab_input",
+      "sections": [
+        {
+          "title": "settings_ppsspp_section_input",
+          "options": [
+            {
+              "key": "ppsspp_button_preference",
+              "label": "settings_ppsspp_button_preference",
+              "type": "enum",
+              "default": "Cross",
+              "choices": [
+                {
+                  "label": "Cross",
+                  "value": "Cross"
+                },
+                {
+                  "label": "Circle",
+                  "value": "Circle"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_analog_is_circular",
+              "label": "settings_ppsspp_analog_circularity",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_analog_deadzone",
+              "label": "settings_ppsspp_analog_deadzone",
+              "type": "enum",
+              "default": "0.0",
+              "choices": [
+                {
+                  "label": "0%",
+                  "value": "0.0"
+                },
+                {
+                  "label": "5%",
+                  "value": "0.05"
+                },
+                {
+                  "label": "10%",
+                  "value": "0.10"
+                },
+                {
+                  "label": "15%",
+                  "value": "0.15"
+                },
+                {
+                  "label": "20%",
+                  "value": "0.20"
+                },
+                {
+                  "label": "25%",
+                  "value": "0.25"
+                },
+                {
+                  "label": "30%",
+                  "value": "0.30"
+                },
+                {
+                  "label": "35%",
+                  "value": "0.35"
+                },
+                {
+                  "label": "40%",
+                  "value": "0.40"
+                },
+                {
+                  "label": "45%",
+                  "value": "0.45"
+                },
+                {
+                  "label": "50%",
+                  "value": "0.50"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_analog_sensitivity",
+              "label": "settings_ppsspp_analog_sensitivity",
+              "type": "enum",
+              "default": "1.00",
+              "choices": [
+                {
+                  "label": "1.0",
+                  "value": "1.00"
+                },
+                {
+                  "label": "1.1",
+                  "value": "1.10"
+                },
+                {
+                  "label": "1.2",
+                  "value": "1.20"
+                },
+                {
+                  "label": "1.3",
+                  "value": "1.30"
+                },
+                {
+                  "label": "1.4",
+                  "value": "1.40"
+                },
+                {
+                  "label": "1.5",
+                  "value": "1.50"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "settings_ppsspp_section_right_stick",
+          "options": [
+            {
+              "key": "ppsspp_right_stick_mode",
+              "label": "settings_ppsspp_right_stick_mode",
+              "type": "enum",
+              "default": "Face Buttons",
+              "choices": [
+                {
+                  "label": "Face Buttons",
+                  "value": "Face Buttons"
+                },
+                {
+                  "label": "D-Pad",
+                  "value": "D-Pad"
+                },
+                {
+                  "label": "Analog",
+                  "value": "Analog"
+                },
+                {
+                  "label": "Disabled",
+                  "value": "Disabled"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "settings_ppsspp_section_button_mapping",
+          "options": [
+            {
+              "key": "ppsspp_map_b",
+              "label": "settings_ppsspp_map_b",
+              "type": "enum",
+              "default": "Cross",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_a",
+              "label": "settings_ppsspp_map_a",
+              "type": "enum",
+              "default": "Circle",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_y",
+              "label": "settings_ppsspp_map_y",
+              "type": "enum",
+              "default": "Square",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_x",
+              "label": "settings_ppsspp_map_x",
+              "type": "enum",
+              "default": "Triangle",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_dpad_up",
+              "label": "settings_ppsspp_map_dpad_up",
+              "type": "enum",
+              "default": "D-Pad Up",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_dpad_down",
+              "label": "settings_ppsspp_map_dpad_down",
+              "type": "enum",
+              "default": "D-Pad Down",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_dpad_left",
+              "label": "settings_ppsspp_map_dpad_left",
+              "type": "enum",
+              "default": "D-Pad Left",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_dpad_right",
+              "label": "settings_ppsspp_map_dpad_right",
+              "type": "enum",
+              "default": "D-Pad Right",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_plus",
+              "label": "settings_ppsspp_map_plus",
+              "type": "enum",
+              "default": "Start",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_minus",
+              "label": "settings_ppsspp_map_minus",
+              "type": "enum",
+              "default": "Select",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_l",
+              "label": "settings_ppsspp_map_l",
+              "type": "enum",
+              "default": "L",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_r",
+              "label": "settings_ppsspp_map_r",
+              "type": "enum",
+              "default": "R",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_zl",
+              "label": "settings_ppsspp_map_zl",
+              "type": "enum",
+              "default": "L2",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_zr",
+              "label": "settings_ppsspp_map_zr",
+              "type": "enum",
+              "default": "R2",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_stick_l",
+              "label": "settings_ppsspp_map_stick_l",
+              "type": "enum",
+              "default": "L3",
+              "choices_ref": "psp_buttons"
+            },
+            {
+              "key": "ppsspp_map_stick_r",
+              "label": "settings_ppsspp_map_stick_r",
+              "type": "enum",
+              "default": "R3",
+              "choices_ref": "psp_buttons"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "settings_ppsspp_tab_hacks",
+      "sections": [
+        {
+          "title": "settings_ppsspp_section_hacks",
+          "options": [
+            {
+              "key": "ppsspp_skip_buffer_effects",
+              "label": "settings_ppsspp_skip_buffer_effects",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_skip_gpu_readbacks",
+              "label": "settings_ppsspp_skip_gpu_readbacks",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_spline_quality",
+              "label": "settings_ppsspp_spline_quality",
+              "type": "enum",
+              "default": "High",
+              "choices": [
+                {
+                  "label": "Low",
+                  "value": "Low"
+                },
+                {
+                  "label": "Medium",
+                  "value": "Medium"
+                },
+                {
+                  "label": "High",
+                  "value": "High"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "settings_ppsspp_tab_network",
+      "sections": [
+        {
+          "title": "settings_ppsspp_section_adhoc",
+          "options": [
+            {
+              "key": "ppsspp_enable_wlan",
+              "label": "settings_ppsspp_enable_wlan",
+              "type": "bool",
+              "default": "disabled"
+            },
+            {
+              "key": "ppsspp_adhoc_server",
+              "label": "settings_ppsspp_adhoc_server",
+              "type": "string",
+              "default": "socom.cc",
+              "max_length": 64,
+              "depends_on": {
+                "key": "ppsspp_enable_wlan",
+                "value": "enabled"
+              }
+            },
+            {
+              "key": "ppsspp_adhoc_relay_mode",
+              "label": "settings_ppsspp_adhoc_relay_mode",
+              "type": "enum",
+              "default": "Auto",
+              "depends_on": {
+                "key": "ppsspp_enable_wlan",
+                "value": "enabled"
+              },
+              "choices": [
+                {
+                  "label": "Auto",
+                  "value": "Auto"
+                },
+                {
+                  "label": "Always On",
+                  "value": "Always On"
+                },
+                {
+                  "label": "Always Off",
+                  "value": "Always Off"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_enable_adhoc_server",
+              "label": "settings_ppsspp_enable_adhoc_server",
+              "type": "bool",
+              "default": "disabled",
+              "depends_on": {
+                "key": "ppsspp_enable_wlan",
+                "value": "enabled"
+              }
+            },
+            {
+              "key": "ppsspp_nickname",
+              "label": "settings_ppsspp_nickname",
+              "type": "string",
+              "default": "",
+              "max_length": 32,
+              "depends_on": {
+                "key": "ppsspp_enable_wlan",
+                "value": "enabled"
+              }
+            },
+            {
+              "key": "ppsspp_port_offset",
+              "label": "settings_ppsspp_port_offset",
+              "type": "enum",
+              "default": "10000",
+              "depends_on": {
+                "key": "ppsspp_enable_wlan",
+                "value": "enabled"
+              },
+              "choices": [
+                {
+                  "label": "10000",
+                  "value": "10000"
+                },
+                {
+                  "label": "0",
+                  "value": "0"
+                }
+              ]
+            },
+            {
+              "key": "ppsspp_forced_first_connect",
+              "label": "settings_ppsspp_forced_first_connect",
+              "type": "bool",
+              "default": "enabled",
+              "depends_on": {
+                "key": "ppsspp_enable_wlan",
+                "value": "enabled"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "choice_sets": {
+    "psp_buttons": [
+      {
+        "label": "Cross",
+        "value": "Cross"
+      },
+      {
+        "label": "Circle",
+        "value": "Circle"
+      },
+      {
+        "label": "Square",
+        "value": "Square"
+      },
+      {
+        "label": "Triangle",
+        "value": "Triangle"
+      },
+      {
+        "label": "D-Pad Up",
+        "value": "D-Pad Up"
+      },
+      {
+        "label": "D-Pad Down",
+        "value": "D-Pad Down"
+      },
+      {
+        "label": "D-Pad Left",
+        "value": "D-Pad Left"
+      },
+      {
+        "label": "D-Pad Right",
+        "value": "D-Pad Right"
+      },
+      {
+        "label": "Start",
+        "value": "Start"
+      },
+      {
+        "label": "Select",
+        "value": "Select"
+      },
+      {
+        "label": "L",
+        "value": "L"
+      },
+      {
+        "label": "R",
+        "value": "R"
+      },
+      {
+        "label": "L2",
+        "value": "L2"
+      },
+      {
+        "label": "R2",
+        "value": "R2"
+      },
+      {
+        "label": "L3",
+        "value": "L3"
+      },
+      {
+        "label": "R3",
+        "value": "R3"
+      },
+      {
+        "label": "None",
+        "value": "None"
+      }
+    ]
+  }
+}
