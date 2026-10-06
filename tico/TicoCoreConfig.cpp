@@ -117,6 +117,39 @@ void CoreConfig::Load() {
 		loaded_ = true;
 	}
 
+	// The tico frontend writes this file too, from its own schema, so a config
+	// that already exists can be missing keys this core knows about -- including
+	// after the user deletes it, since the frontend may recreate it first. Merge
+	// in whatever is absent instead of only seeding a brand new file.
+	if (loaded_) {
+		nlohmann::json defaults = nlohmann::json::parse(defaultJson_, nullptr, false, true);
+		unsigned added = 0;
+		if (defaults.is_object()) {
+			for (const auto &entry : defaults.items()) {
+				if (options_.find(entry.key()) != options_.end()) {
+					continue;
+				}
+				const nlohmann::json &value = entry.value();
+				if (value.is_string()) {
+					options_[entry.key()] = value.get<std::string>();
+				} else if (value.is_boolean()) {
+					options_[entry.key()] = value.get<bool>() ? "true" : "false";
+				} else if (value.is_number_integer()) {
+					options_[entry.key()] = std::to_string(value.get<int>());
+				} else if (value.is_number_float()) {
+					options_[entry.key()] = std::to_string(value.get<float>());
+				} else {
+					continue;
+				}
+				added++;
+			}
+		}
+		if (added > 0) {
+			LogMessage(log_, "tico %s config added %u missing defaults", coreName_.c_str(), added);
+			Save();
+		}
+	}
+
 	LogMessage(log_, "tico %s config loaded path=%s options=%u", coreName_.c_str(), configPath_.c_str(), (unsigned)options_.size());
 }
 
