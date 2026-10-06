@@ -38,6 +38,8 @@ public:
 
 	void Load();
 	void Apply(bool audioReady) const;
+	// Call after Apply(): keeps a generated MAC stable across launches.
+	void PersistGeneratedMacAddress();
 
 	const CoreConfig &RawConfig() const { return config_; }
 	CoreConfig &RawConfig() { return config_; }
