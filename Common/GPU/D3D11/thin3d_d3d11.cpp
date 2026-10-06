@@ -13,6 +13,7 @@
 #include "Common/Data/Encoding/Utf8.h"
 #include "Common/TimeUtil.h"
 #include "Common/Log.h"
+#include "Common/StringUtils.h"
 
 #include <map>
 
@@ -111,6 +112,7 @@ public:
 
 	void UpdateBuffer(Buffer *buffer, const uint8_t *data, size_t offset, size_t size, UpdateBufferFlags flags) override;
 	void UpdateTextureLevels(Texture *texture, const uint8_t **data, TextureCallback initDataCallback, int numLevels) override;
+	void UpdateTextureRegions(Texture *texture, int level, const TextureRegionUpdate *regions, int numRegions) override;
 
 	void CopyFramebufferImage(Framebuffer *src, int level, int x, int y, int z, Framebuffer *dst, int dstLevel, int dstX, int dstY, int dstZ, int width, int height, int depth, Aspect aspects, const char *tag) override;
 	bool BlitFramebuffer(Framebuffer *src, int srcX1, int srcY1, int srcX2, int srcY2, Framebuffer *dst, int dstX1, int dstY1, int dstX2, int dstY2, Aspect aspects, FBBlitFilter filter, const char *tag) override;
@@ -148,7 +150,6 @@ public:
 		stencilCompareMask_ = compareMask;
 		stencilDirty_ = true;
 	}
-
 
 	void Draw(int vertexCount, int offset) override;
 	void DrawIndexed(int indexCount, int offset) override;
@@ -248,7 +249,6 @@ private:
 	ComPtr<ID3D11InputLayout> curInputLayout_;
 	ComPtr<ID3D11VertexShader> curVS_;
 	ComPtr<ID3D11PixelShader> curPS_;
-	ComPtr<ID3D11GeometryShader> curGS_;
 	D3D11_PRIMITIVE_TOPOLOGY curTopology_ = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
 	ComPtr<ID3D11Buffer> nextVertexBuffer_;
@@ -293,10 +293,8 @@ D3D11DrawContext::D3D11DrawContext(ComPtr<ID3D11Device> device, ComPtr<ID3D11Dev
 		swapChain_(swapChain),
 		deviceList_(std::move(deviceList)) {
 
-	// We no longer support Windows Phone.
-	_assert_(featureLevel_ >= D3D_FEATURE_LEVEL_9_3);
-
 	caps_.coordConvention = CoordConvention::Direct3D11;
+	caps_.fragmentShaderFullPrecisionFloat = true;
 
 	switch (featureLevel_) {
 	case D3D_FEATURE_LEVEL_11_1:
@@ -316,14 +314,15 @@ D3D11DrawContext::D3D11DrawContext(ComPtr<ID3D11Device> device, ComPtr<ID3D11Dev
 		caps_.maxTextureSize = 2048;
 		break;
 	}
-	caps_.maxClipPlanes = 8;
 
 	// Seems like a fair approximation...
 	caps_.dualSourceBlend = featureLevel_ >= D3D_FEATURE_LEVEL_10_0;
 	caps_.depthClampSupported = featureLevel_ >= D3D_FEATURE_LEVEL_10_0;
 	// SV_ClipDistance# seems to be 10+.
-	caps_.clipDistanceSupported = featureLevel_ >= D3D_FEATURE_LEVEL_10_0;
-	caps_.cullDistanceSupported = featureLevel_ >= D3D_FEATURE_LEVEL_10_0;
+	if (featureLevel_ >= D3D_FEATURE_LEVEL_10_0) {
+		caps_.maxClipDistances = 8;
+		caps_.maxCullDistances = 8;
+	}
 
 	caps_.depthRangeMinusOneToOne = false;
 	caps_.framebufferBlitSupported = false;
@@ -337,11 +336,11 @@ D3D11DrawContext::D3D11DrawContext(ComPtr<ID3D11Device> device, ComPtr<ID3D11Dev
 	caps_.texture3DSupported = true;
 	caps_.fragmentShaderInt32Supported = true;
 	caps_.anisoSupported = true;
-	caps_.textureNPOTFullySupported = true;
 	caps_.fragmentShaderDepthWriteSupported = true;
 	caps_.fragmentShaderStencilWriteSupported = false;
 	caps_.blendMinMaxSupported = true;
 	caps_.multiSampleLevelsMask = 1;   // More could be supported with some work.
+	caps_.samplerLodControl = true;
 
 	caps_.provokingVertexLast = false;  // D3D has it first, unfortunately. (and no way to change it).
 
@@ -848,7 +847,6 @@ public:
 
 	ComPtr<ID3D11VertexShader> vs;
 	ComPtr<ID3D11PixelShader> ps;
-	ComPtr<ID3D11GeometryShader> gs;
 };
 
 class D3D11Pipeline : public Pipeline {
@@ -869,7 +867,6 @@ public:
 
 	ComPtr<ID3D11VertexShader> vs;
 	ComPtr<ID3D11PixelShader> ps;
-	ComPtr<ID3D11GeometryShader> gs;
 	D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
 	std::vector<D3D11ShaderModule *> shaderModules;
@@ -894,6 +891,7 @@ public:
 
 	bool CreateStagingTexture(ID3D11Device *device);
 	void UpdateTextureLevels(ID3D11DeviceContext *context, ID3D11Device *device, Texture *texture, const uint8_t *const *data, TextureCallback initDataCallback, int numLevels);
+	void UpdateTextureRegions(ID3D11DeviceContext *context, int level, const TextureRegionUpdate *regions, int numRegions);
 
 	ID3D11ShaderResourceView *View() { return view_.Get(); }
 
@@ -1055,6 +1053,22 @@ void D3D11Texture::UpdateTextureLevels(ID3D11DeviceContext *context, ID3D11Devic
 	stagingTex_.Reset();
 }
 
+void D3D11Texture::UpdateTextureRegions(ID3D11DeviceContext *context, int level, const TextureRegionUpdate *regions, int numRegions) {
+	const UINT pixelSize = (UINT)DataFormatSizeInBytes(format_);
+	for (int i = 0; i < numRegions; i++) {
+		const TextureRegionUpdate &region = regions[i];
+		D3D11_BOX box{};
+		box.left = region.x;
+		box.top = region.y;
+		box.front = 0;
+		box.right = region.x + region.w;
+		box.bottom = region.y + region.h;
+		box.back = 1;
+		const UINT srcStride = region.byteStride ? (UINT)region.byteStride : region.w * pixelSize;
+		context->UpdateSubresource(tex_.Get(), level, &box, region.data, srcStride, 0);
+	}
+}
+
 Texture *D3D11DrawContext::CreateTexture(const TextureDesc &desc) {
 	if (!(GetDataFormatSupport(desc.format) & FMT_TEXTURE)) {
 		// D3D11 does not support this format as a texture format.
@@ -1081,6 +1095,11 @@ void D3D11DrawContext::UpdateTextureLevels(Texture *texture, const uint8_t **dat
 	tex->UpdateTextureLevels(context_.Get(), device_.Get(), texture, data, initDataCallback, numLevels);
 }
 
+void D3D11DrawContext::UpdateTextureRegions(Texture *texture, int level, const TextureRegionUpdate *regions, int numRegions) {
+	D3D11Texture *tex = (D3D11Texture *)texture;
+	tex->UpdateTextureRegions(context_.Get(), level, regions, numRegions);
+}
+
 ShaderModule *D3D11DrawContext::CreateShaderModule(ShaderStage stage, ShaderLanguage language, const uint8_t *data, size_t dataSize, const char *tag) {
 	if (language != ShaderLanguage::HLSL_D3D11) {
 		ERROR_LOG(Log::G3D, "Unsupported shader language");
@@ -1089,11 +1108,9 @@ ShaderModule *D3D11DrawContext::CreateShaderModule(ShaderStage stage, ShaderLang
 
 	const char *vertexModel = "vs_4_0";
 	const char *fragmentModel = "ps_4_0";
-	const char *geometryModel = "gs_4_0";
 	if (featureLevel_ <= D3D_FEATURE_LEVEL_9_3) {
 		vertexModel = "vs_4_0_level_9_1";
 		fragmentModel = "ps_4_0_level_9_1";
-		geometryModel = nullptr;
 	}
 
 	std::string compiled;
@@ -1102,11 +1119,6 @@ ShaderModule *D3D11DrawContext::CreateShaderModule(ShaderStage stage, ShaderLang
 	switch (stage) {
 	case ShaderStage::Fragment: target = fragmentModel; break;
 	case ShaderStage::Vertex: target = vertexModel; break;
-	case ShaderStage::Geometry:
-		if (!geometryModel)
-			return nullptr;
-		target = geometryModel;
-		break;
 	case ShaderStage::Compute:
 	default:
 		Crash();
@@ -1125,7 +1137,9 @@ ShaderModule *D3D11DrawContext::CreateShaderModule(ShaderStage stage, ShaderLang
 	}
 	if (errorMsgs) {
 		errors = std::string((const char *)errorMsgs->GetBufferPointer(), errorMsgs->GetBufferSize());
-		ERROR_LOG(Log::G3D, "Failed compiling %s:\n%s\n%s", tag, data, errors.c_str());
+		ERROR_LOG(Log::G3D, "Failed compiling %s:", tag);
+		ERROR_LOG(Log::G3D, "%s", LineNumberString(std::string((const char *)data, dataSize)).c_str());
+		ERROR_LOG(Log::G3D, "%s", errors.c_str());
 	}
 
 	if (result != S_OK) {
@@ -1144,9 +1158,6 @@ ShaderModule *D3D11DrawContext::CreateShaderModule(ShaderStage stage, ShaderLang
 		break;
 	case ShaderStage::Fragment:
 		result = device_->CreatePixelShader(data, dataSize, nullptr, &module->ps);
-		break;
-	case ShaderStage::Geometry:
-		result = device_->CreateGeometryShader(data, dataSize, nullptr, &module->gs);
 		break;
 	default:
 		ERROR_LOG(Log::G3D, "Unsupported shader stage");
@@ -1200,9 +1211,6 @@ Pipeline *D3D11DrawContext::CreateGraphicsPipeline(const PipelineDesc &desc, con
 		case ShaderStage::Fragment:
 			dPipeline->ps = module->ps;
 			break;
-		case ShaderStage::Geometry:
-			dPipeline->gs = module->gs;
-			break;
 		case ShaderStage::Compute:
 			break;
 		}
@@ -1246,7 +1254,6 @@ void D3D11DrawContext::Invalidate(InvalidationFlags flags) {
 		curRaster_ = nullptr;
 		curPS_.Reset();
 		curVS_.Reset();
-		curGS_.Reset();
 		curInputLayout_.Reset();
 		curTopology_ = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
 		curPipeline_= nullptr;
@@ -1288,10 +1295,6 @@ void D3D11DrawContext::ApplyCurrentState() {
 	if (curPS_ != curPipeline_->ps) {
 		context_->PSSetShader(curPipeline_->ps.Get(), nullptr, 0);
 		curPS_ = curPipeline_->ps;
-	}
-	if (curGS_ != curPipeline_->gs) {
-		context_->GSSetShader(curPipeline_->gs.Get(), nullptr, 0);
-		curGS_ = curPipeline_->gs;
 	}
 	if (curTopology_ != curPipeline_->topology) {
 		context_->IASetPrimitiveTopology(curPipeline_->topology);
@@ -1647,7 +1650,6 @@ void D3D11DrawContext::BeginFrame(DebugFlags debugFlags) {
 	context_->IASetInputLayout(curInputLayout_.Get());
 	context_->VSSetShader(curVS_.Get(), nullptr, 0);
 	context_->PSSetShader(curPS_.Get(), nullptr, 0);
-	context_->GSSetShader(curGS_.Get(), nullptr, 0);
 	if (curTopology_ != D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED) {
 		context_->IASetPrimitiveTopology(curTopology_);
 	}
@@ -1817,7 +1819,7 @@ bool D3D11DrawContext::CopyFramebufferToMemory(Framebuffer *src, Aspect channelB
 	const uint8_t *srcWithOffset = (const uint8_t *)map.pData + srcByteOffset;
 	switch ((Aspect)channelBits) {
 	case Aspect::COLOR_BIT:
-		// Pixel size always 4 here because we always request BGRA8888.
+		// Pixel size always 4 here because we always request RGBA8888.
 		ConvertFromRGBA8888((uint8_t *)pixels, srcWithOffset, pixelStride, map.RowPitch / sizeof(uint32_t), bw, bh, destFormat);
 		break;
 	case Aspect::DEPTH_BIT:
@@ -1872,7 +1874,7 @@ bool D3D11DrawContext::CopyFramebufferToMemory(Framebuffer *src, Aspect channelB
 }
 
 void D3D11DrawContext::BindFramebufferAsRenderTarget(Framebuffer *fbo, const RenderPassInfo &rp, const char *tag) {
-	// TODO: deviceContext1 can actually discard. Useful on Windows Mobile.
+	// TODO: deviceContext1 can actually discard.
 	if (fbo) {
 		D3D11Framebuffer *fb = (D3D11Framebuffer *)fbo;
 		if (curRenderTargetView_ == fb->colorRTView && curDepthStencilView_ == fb->depthStencilRTView) {

@@ -1,8 +1,7 @@
+#include <memory>
 #include <string>
 #include <mutex>
 #include <algorithm>
-
-#include "ext/minimp3/minimp3_ex.h"
 
 #include "Common/File/VFS/VFS.h"
 #include "Common/UI/Root.h"
@@ -48,8 +47,12 @@ struct WavData {
 
 	[[nodiscard]]
 	bool IsSimpleWAV() const {
-		bool isBad = raw_bytes_per_frame > sizeof(int16_t) * num_channels;
-		return !isBad && num_channels > 0 && sample_rate >= 8000 && codec == 0;
+		// Sample::Load() only actually handles these two exact cases (16-bit or 8-bit
+		// raw PCM); anything else used to pass this check while leaving Load()'s
+		// output buffer uninitialized (played back as heap garbage) since neither of
+		// its two conversion branches would match.
+		bool validFrameSize = raw_bytes_per_frame == (int)sizeof(int16_t) * num_channels || raw_bytes_per_frame == num_channels;
+		return validFrameSize && num_channels > 0 && sample_rate >= 8000 && codec == 0;
 	}
 };
 
@@ -107,37 +110,42 @@ bool WavData::Read(RIFFReader &file_) {
 		if (file_.Descend('smpl')) {
 			std::vector<u8> smplData;
 			smplData.resize(file_.GetCurrentChunkSize());
-			file_.ReadData(&smplData[0], (int)smplData.size());
+			if (!smplData.empty()) {
+				file_.ReadData(smplData.data(), (int)smplData.size());
+			}
 
-			int numLoops = *(int *)&smplData[28];
-			struct AtracLoopInfo {
-				int cuePointID;
-				int type;
-				int startSample;
-				int endSample;
-				int fraction;
-				int playCount;
-			};
+			// A short/corrupt 'smpl' chunk shouldn't make us read past the buffer.
+			if (smplData.size() >= 32) {
+				int numLoops = *(int *)&smplData[28];
+				struct AtracLoopInfo {
+					int cuePointID;
+					int type;
+					int startSample;
+					int endSample;
+					int fraction;
+					int playCount;
+				};
 
-			if (numLoops > 0 && smplData.size() >= 36 + sizeof(AtracLoopInfo) * numLoops) {
-				AtracLoopInfo *loops = (AtracLoopInfo *)&smplData[36];
-				int samplesPerFrame = codec == PSP_CODEC_AT3PLUS ? 2048 : 1024;
+				if (numLoops > 0 && smplData.size() >= 36 + sizeof(AtracLoopInfo) * numLoops) {
+					AtracLoopInfo *loops = (AtracLoopInfo *)&smplData[36];
+					int samplesPerFrame = codec == PSP_CODEC_AT3PLUS ? 2048 : 1024;
 
-				for (int i = 0; i < numLoops; ++i) {
-					// Only seen forward loops, so let's ignore others.
-					if (loops[i].type != 0)
-						continue;
+					for (int i = 0; i < numLoops; ++i) {
+						// Only seen forward loops, so let's ignore others.
+						if (loops[i].type != 0)
+							continue;
 
-					// We ignore loop interpolation (fraction) and play count for now.
-					raw_offset_loop_start = (loops[i].startSample / samplesPerFrame) * raw_bytes_per_frame;
-					loop_start_offset = loops[i].startSample % samplesPerFrame;
-					raw_offset_loop_end = (loops[i].endSample / samplesPerFrame) * raw_bytes_per_frame;
-					loop_end_offset = loops[i].endSample % samplesPerFrame;
+						// We ignore loop interpolation (fraction) and play count for now.
+						raw_offset_loop_start = (loops[i].startSample / samplesPerFrame) * raw_bytes_per_frame;
+						loop_start_offset = loops[i].startSample % samplesPerFrame;
+						raw_offset_loop_end = (loops[i].endSample / samplesPerFrame) * raw_bytes_per_frame;
+						loop_end_offset = loops[i].endSample % samplesPerFrame;
 
-					if (loops[i].playCount == 0) {
-						// This was an infinite loop, so ignore the rest.
-						// In practice, there's usually only one and it's usually infinite.
-						break;
+						if (loops[i].playCount == 0) {
+							// This was an infinite loop, so ignore the rest.
+							// In practice, there's usually only one and it's usually infinite.
+							break;
+						}
 					}
 				}
 			}
@@ -147,16 +155,34 @@ bool WavData::Read(RIFFReader &file_) {
 
 		// enter the data chunk
 		if (file_.Descend('data')) {
+			// raw_bytes_per_frame (the 'fmt ' chunk's blockAlign field, read above) is
+			// unvalidated file data - a value of 0 would otherwise divide by zero here.
+			if (raw_bytes_per_frame <= 0) {
+				ERROR_LOG(Log::Audio, "Error - bad blockalign");
+				file_.Ascend();
+				return false;
+			}
+
 			int numBytes = file_.GetCurrentChunkSize();
 			numFrames = numBytes / raw_bytes_per_frame;  // numFrames
 
 			// It seems the atrac3 codec likes to read a little bit outside.
 			const int padding = 32;  // 32 is the value FFMPEG uses.
 			raw_data = (uint8_t *)malloc(numBytes + padding);
+			if (!raw_data) {
+				ERROR_LOG(Log::Audio, "Error - failed to allocate %d bytes for wave data", numBytes + padding);
+				file_.Ascend();
+				return false;
+			}
 			raw_data_size = numBytes;
 
 			if (num_channels == 1 || num_channels == 2) {
-				file_.ReadData(raw_data, numBytes);
+				if (!file_.ReadData(raw_data, numBytes)) {
+					ERROR_LOG(Log::Audio, "Error - data chunk truncated");
+					free(raw_data);
+					raw_data = nullptr;
+					return false;
+				}
 			} else {
 				ERROR_LOG(Log::Audio, "Error - bad blockalign or channels");
 				free(raw_data);
@@ -182,14 +208,15 @@ bool WavData::Read(RIFFReader &file_) {
 // Turns out that AT3 files used for this are modified WAVE files so fairly easy to parse.
 class AT3PlusReader {
 public:
-	explicit AT3PlusReader(const std::string &data)
-	: file_((const uint8_t *)&data[0], (int32_t)data.size()) {
+	explicit AT3PlusReader(const std::string &data) : file_((const uint8_t *)&data[0], (int32_t)data.size()) {
+		if (!wave_.Read(file_)) {
+			ERROR_LOG(Log::Audio, "Error - could not read wave data");
+			return;
+		}
+
 		// Normally 8k but let's be safe.
 		buffer_ = new short[32 * 1024];
-
 		skip_next_samples_ = 0;
-
-		wave_.Read(file_);
 
 		uint8_t *extraData = nullptr;
 		size_t extraDataSize = 0;
@@ -221,7 +248,14 @@ public:
 		while (bgQueue.size() < (size_t)(len * 2)) {
 			int outSamples = 0;
 			int inbytesConsumed = 0;
-			bool result = decoder_->Decode(wave_.raw_data + raw_offset_, wave_.raw_bytes_per_frame, &inbytesConsumed, 2, (int16_t *)buffer_, &outSamples);
+			// raw_bytes_per_frame is unvalidated file data (the 'fmt ' chunk's blockAlign
+			// field) - clamp the length passed to the decoder to what's actually left in
+			// raw_data at raw_offset_, so a bogus blockAlign can't make it read past the
+			// (padded) allocation.
+			const int kPadding = 32;  // Matches WavData::Read's allocation padding.
+			int available = std::max(0, wave_.raw_data_size + kPadding - raw_offset_);
+			int inBytes = std::min(wave_.raw_bytes_per_frame, available);
+			bool result = decoder_->Decode(wave_.raw_data + raw_offset_, inBytes, &inbytesConsumed, 2, (int16_t *)buffer_, &outSamples);
 			if (!result || !outSamples)
 				return false;
 			int outBytes = outSamples * 2 * sizeof(int16_t);
@@ -399,6 +433,114 @@ inline int16_t ConvertU8ToI16(uint8_t value) {
 	return ivalue * 255;
 }
 
+// Returns the size of the MPEG-1/2/2.5 Layer III frame whose header is at p, or 0 if it isn't one.
+static int Mp3FrameSize(const uint8_t *p, int *sampleRate) {
+	if (p[0] != 0xFF || (p[1] & 0xE0) != 0xE0 || (p[1] & 0x06) != 0x02) {
+		return 0;
+	}
+	static const int bitratesV1[16] = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0 };
+	static const int bitratesV2[16] = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0 };
+	static const int sampleRatesV1[4] = { 44100, 48000, 32000, 0 };
+	const int version = (p[1] >> 3) & 3;  // 3 = MPEG-1, 2 = MPEG-2, 0 = MPEG-2.5.
+	if (version == 1) {
+		return 0;
+	}
+	const int bitrate = (version == 3 ? bitratesV1 : bitratesV2)[p[2] >> 4] * 1000;
+	int rate = sampleRatesV1[(p[2] >> 2) & 3];
+	if (!bitrate || !rate) {
+		return 0;
+	}
+	rate >>= (version == 3 ? 0 : (version == 2 ? 1 : 2));
+	*sampleRate = rate;
+	const int padding = (p[2] >> 1) & 1;
+	return (version == 3 ? 144 : 72) * bitrate / rate + padding;
+}
+
+// Checks for a Xing/Info frame, which some encoders put first. If it carries a LAME tag,
+// also returns the samples to trim from the start and end of the decoded stream.
+static bool ParseXingFrame(const uint8_t *p, int frameSize, int *delay, int *padding) {
+	const int version = (p[1] >> 3) & 3;
+	const bool mono = (p[3] >> 6) == 3;
+	const int sideInfoSize = version == 3 ? (mono ? 17 : 32) : (mono ? 9 : 17);
+	const int tagPos = 4 + sideInfoSize;
+	if (tagPos + 8 > frameSize || (memcmp(p + tagPos, "Xing", 4) && memcmp(p + tagPos, "Info", 4))) {
+		return false;
+	}
+	const uint8_t flags = p[tagPos + 7];
+	// Skip the optional frame count, byte count, seek table and quality fields.
+	static const int fieldSizes[4] = { 4, 4, 100, 4 };
+	int lamePos = tagPos + 8;
+	for (int i = 0; i < 4; i++) {
+		if (flags & (1 << i)) {
+			lamePos += fieldSizes[i];
+		}
+	}
+	if (lamePos + 24 <= frameSize && (!memcmp(p + lamePos, "LAME", 4) || !memcmp(p + lamePos, "Lav", 3))) {
+		const uint8_t *t = p + lamePos + 21;
+		// The decoder adds 529 samples of its own delay (and so drops them from the padding).
+		const int decoderDelay = 529;
+		*delay = ((t[0] << 4) | (t[1] >> 4)) + decoderDelay;
+		*padding = std::max(0, (((t[1] & 0xF) << 8) | t[2]) - decoderDelay);
+	}
+	return true;
+}
+
+static Sample *LoadMp3(const uint8_t *data, size_t size) {
+	size_t pos = 0;
+	// Skip an ID3v2 tag.
+	if (size >= 10 && !memcmp(data, "ID3", 3)) {
+		pos = 10 + (((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) | ((data[8] & 0x7F) << 7) | (data[9] & 0x7F));
+		if (data[5] & 0x10) {
+			pos += 10;  // Footer.
+		}
+	}
+
+	std::unique_ptr<AudioDecoder> decoder;
+	std::vector<int16_t> samples;
+	int16_t frameBuf[1152 * 2];
+	int sampleRate = 0;
+	int delay = 0;
+	int padding = 0;
+	while (pos + 4 <= size) {
+		int frameRate = 0;
+		int frameSize = Mp3FrameSize(data + pos, &frameRate);
+		if (frameSize == 0 || pos + frameSize > size) {
+			// Resync, byte by byte.
+			pos++;
+			continue;
+		}
+		if (!decoder) {
+			sampleRate = frameRate;
+			decoder.reset(CreateAudioDecoder(PSP_CODEC_MP3, sampleRate, 2));
+			if (ParseXingFrame(data + pos, frameSize, &delay, &padding)) {
+				// It decodes to silence.
+				pos += frameSize;
+				continue;
+			}
+		}
+		int consumed = 0;
+		int outSamples = 0;
+		if (frameRate == sampleRate && decoder->Decode(data + pos, frameSize, &consumed, 2, frameBuf, &outSamples)) {
+			samples.insert(samples.end(), frameBuf, frameBuf + outSamples * 2);
+		}
+		pos += frameSize;
+	}
+
+	// Trim the encoder delay and padding, in stereo frames.
+	const size_t trim = (size_t)(delay + padding) * 2;
+	if (samples.size() > trim) {
+		samples.erase(samples.end() - padding * 2, samples.end());
+		samples.erase(samples.begin(), samples.begin() + delay * 2);
+	}
+
+	if (samples.empty()) {
+		return nullptr;
+	}
+	int16_t *sampleData = new int16_t[samples.size()];
+	memcpy(sampleData, samples.data(), samples.size() * sizeof(int16_t));
+	return new Sample(sampleData, 2, (int)samples.size() / 2, sampleRate);
+}
+
 Sample *Sample::Load(const std::string &path) {
 	size_t data_size = 0;
 	uint8_t *data = g_VFS.ReadFile(path.c_str(), &data_size);
@@ -407,7 +549,6 @@ Sample *Sample::Load(const std::string &path) {
 		return nullptr;
 	}
 
-	const char *mp3_magic = "ID3\03";
 	const char *wav_magic = "RIFF";
 	if (!memcmp(data, wav_magic, 4)) {
 		RIFFReader reader(data, (int)data_size);
@@ -441,25 +582,12 @@ Sample *Sample::Load(const std::string &path) {
 		return new Sample(samples, wave.num_channels, actualFrames, wave.sample_rate);
 	}
 
-	// Something else.
-	// Let's see if minimp3 can read it.
-	mp3dec_t mp3d;
-	mp3dec_init(&mp3d);
-	mp3dec_file_info_t mp3_info;
-	int retval = mp3dec_load_buf(&mp3d, data, data_size, &mp3_info, nullptr, nullptr);
-
-	if (retval < 0 || mp3_info.samples == 0) {
-		ERROR_LOG(Log::Audio, "Couldn't load MP3 for sound effect from %s", path.c_str());
-		return nullptr;
-	}
-
-	// mp3_info contains the decoded data.
-	int16_t *sample_data = new int16_t[mp3_info.samples];
-	memcpy(sample_data, mp3_info.buffer, mp3_info.samples * sizeof(int16_t));
-
-	Sample *sample = new Sample(sample_data, mp3_info.channels, (int)mp3_info.samples / mp3_info.channels, mp3_info.hz);
-	free(mp3_info.buffer);
+	// Something else, try MP3.
+	Sample *sample = LoadMp3(data, data_size);
 	delete[] data;
+	if (!sample) {
+		ERROR_LOG(Log::Audio, "Couldn't load MP3 for sound effect from %s", path.c_str());
+	}
 	return sample;
 }
 

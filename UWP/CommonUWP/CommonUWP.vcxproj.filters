@@ -94,11 +94,8 @@
     <Filter Include="ext\basis_universal">
       <UniqueIdentifier>{8b92cc15-8e3e-45b1-ba80-ad39b1a9cdc8}</UniqueIdentifier>
     </Filter>
-    <Filter Include="ext\naett">
+    <Filter Include="ext\naett-lib">
       <UniqueIdentifier>{403c3154-5e8a-4da1-ba82-8f69bef25e14}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="ext\minimp3">
-      <UniqueIdentifier>{7b5c3ddc-225d-48d5-a829-9a1e71e304be}</UniqueIdentifier>
     </Filter>
     <Filter Include="ext\at3_standalone">
       <UniqueIdentifier>{47e3b9c8-3a5f-4c78-b62b-3fa65bf23594}</UniqueIdentifier>
@@ -232,6 +229,9 @@
     </ClCompile>
     <ClCompile Include="..\..\Common\Data\Hash\Hash.cpp">
       <Filter>Data\Hash</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Common\Data\Text\Demangle.cpp">
+      <Filter>Data\Text</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Common\Data\Text\I18n.cpp">
       <Filter>Data\Text</Filter>
@@ -380,9 +380,6 @@
     <ClCompile Include="..\..\Common\Render\Text\draw_text_android.cpp">
       <Filter>Render\Text</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\Common\Render\Text\draw_text_qt.cpp">
-      <Filter>Render\Text</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\Common\Render\Text\draw_text_uwp.cpp">
       <Filter>Render\Text</Filter>
     </ClCompile>
@@ -467,11 +464,11 @@
     <ClCompile Include="..\..\Common\Net\HTTPNaettRequest.cpp">
       <Filter>Net</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\ext\naett\naett.c">
-      <Filter>ext\naett</Filter>
+    <ClCompile Include="..\..\ext\naett-lib\src\naett_core.c">
+      <Filter>ext\naett-lib</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\ext\minimp3\minimp3.cpp">
-      <Filter>ext\minimp3</Filter>
+    <ClCompile Include="..\..\ext\naett-lib\src\naett_win.c">
+      <Filter>ext\naett-lib</Filter>
     </ClCompile>
     <ClCompile Include="..\..\ext\at3_standalone\atrac.cpp">
       <Filter>ext\at3_standalone</Filter>
@@ -591,6 +588,9 @@
     <ClCompile Include="..\..\ext\pugixml\pugixml.cpp">
       <Filter>ext\pugixml</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Common\UI\ScreenManager.cpp">
+      <Filter>UI</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="targetver.h" />
@@ -612,7 +612,7 @@
     <ClInclude Include="..\..\Common\DbgNew.h" />
     <ClInclude Include="..\..\Common\ExceptionHandlerSetup.h" />
     <ClInclude Include="..\..\Common\GhidraClient.h" />
-    <ClInclude Include="..\..\Common\GraphicsContext.h" />
+    <ClInclude Include="..\..\Common\GPU\GraphicsContext.h" />
     <ClInclude Include="..\..\Common\Log.h" />
     <ClInclude Include="..\..\Common\Log\LogManager.h" />
     <ClInclude Include="..\..\Common\LogReporting.h" />
@@ -720,6 +720,9 @@
     </ClInclude>
     <ClInclude Include="..\..\Common\Data\Hash\Hash.h">
       <Filter>Data\Hash</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Common\Data\Text\Demangle.h">
+      <Filter>Data\Text</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Common\Data\Text\I18n.h">
       <Filter>Data\Text</Filter>
@@ -880,9 +883,6 @@
     <ClInclude Include="..\..\Common\Render\Text\draw_text_android.h">
       <Filter>Render\Text</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\Common\Render\Text\draw_text_qt.h">
-      <Filter>Render\Text</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\Common\Render\Text\draw_text_uwp.h">
       <Filter>Render\Text</Filter>
     </ClInclude>
@@ -893,9 +893,6 @@
       <Filter>Data\Collections</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Common\Data\Collections\Hashmaps.h">
-      <Filter>Data\Collections</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\Common\Data\Collections\ThreadSafeList.h">
       <Filter>Data\Collections</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Common\GPU\Shader.h">
@@ -994,17 +991,14 @@
     <ClInclude Include="..\..\Common\Net\HTTPNaettRequest.h">
       <Filter>Net</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\ext\naett\naett.h">
-      <Filter>ext\naett</Filter>
+    <ClInclude Include="..\..\ext\naett-lib\src\naett_internal.h">
+      <Filter>ext\naett-lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\ext\naett-lib\naett.h">
+      <Filter>ext\naett-lib</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Common\Math\CrossSIMD.h">
       <Filter>Math</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\ext\minimp3\minimp3.h">
-      <Filter>ext\minimp3</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\ext\minimp3\minimp3_ex.h">
-      <Filter>ext\minimp3</Filter>
     </ClInclude>
     <ClInclude Include="..\..\ext\at3_standalone\aac_defines.h">
       <Filter>ext\at3_standalone</Filter>
@@ -1144,6 +1138,9 @@
     </ClInclude>
     <ClInclude Include="..\..\ext\pugixml\pugixml.hpp">
       <Filter>ext\pugixml</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Common\UI\ScreenManager.h">
+      <Filter>UI</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

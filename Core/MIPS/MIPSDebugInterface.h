@@ -23,8 +23,8 @@
 #include "Core/MIPS/MIPS.h"
 #include "Core/Debugger/DebugInterface.h"
 
-
 class MIPSDebugInterface : public DebugInterface {
+private:
 	MIPSState *cpu;
 public:
 	MIPSDebugInterface(MIPSState *_cpu) { cpu = _cpu; }
@@ -35,9 +35,8 @@ public:
 	void clearBreakpoint(unsigned int address);
 	void clearAllBreakpoints();
 	void toggleBreakpoint(unsigned int address);
-	unsigned int readMemory(unsigned int address);
+	unsigned int readMemory(unsigned int address) const;
 	int getColor(unsigned int address, bool darkMode) const;
-	std::string getDescription(unsigned int address);
 
 	u32 GetGPR32Value(int reg) const override { return cpu->r[reg]; }
 	float GetFPR32Value(int reg) const { return cpu->f[reg]; }
@@ -62,8 +61,10 @@ public:
 	void PrintRegValue(int cat, int index, char *out, size_t outSize) const override {
 		switch (cat) {
 		case 0: snprintf(out, outSize, "%08X", cpu->r[index]); break;
-		case 1: snprintf(out, outSize, "%f", cpu->f[index]); break;
-		case 2: snprintf(out, outSize, "N/A"); break;
+		// %g rather than %f - the register list column is narrow, and a truncated %f of a large
+		// value ("100000000" for 1e20) is worse than no value at all.
+		case 1: snprintf(out, outSize, "%g", cpu->f[index]); break;
+		case 2: snprintf(out, outSize, "%g", cpu->v[voffset[index]]); break;
 		}
 	}
 

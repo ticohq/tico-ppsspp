@@ -16,6 +16,8 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <string_view>
@@ -24,12 +26,14 @@
 #include "Common/File/DiskFree.h"
 #include "Common/File/FileUtil.h"
 #include "Common/File/DirListing.h"
+#include "Common/System/System.h"
 #include "Core/Config.h"
 #include "Core/CoreTiming.h"
 #include "Core/Compatibility.h"
 #include "Core/FileSystems/MetaFileSystem.h"
 #include "Core/HW/MemoryStick.h"
 #include "Core/System.h"
+#include "Core/MIPS/MIPS.h"
 #include "Common/CommonTypes.h"
 #include "Common/TimeUtil.h"
 #include "Common/Thread/Promise.h"
@@ -40,8 +44,12 @@ static MemStickFatState memStickFatState;
 static bool memStickNeedsAssign = false;
 static uint64_t memStickInsertedAt = 0;
 static uint64_t memstickInitialFree = 0;
+// The savedata IO thread asks for the free space too, so the cached use is guarded, and a write
+// during the calculation leaves it stale rather than marked current.
+static std::mutex memstickCurrentUseLock;
 static uint64_t memstickCurrentUse = 0;
-static bool memstickCurrentUseValid = false;
+static uint32_t memstickCurrentUseGeneration = 0;
+static std::atomic<uint32_t> memstickWriteGeneration{ 1 };
 
 enum FreeCalcStatus {
 	NONE,
@@ -70,6 +78,10 @@ void MemoryStick_DoState(PointerWrap &p) {
 		Do(p, memStickSize);
 	}
 	if (s >= 5) {
+		if (p.mode != p.MODE_READ && memstickInitialFree == 0 && g_initialMemstickSizePromise) {
+			// Keep the basis the game has seen, even when the state is loaded in another session.
+			memstickInitialFree = g_initialMemstickSizePromise->BlockUntilReady();
+		}
 		Do(p, memstickInitialFree);
 	}
 
@@ -84,7 +96,7 @@ MemStickState MemoryStick_State() {
 }
 
 MemStickFatState MemoryStick_FatState() {
-	if (memStickNeedsAssign && CoreTiming::GetTicks() > memStickInsertedAt + msToCycles(500)) {
+	if (memStickNeedsAssign && CoreTiming::GetTicks(currentMIPS) > memStickInsertedAt + msToCycles(500)) {
 		// It's been long enough for us to be done mounting the memory stick.
 		memStickFatState = PSP_FAT_MEMORYSTICK_STATE_ASSIGNED;
 		memStickNeedsAssign = false;
@@ -113,7 +125,6 @@ u64 MemoryStick_FreeSpace(std::string gameID) {
 	INFO_LOG(Log::IO, "Calculating free disk space (%s)", gameID.c_str());
 
 	const CompatFlags &flags = PSP_CoreParameter().compat.flags();
-	u64 realFreeSpace = pspFileSystem.FreeDiskSpace("ms0:/");
 
 	// Cap the memory stick size to avoid math errors when old games get sizes that were
 	// not planned for back then (even though 2GB cards were available.)
@@ -121,40 +132,54 @@ u64 MemoryStick_FreeSpace(std::string gameID) {
 	const u64 memStickSize = flags.ReportSmallMemstick ? smallMemstickSize : (u64)g_Config.iMemStickSizeGB * 1024 * 1024 * 1024;
 
 	// Assume the memory stick is only used to store savedata, for the current game only.
-	if (!memstickCurrentUseValid) {
-		Path saveFolder = GetSysDirectory(DIRECTORY_SAVEDATA);
-		memstickCurrentUse = ComputeSizeOfSavedataForGame(saveFolder, gameID);
-		memstickCurrentUseValid = true;
+	u64 currentUse;
+	{
+		std::lock_guard<std::mutex> guard(memstickCurrentUseLock);
+		const uint32_t generation = memstickWriteGeneration;
+		if (memstickCurrentUseGeneration != generation) {
+			Path saveFolder = GetSysDirectory(DIRECTORY_SAVEDATA);
+			memstickCurrentUse = ComputeSizeOfSavedataForGame(saveFolder, gameID);
+			memstickCurrentUseGeneration = generation;
+		}
+		currentUse = memstickCurrentUse;
 	}
 
 	u64 simulatedFreeSpace = 0;
-	if (memstickCurrentUse < memStickSize) {
-		simulatedFreeSpace = memStickSize - memstickCurrentUse;
+	if (currentUse < memStickSize) {
+		simulatedFreeSpace = memStickSize - currentUse;
 	} else if (flags.ReportSmallMemstick) {
 		// There's more stuff in the memstick than the size we report.
 		// This doesn't work, so we'll just have to lie. Not sure what the best way is.
 		simulatedFreeSpace = smallMemstickSize / 2;  // just pick a value.
 	}
+
+	u64 space;
 	if (flags.MemstickFixedFree) {
-		const u64 memstickInitialFree = g_initialMemstickSizePromise->BlockUntilReady();
 		_dbg_assert_(g_initialMemstickSizePromise);
+		if (memstickInitialFree == 0 && g_initialMemstickSizePromise) {
+			memstickInitialFree = g_initialMemstickSizePromise->BlockUntilReady();
+		}
 		// Assassin's Creed: Bloodlines fails to save if free space changes incorrectly during game.
 		// See issue #12761
-		realFreeSpace = 0;
-		if (memstickCurrentUse <= memstickInitialFree) {
-			realFreeSpace = memstickInitialFree - memstickCurrentUse;
+		u64 realFreeSpace = 0;
+		if (currentUse <= memstickInitialFree) {
+			realFreeSpace = memstickInitialFree - currentUse;
 		}
+		space = std::min(simulatedFreeSpace, realFreeSpace);
+	} else if (System_GetPropertyBool(SYSPROP_CAN_GET_FREE_SPACE_FAST) || g_Config.bReportAccurateFreeStorageSpace) {
+		u64 realFreeSpace = pspFileSystem.FreeDiskSpace("ms0:/");
+		space = std::min(simulatedFreeSpace, realFreeSpace);
+		INFO_LOG(Log::IO, "Done calculating free disk space (%0.3f s): %llu", time_now_d() - start, (unsigned long long)space);
+	} else {
+		space = simulatedFreeSpace;
+		INFO_LOG(Log::IO, "Reporting simulated free disk space: %llu", (unsigned long long)space);
 	}
-
-	u64 space = std::min(simulatedFreeSpace, realFreeSpace);
-
-	INFO_LOG(Log::IO, "Done calculating free disk space (%0.3f s): %llu", time_now_d() - start, (unsigned long long)space);
 
 	return space;
 }
 
 void MemoryStick_NotifyWrite() {
-	memstickCurrentUseValid = false;
+	memstickWriteGeneration++;
 }
 
 void MemoryStick_SetFatState(MemStickFatState state) {
@@ -175,7 +200,7 @@ void MemoryStick_SetState(MemStickState state) {
 	if (state == PSP_MEMORYSTICK_STATE_NOT_INSERTED) {
 		MemoryStick_SetFatState(PSP_FAT_MEMORYSTICK_STATE_UNASSIGNED);
 	} else {
-		memStickInsertedAt = CoreTiming::GetTicks();
+		memStickInsertedAt = CoreTiming::GetTicks(currentMIPS);
 		memStickNeedsAssign = true;
 	}
 }
@@ -222,4 +247,5 @@ void MemoryStick_Shutdown() {
 	}
 	delete g_initialMemstickSizePromise;
 	g_initialMemstickSizePromise = nullptr;
+	memstickInitialFree = 0;
 }

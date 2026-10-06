@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <cstdint>
 
 #include "Common/Common.h"
 #include "Common/Input/KeyCodes.h"
@@ -165,11 +166,6 @@ struct TouchInput {
 	double timestamp;
 };
 
-#undef MOD_CTRL
-#undef MOD_ALT
-#undef MOD_SHIFT
-#undef MOD_META
-
 enum class KeyInputFlags {
 	DOWN = 1 << 0,
 	UP = 1 << 1,
@@ -178,16 +174,17 @@ enum class KeyInputFlags {
 	CHAR = 1 << 4,  // Unicode character input. Cannot detect keyups of these so KeyInputFlags::DOWN and KeyInputFlags::UP are zero when this is set.
 
 	// NOTE: These are only available in sync input.
-	MOD_CTRL = 1 << 5,
-	MOD_SHIFT = 1 << 6,
-	MOD_ALT = 1 << 7,
-	MOD_META = 1 << 8,  // Windows key, command key, etc.
+	ModCtrl = 1 << 5,
+	ModShift = 1 << 6,
+	ModAlt = 1 << 7,
+	ModMeta = 1 << 8,  // Windows key, command key, etc.
 };
 
 ENUM_CLASS_BITOPS(KeyInputFlags);
 
 struct KeyInput {
 	KeyInput() {}
+	// These utility constructors are used a lot in SDL.
 	KeyInput(InputDeviceID devId, InputKeyCode code, KeyInputFlags fl) : deviceId(devId), keyCode(code), flags(fl) {}
 	KeyInput(InputDeviceID devId, int unicode) : deviceId(devId), unicodeChar(unicode), flags(KeyInputFlags::CHAR) {}
 	InputDeviceID deviceId;
@@ -229,3 +226,45 @@ int GetAnalogYDirection(InputDeviceID deviceId);
 
 // Gross hack unfortunately.
 extern bool g_IsMappingMouseInput;
+
+// General helper for backends that use different types of touch IDs.
+// Warning: If it can't map, IDs come out as -1.
+class TouchMapper {
+public:
+	struct Touch {
+		bool inUse = false;
+		uint64_t uid = 0;
+	};
+
+	int TouchId(uint64_t touch) {
+		for (int touchIx = 0; touchIx < maxTouches; touchIx++)
+			if (touches[touchIx].inUse && touches[touchIx].uid == touch)
+				return touchIx;
+		return -1;
+	}
+
+	int AddNewTouch(uint64_t touch) {
+		for (int touchIx = 0; touchIx < maxTouches; touchIx++) {
+			if (!touches[touchIx].inUse) {
+				touches[touchIx].inUse = true;
+				touches[touchIx].uid = touch;
+				return touchIx;
+			}
+		}
+		return -1;
+	}
+
+	int RemoveTouch(unsigned touch) {
+		for (int touchIx = 0; touchIx < maxTouches; touchIx++) {
+			if (touches[touchIx].inUse && touches[touchIx].uid == touch) {
+				touches[touchIx].inUse = false;
+				return touchIx;
+			}
+		}
+		return -1;
+	}
+
+private:
+	enum { maxTouches = 10 };
+	Touch touches[maxTouches]{};
+};

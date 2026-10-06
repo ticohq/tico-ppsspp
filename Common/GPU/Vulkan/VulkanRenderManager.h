@@ -94,13 +94,11 @@ public:
 	// Replaced the ShaderStageInfo with promises here so we can wait for compiles to finish.
 	Promise<VkShaderModule> *vertexShader = nullptr;
 	Promise<VkShaderModule> *fragmentShader = nullptr;
-	Promise<VkShaderModule> *geometryShader = nullptr;
 
 	// These are for pipeline creation failure logging.
 	// TODO: Store pointers to the string instead? Feels iffy but will probably work.
 	std::string vertexShaderSource;
 	std::string fragmentShaderSource;
-	std::string geometryShaderSource;
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 	VkVertexInputAttributeDescription attrs[8]{};
@@ -117,6 +115,8 @@ public:
 
 // Wrapped pipeline. Does own desc!
 struct VKRGraphicsPipeline {
+	VKRGraphicsPipeline(const VKRGraphicsPipeline &) = delete;
+	VKRGraphicsPipeline &operator=(const VKRGraphicsPipeline &) = delete;
 	VKRGraphicsPipeline(PipelineFlags flags, const char *tag) : flags_(flags), tag_(tag) {}
 	~VKRGraphicsPipeline();
 
@@ -197,9 +197,12 @@ static_assert(sizeof(PackedDescriptor::buffer) == 16, "PackedDescriptor should b
 // Note that we only support a single descriptor set due to compatibility with some ancient devices.
 // We should probably eventually give that up eventually.
 struct VKRPipelineLayout {
+	VKRPipelineLayout() = default;
+	VKRPipelineLayout(const VKRPipelineLayout &) = delete;
+	VKRPipelineLayout &operator=(const VKRPipelineLayout &) = delete;
 	~VKRPipelineLayout();
 
-	enum { MAX_DESC_SET_BINDINGS = 10 };
+	enum { MAX_DESC_SET_BINDINGS = 5 };
 	BindingType bindingTypes[MAX_DESC_SET_BINDINGS];
 
 	uint32_t bindingTypesCount = 0;
@@ -282,7 +285,7 @@ public:
 	// WARNING: desc must stick around during the lifetime of the pipeline! It's not enough to build it on the stack and drop it.
 	VKRGraphicsPipeline *CreateGraphicsPipeline(VKRGraphicsPipelineDesc *desc, PipelineFlags pipelineFlags, uint32_t variantBitmask, VkSampleCountFlagBits sampleCount, bool cacheLoad, const char *tag);
 
-	VKRPipelineLayout *CreatePipelineLayout(BindingType *bindingTypes, size_t bindingCount, bool geoShadersEnabled, const char *tag);
+	VKRPipelineLayout *CreatePipelineLayout(BindingType *bindingTypes, size_t bindingCount, const char *tag);
 	void DestroyPipelineLayout(VKRPipelineLayout *pipelineLayout);
 
 	void ReportBadStateForDraw();
@@ -303,7 +306,8 @@ public:
 	// return value and skip the draw if we're in a bad state. In that case, call ReportBadState.
 	// The old assert wasn't very helpful in figuring out what caused it anyway...
 	bool BindPipeline(VKRGraphicsPipeline *pipeline, PipelineFlags flags, VKRPipelineLayout *pipelineLayout) {
-		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == VKRStepType::RENDER && pipeline != nullptr);
+		_dbg_assert_(pipeline != nullptr);
+		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == VKRStepType::RENDER);
 		if (!curRenderStep_ || curRenderStep_->stepType != VKRStepType::RENDER) {
 			return false;
 		}
@@ -566,6 +570,7 @@ private:
 
 	void SanityCheckPassesOnAdd();
 	bool CreateSwapchainViewsAndDepth(VkCommandBuffer cmdInit, VulkanBarrierBatch *barriers, FrameDataShared &frameDataShared);
+	bool RecreatePresentationIfNeeded();
 
 	FrameDataShared frameDataShared_;
 
@@ -623,6 +628,8 @@ private:
 	std::condition_variable compileCond_;
 	std::mutex compileQueueMutex_;
 	std::vector<CompileQueueEntry> compileQueue_;
+	// Set while the compile thread turns a batch it took off compileQueue_ into tasks.
+	bool compileScheduling_ = false;
 
 	// Thread for measuring presentation delay.
 	std::thread presentWaitThread_;
@@ -644,5 +651,12 @@ private:
 	HistoryBuffer<FrameTimeData, FRAME_TIME_HISTORY_LENGTH> &frameTimeHistory_;
 
 	VKRPipelineLayout *curPipelineLayout_ = nullptr;
+
+	// Guards pipelineLayouts_, both the vector itself and the lifetime of the layouts in it.
+	// The list is added to by CreatePipelineLayout and erased from by the deferred callback queued by
+	// DestroyPipelineLayout, both of which run on the main thread, while the render thread walks it
+	// every frame in FlushDescriptors. Contention is negligible - layouts are only created and destroyed
+	// when a game starts or stops, and the lock is otherwise taken exactly twice per frame.
+	std::mutex pipelineLayoutsMutex_;
 	std::vector<VKRPipelineLayout *> pipelineLayouts_;
 };

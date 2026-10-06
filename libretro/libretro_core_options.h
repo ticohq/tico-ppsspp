@@ -436,10 +436,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       {
          { "No buffer", NULL },
          { "Up to 1",   NULL },
-         { "Up to 2",   NULL },
          { NULL, NULL },
       },
-      "Up to 2"
+      "Up to 1"
    },
    {
       "ppsspp_button_preference",
@@ -512,16 +511,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "Skip Buffer Effects",
       NULL,
       "Faster, but nothing may draw in some games.",
-      NULL,
-      "hacks",
-      BOOL_OPTIONS,
-      "disabled"
-   },
-   {
-      "ppsspp_disable_range_culling",
-      "Disable Culling",
-      NULL,
-      "",
       NULL,
       "hacks",
       BOOL_OPTIONS,

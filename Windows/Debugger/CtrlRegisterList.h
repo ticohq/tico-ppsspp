@@ -24,11 +24,13 @@ class CtrlRegisterList {
 	RECT rect;
 
 	int rowHeight;
+	int charWidth;
 	int selection = 0;
 	int category = 0;
+	int scrollRow_ = 0;
 
 	int oldSelection = 0;
-	
+
 	bool selecting = false;
 	bool hasFocus = false;
 	MIPSDebugInterface *cpu = nullptr;
@@ -41,6 +43,9 @@ class CtrlRegisterList {
 	u32 getSelectedRegValue(char *out, size_t size);
 	void copyRegisterValue();
 	void editRegisterValue();
+	int totalRows();
+	int visibleRows();
+	void scrollTo(int row);
 public:
 	CtrlRegisterList(HWND _wnd);
 	~CtrlRegisterList();
@@ -50,6 +55,7 @@ public:
 	static CtrlRegisterList * getFrom(HWND wnd);
 	
 	void onPaint(WPARAM wParam, LPARAM lParam);
+	void onVScroll(WPARAM wParam, LPARAM lParam);
 	void onKeyDown(WPARAM wParam, LPARAM lParam);
 	void onMouseDown(WPARAM wParam, LPARAM lParam, int button);
 	void onMouseUp(WPARAM wParam, LPARAM lParam, int button);

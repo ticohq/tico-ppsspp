@@ -60,12 +60,12 @@ const int *RiscVRegCache::GetAllocationOrder(MIPSLoc type, MIPSMap flags, int &c
 
 	if (type == MIPSLoc::REG) {
 		// X8 and X9 are the most ideal for static alloc because they can be used with compression.
-		// Otherwise we stick to saved regs - might not be necessary.
+		// After the compressible ones come the saved regs, which survive calls.
 		static const int allocationOrder[] = {
-			X8, X9, X12, X13, X14, X15, X5, X6, X7, X16, X17, X18, X19, X20, X21, X22, X23, X28, X29, X30, X31,
+			X8, X9, X12, X13, X14, X15, X18, X19, X20, X21, X22, X23, X5, X6, X7, X16, X17, X28, X29, X30, X31,
 		};
 		static const int allocationOrderStaticAlloc[] = {
-			X12, X13, X14, X15, X5, X6, X7, X16, X17, X21, X22, X23, X28, X29, X30, X31,
+			X12, X13, X14, X15, X21, X22, X23, X5, X6, X7, X16, X17, X28, X29, X30, X31,
 		};
 
 		if (jo_->useStaticAlloc) {
@@ -76,11 +76,13 @@ const int *RiscVRegCache::GetAllocationOrder(MIPSLoc type, MIPSMap flags, int &c
 			return allocationOrder;
 		}
 	} else if (type == MIPSLoc::FREG) {
-		// F8 through F15 are used for compression, so they are great.
+		// F8 through F15 are used for compression, so they are great. Then the saved regs (F18-F27),
+		// which survive calls.
 		static const int allocationOrder[] = {
 			F8, F9, F10, F11, F12, F13, F14, F15,
+			F18, F19, F20, F21, F22, F23, F24, F25, F26, F27,
 			F0, F1, F2, F3, F4, F5, F6, F7,
-			F16, F17, F18, F19, F20, F21, F22, F23, F24, F25, F26, F27, F28, F29, F30, F31,
+			F16, F17, F28, F29, F30, F31,
 		};
 
 		count = ARRAY_SIZE(allocationOrder);
@@ -134,17 +136,25 @@ void RiscVRegCache::EmitSaveStaticRegisters() {
 
 void RiscVRegCache::FlushBeforeCall() {
 	// These registers are not preserved by function calls.
-	// They match between X0 and F0, conveniently.
+	// X0-X4 are zero/ra/sp/gp/tp, which we never allocate, but F0-F4 (ft0-ft4) are caller-saved
+	// and we do allocate them - so the two don't line up and need separate loops.
 	for (int i = 5; i <= 7; ++i) {
 		FlushNativeReg(X0 + i);
-		FlushNativeReg(F0 + i);
 	}
 	for (int i = 10; i <= 17; ++i) {
 		FlushNativeReg(X0 + i);
-		FlushNativeReg(F0 + i);
 	}
 	for (int i = 28; i <= 31; ++i) {
 		FlushNativeReg(X0 + i);
+	}
+
+	for (int i = 0; i <= 7; ++i) {
+		FlushNativeReg(F0 + i);
+	}
+	for (int i = 10; i <= 17; ++i) {
+		FlushNativeReg(F0 + i);
+	}
+	for (int i = 28; i <= 31; ++i) {
 		FlushNativeReg(F0 + i);
 	}
 }

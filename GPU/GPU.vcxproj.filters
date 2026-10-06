@@ -51,6 +51,9 @@
     <ClInclude Include="Software\TransformUnit.h">
       <Filter>Software</Filter>
     </ClInclude>
+    <ClInclude Include="Software\GEMath.h">
+      <Filter>Software</Filter>
+    </ClInclude>
     <ClInclude Include="Common\VertexDecoderCommon.h">
       <Filter>Common</Filter>
     </ClInclude>
@@ -243,9 +246,6 @@
     <ClInclude Include="Debugger\GECommandTable.h">
       <Filter>Debugger</Filter>
     </ClInclude>
-    <ClInclude Include="Common\GeometryShaderGenerator.h">
-      <Filter>Common</Filter>
-    </ClInclude>
     <ClInclude Include="GPUCommonHW.h">
       <Filter>Common</Filter>
     </ClInclude>
@@ -262,6 +262,15 @@
       <Filter>Debugger</Filter>
     </ClInclude>
     <ClInclude Include="Common\DepthRaster.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="GPUStateSIMDUtil.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\VertexReader.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\ImageCommon.h">
       <Filter>Common</Filter>
     </ClInclude>
   </ItemGroup>
@@ -288,6 +297,9 @@
       <Filter>Software</Filter>
     </ClCompile>
     <ClCompile Include="Software\TransformUnit.cpp">
+      <Filter>Software</Filter>
+    </ClCompile>
+    <ClCompile Include="Software\GEMath.cpp">
       <Filter>Software</Filter>
     </ClCompile>
     <ClCompile Include="Common\VertexDecoderCommon.cpp">
@@ -494,9 +506,6 @@
     <ClCompile Include="Debugger\GECommandTable.cpp">
       <Filter>Debugger</Filter>
     </ClCompile>
-    <ClCompile Include="Common\GeometryShaderGenerator.cpp">
-      <Filter>Common</Filter>
-    </ClCompile>
     <ClCompile Include="Common\DepthBufferCommon.cpp">
       <Filter>Common</Filter>
     </ClCompile>
@@ -693,5 +702,8 @@
     <None Include="..\assets\shaders\vignette.fsh">
       <Filter>Shaders</Filter>
     </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="CMakeLists.txt" />
   </ItemGroup>
 </Project>

@@ -19,6 +19,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <unordered_map>
 
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
@@ -173,7 +174,6 @@ public:
 VkShaderStageFlagBits StageToVulkan(ShaderStage stage) {
 	switch (stage) {
 	case ShaderStage::Vertex: return VK_SHADER_STAGE_VERTEX_BIT;
-	case ShaderStage::Geometry: return VK_SHADER_STAGE_GEOMETRY_BIT;
 	case ShaderStage::Compute: return VK_SHADER_STAGE_COMPUTE_BIT;
 	case ShaderStage::Fragment: return VK_SHADER_STAGE_FRAGMENT_BIT;
 	}
@@ -193,10 +193,9 @@ public:
 		if (module_) {
 			VkShaderModule shaderModule = module_->BlockUntilReady();
 			vulkan_->Delete().QueueDeleteShaderModule(shaderModule);
-			vulkan_->Delete().QueueCallback([](VulkanContext *context, void *m) {
-				auto module = (Promise<VkShaderModule> *)m;
+			vulkan_->Delete().QueueCallback([module = module_](VulkanContext *context) {
 				delete module;
-			}, module_);
+			});
 		}
 	}
 	Promise<VkShaderModule> *Get() const { return module_; }
@@ -220,7 +219,7 @@ bool VKShaderModule::Compile(VulkanContext *vulkan, const uint8_t *data, size_t 
 	source_ = (const char *)data;
 	std::vector<uint32_t> spirv;
 	std::string errorMessage;
-	if (!GLSLtoSPV(vkstage_, source_.c_str(), GLSLVariant::VULKAN, spirv, &errorMessage)) {
+	if (!GLSLtoSPV(vkstage_, source_.c_str(), GLSLVariant::VULKAN, spirv, &errorMessage, &g_spirvCache)) {
 		WARN_LOG(Log::G3D, "Shader compile to module failed (%s): %s", tag_.c_str(), errorMessage.c_str());
 		return false;
 	}
@@ -333,6 +332,7 @@ public:
 	}
 	bool Create(VkCommandBuffer cmd, VulkanBarrierBatch *postBarriers, VulkanPushPool *pushBuffer, const TextureDesc &desc);
 	void Update(VkCommandBuffer cmd, VulkanBarrierBatch *postBarriers, VulkanPushPool *pushBuffer, const uint8_t *const *data, TextureCallback callback, int numLevels);
+	void UpdateRegions(VkCommandBuffer cmd, VulkanBarrierBatch *postBarriers, VulkanPushPool *pushBuffer, int level, const TextureRegionUpdate *regions, int numRegions);
 
 	~VKTexture() {
 		Destroy();
@@ -450,6 +450,7 @@ public:
 
 	void UpdateBuffer(Buffer *buffer, const uint8_t *data, size_t offset, size_t size, UpdateBufferFlags flags) override;
 	void UpdateTextureLevels(Texture *texture, const uint8_t **data, TextureCallback initDataCallback, int numLevels) override;
+	void UpdateTextureRegions(Texture *texture, int level, const TextureRegionUpdate *regions, int numRegions) override;
 
 	void CopyFramebufferImage(Framebuffer *src, int level, int x, int y, int z, Framebuffer *dst, int dstLevel, int dstX, int dstY, int dstZ, int width, int height, int depth, Aspect aspects, const char *tag) override;
 	bool BlitFramebuffer(Framebuffer *src, int srcX1, int srcY1, int srcX2, int srcY2, Framebuffer *dst, int dstX1, int dstY1, int dstX2, int dstY2, Aspect aspects, FBBlitFilter filter, const char *tag) override;
@@ -473,6 +474,7 @@ public:
 
 	void BindPipeline(Pipeline *pipeline) override {
 		curPipeline_ = (VKPipeline *)pipeline;
+		_dbg_assert_(curPipeline_->pipeline);
 	}
 
 	void BindVertexBuffer(Buffer *vertexBuffer, int offset) override {
@@ -598,6 +600,8 @@ private:
 	AutoRef<VKSamplerState> boundSamplers_[MAX_BOUND_TEXTURES];
 	VkImageView boundImageView_[MAX_BOUND_TEXTURES]{};
 	TextureBindFlags boundTextureFlags_[MAX_BOUND_TEXTURES]{};
+
+	mutable std::unordered_map<DataFormat, uint32_t> dataFormatSupportCache_;
 
 	VulkanPushPool *push_ = nullptr;
 
@@ -833,7 +837,7 @@ bool VKTexture::Create(VkCommandBuffer cmd, VulkanBarrierBatch *postBarriers, Vu
 	}
 	VulkanBarrierBatch barrier;
 	if (!vkTex_->CreateDirect(width_, height_, 1, mipLevels_, vulkanFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, usageBits, &barrier, swizzle)) {
-		ERROR_LOG(Log::G3D,  "Failed to create VulkanTexture: %dx%dx%d fmt %d, %d levels", width_, height_, depth_, (int)vulkanFormat, mipLevels_);
+		ERROR_LOG(Log::G3D,  "Failed to create VKTexture: %dx%dx%d fmt %s, %d levels, tag '%s'", width_, height_, depth_, VulkanFormatToString(vulkanFormat), mipLevels_, desc.tag);
 		return false;
 	}
 	barrier.Flush(cmd);
@@ -856,6 +860,37 @@ void VKTexture::Update(VkCommandBuffer cmd, VulkanBarrierBatch *postBarriers, Vu
 	vkTex_->PrepareForTransferDst(cmd, numLevels);
 	UpdateInternal(cmd, pushBuffer, data, initDataCallback, numLevels);
 	vkTex_->RestoreAfterTransferDst(numLevels, postBarriers);
+}
+
+void VKTexture::UpdateRegions(VkCommandBuffer cmd, VulkanBarrierBatch *postBarriers, VulkanPushPool *pushBuffer, int level, const TextureRegionUpdate *regions, int numRegions) {
+	VkFormat vulkanFormat = DataFormatToVulkan(format_);
+	int bpp = GetBpp(vulkanFormat);
+	_dbg_assert_(bpp != 0);
+	const int bytesPerPixel = bpp / 8;
+
+	// Only the level we're writing needs to change layout, the others stay sampleable.
+	vkTex_->PrepareForTransferDst(cmd, level + 1);
+
+	TextureCopyBatch batch;
+	batch.reserve(numRegions);
+	for (int i = 0; i < numRegions; i++) {
+		const TextureRegionUpdate &region = regions[i];
+		_dbg_assert_(region.w > 0 && region.h > 0);
+		const int srcStride = region.byteStride ? region.byteStride : region.w * bytesPerPixel;
+		const int dstStride = region.w * bytesPerPixel;
+
+		uint32_t offset;
+		VkBuffer buf;
+		uint8_t *dest = (uint8_t *)pushBuffer->Allocate((size_t)dstStride * region.h, 16, &buf, &offset);
+		_assert_(dest != nullptr);
+		for (int y = 0; y < region.h; y++) {
+			memcpy(dest + (size_t)dstStride * y, region.data + (size_t)srcStride * y, dstStride);
+		}
+		vkTex_->CopyBufferToMipLevelRegion(cmd, &batch, level, region.x, region.y, region.w, region.h, 0, buf, offset, region.w);
+	}
+	vkTex_->FinishCopyBatch(cmd, &batch);
+
+	vkTex_->RestoreAfterTransferDst(level + 1, postBarriers);
 }
 
 void VKTexture::UpdateInternal(VkCommandBuffer cmd, VulkanPushPool *pushBuffer, const uint8_t * const *data, TextureCallback initDataCallback, int numLevels) {
@@ -912,23 +947,26 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	: vulkan_(vulkan), renderManager_(vulkan, useRenderThread, frameTimeHistory_) {
 	shaderLanguageDesc_.Init(GLSL_VULKAN);
 
-	// Make sure that the surface has been initialized.
-	_dbg_assert_(vulkan->GetAvailablePresentModes().size() > 0);
+	// Make sure that the surface has been initialized. Doesn't apply when a pluggable presentation
+	// backend (see VulkanPresentation.h) is in use instead of a real swapchain/surface - there's no
+	// present mode concept there at all.
+	_dbg_assert_(vulkan->GetPresentation() || vulkan->GetAvailablePresentModes().size() > 0);
 
+	caps_.fragmentShaderFullPrecisionFloat = true;
 	caps_.coordConvention = CoordConvention::Vulkan;
 	caps_.setMaxFrameLatencySupported = true;
 	caps_.anisoSupported = vulkan->GetDeviceFeatures().enabled.standard.samplerAnisotropy != 0;
-	caps_.geometryShaderSupported = vulkan->GetDeviceFeatures().enabled.standard.geometryShader != 0;
 	caps_.tesselationShaderSupported = vulkan->GetDeviceFeatures().enabled.standard.tessellationShader != 0;
 	caps_.dualSourceBlend = vulkan->GetDeviceFeatures().enabled.standard.dualSrcBlend != 0;
 	caps_.depthClampSupported = vulkan->GetDeviceFeatures().enabled.standard.depthClamp != 0;
 
 	caps_.maxTextureSize = vulkan->GetPhysicalDeviceProperties().properties.limits.maxImageDimension2D;
-	caps_.maxClipPlanes = vulkan->GetPhysicalDeviceProperties().properties.limits.maxClipDistances;
-
-	// Comment out these two to test geometry shader culling on any geometry shader-supporting hardware.
-	caps_.clipDistanceSupported = vulkan->GetDeviceFeatures().enabled.standard.shaderClipDistance != 0;
-	caps_.cullDistanceSupported = vulkan->GetDeviceFeatures().enabled.standard.shaderCullDistance != 0;
+	if (vulkan->GetDeviceFeatures().enabled.standard.shaderClipDistance) {
+		caps_.maxClipDistances = vulkan->GetPhysicalDeviceProperties().properties.limits.maxClipDistances;
+	}
+	if (vulkan->GetDeviceFeatures().enabled.standard.shaderCullDistance) {
+		caps_.maxCullDistances = vulkan->GetPhysicalDeviceProperties().properties.limits.maxCullDistances;
+	}
 
 	caps_.framebufferBlitSupported = true;
 	caps_.framebufferCopySupported = true;
@@ -941,7 +979,6 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	caps_.texture3DSupported = true;
 	caps_.textureDepthSupported = true;
 	caps_.fragmentShaderInt32Supported = true;
-	caps_.textureNPOTFullySupported = true;
 	caps_.fragmentShaderDepthWriteSupported = true;
 	caps_.fragmentShaderStencilWriteSupported = vulkan->Extensions().EXT_shader_stencil_export;
 	caps_.blendMinMaxSupported = true;
@@ -949,21 +986,30 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	caps_.multiViewSupported = vulkan->GetDeviceFeatures().enabled.multiview.multiview != 0;
 	caps_.sampleRateShadingSupported = vulkan->GetDeviceFeatures().enabled.standard.sampleRateShading != 0;
 	caps_.textureSwizzleSupported = true;
+	caps_.samplerLodControl = true;
 
 	// Note that it must also be enabled on the pipelines (which we do).
 	caps_.provokingVertexLast = vulkan->GetDeviceFeatures().enabled.provokingVertex.provokingVertexLast;
 
+	caps_.fullScreenExclusiveSupported = vulkan->Extensions().EXT_full_screen_exclusive;
 	// Present mode stuff
 	caps_.presentMaxInterval = 1;
 	caps_.presentInstantModeChange = false;  // TODO: Fix this with some work in VulkanContext
 	caps_.presentModesSupported = (PresentMode)0;
 
-	for (auto mode : vulkan->GetAvailablePresentModes()) {
-		switch (mode) {
-		case VK_PRESENT_MODE_FIFO_KHR: caps_.presentModesSupported |= PresentMode::FIFO; break;
-		case VK_PRESENT_MODE_IMMEDIATE_KHR: caps_.presentModesSupported |= PresentMode::IMMEDIATE; break;
-		case VK_PRESENT_MODE_MAILBOX_KHR: caps_.presentModesSupported |= PresentMode::MAILBOX; break;
-		default: break;  // Ignore any other modes.
+	if (vulkan->GetPresentation()) {
+		// No real present modes exist in this model (the host, e.g. libretro, owns real presentation
+		// and controls its own timing) - we always hand back one finished frame at a time serially,
+		// which is closest in spirit to FIFO.
+		caps_.presentModesSupported = PresentMode::FIFO;
+	} else {
+		for (auto mode : vulkan->GetAvailablePresentModes()) {
+			switch (mode) {
+			case VK_PRESENT_MODE_FIFO_KHR: caps_.presentModesSupported |= PresentMode::FIFO; break;
+			case VK_PRESENT_MODE_IMMEDIATE_KHR: caps_.presentModesSupported |= PresentMode::IMMEDIATE; break;
+			case VK_PRESENT_MODE_MAILBOX_KHR: caps_.presentModesSupported |= PresentMode::MAILBOX; break;
+			default: break;  // Ignore any other modes.
+			}
 		}
 	}
 
@@ -1006,10 +1052,13 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	// Only support MSAA levels that have support for all three of color, depth, stencil.
 
 	bool multisampleAllowed = true;
+	bool turnip = false;
 
     caps_.deviceID = deviceProps.deviceID;
 
     if (caps_.vendor == GPUVendor::VENDOR_QUALCOMM) {
+		turnip = containsNoCase(deviceProps.deviceName, "turnip");
+
 		if (caps_.deviceID < 0x6000000) { // On sub 6xx series GPUs, disallow multisample.
 			INFO_LOG(Log::G3D, "Multisampling was disabled due to old driver version (Adreno)");
 			multisampleAllowed = false;
@@ -1025,7 +1074,7 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 		// Color write mask not masking write in certain scenarios with a depth test, see #10421.
 		// Known still present on driver 0x80180000 and Adreno 5xx (possibly more.)
 		// Known working on driver 0x801EA000 and Adreno 620.
-		if (deviceProps.driverVersion < 0x801EA000 || deviceProps.deviceID < 0x06000000)
+		if (!turnip && (deviceProps.driverVersion < 0x801EA000 || deviceProps.deviceID < 0x06000000))
 			bugs_.Infest(Bugs::COLORWRITEMASK_BROKEN_WITH_DEPTHTEST);
 
 		// Trying to follow all the rules in https://registry.khronos.org/vulkan/specs/1.3/html/vkspec.html#synchronization-pipeline-barriers-subpass-self-dependencies
@@ -1063,12 +1112,6 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 
 		if (deviceProps.driverVersion == 0xaa9c4b29) {
 			bugs_.Infest(Bugs::EMPTY_RENDERPASS_BROKEN_MALI);
-		}
-
-		// Older ARM devices have very slow geometry shaders, not worth using.  At least before 15.
-		// Also seen to cause weird issues on 18, so let's lump it in.
-		if (majorVersion <= 18 || isOldVersion) {
-			bugs_.Infest(Bugs::GEOMETRY_SHADERS_SLOW_OR_BROKEN);
 		}
 
 		// Attempt to workaround #17386
@@ -1138,7 +1181,7 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	for (int i = 0; i < MAX_BOUND_TEXTURES; ++i) {
 		bindings[1 + i] = BindingType::COMBINED_IMAGE_SAMPLER;
 	}
-	pipelineLayout_ = renderManager_.CreatePipelineLayout(bindings, ARRAY_SIZE(bindings), caps_.geometryShaderSupported, "thin3d_layout");
+	pipelineLayout_ = renderManager_.CreatePipelineLayout(bindings, ARRAY_SIZE(bindings), "thin3d_layout");
 
 	VkPipelineCacheCreateInfo pc{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
 	VkResult res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &pipelineCache_);
@@ -1242,8 +1285,10 @@ Pipeline *VKContext::CreateGraphicsPipeline(const PipelineDesc &desc, const char
 		vkshader->AddRef();
 		pipeline->deps.push_back(vkshader);
 		if (vkshader->GetStage() == ShaderStage::Vertex) {
+			_dbg_assert_(!gDesc.vertexShader);  // can't have two
 			gDesc.vertexShader = vkshader->Get();
 		} else if (vkshader->GetStage() == ShaderStage::Fragment) {
+			_dbg_assert_(!gDesc.fragmentShader);  // can't have two
 			gDesc.fragmentShader = vkshader->Get();
 		} else {
 			ERROR_LOG(Log::G3D, "Bad stage");
@@ -1297,6 +1342,7 @@ Pipeline *VKContext::CreateGraphicsPipeline(const PipelineDesc &desc, const char
 	}
 
 	pipeline->pipeline = renderManager_.CreateGraphicsPipeline(&gDesc, pipelineFlags, 1 << (size_t)RenderPassType::BACKBUFFER, VK_SAMPLE_COUNT_1_BIT, false, tag ? tag : "thin3d");
+	_dbg_assert_(pipeline->pipeline);
 
 	if (desc.uniformDesc) {
 		pipeline->dynamicUniformSize = (int)desc.uniformDesc->uniformBufferSize;
@@ -1386,6 +1432,23 @@ void VKContext::UpdateTextureLevels(Texture *texture, const uint8_t **data, Text
 
 	_dbg_assert_(numLevels <= tex->NumLevels());
 	tex->Update(initCmd, &renderManager_.PostInitBarrier(), push_, data, initDataCallback, numLevels);
+}
+
+void VKContext::UpdateTextureRegions(Texture *texture, int level, const TextureRegionUpdate *regions, int numRegions) {
+	if (numRegions <= 0) {
+		return;
+	}
+	VkCommandBuffer initCmd = renderManager_.GetInitCmd();
+	if (!push_ || !initCmd) {
+		// Too early! Fail.
+		ERROR_LOG(Log::G3D, "Can't update textures before the first frame has started.");
+		return;
+	}
+
+	VKTexture *tex = (VKTexture *)texture;
+
+	_dbg_assert_(level < tex->NumLevels());
+	tex->UpdateRegions(initCmd, &renderManager_.PostInitBarrier(), push_, level, regions, numRegions);
 }
 
 static inline void CopySide(VkStencilOpState &dest, const StencilSetup &src) {
@@ -1729,6 +1792,11 @@ std::vector<std::string> VKContext::GetExtensionList(bool device, bool enabledOn
 }
 
 uint32_t VKContext::GetDataFormatSupport(DataFormat fmt) const {
+	auto iter = dataFormatSupportCache_.find(fmt);
+	if (iter != dataFormatSupportCache_.end()) {
+		return iter->second;
+	}
+
 	VkFormat vulkan_format = DataFormatToVulkan(fmt);
 	VkFormatProperties properties;
 	vkGetPhysicalDeviceFormatProperties(vulkan_->GetCurrentPhysicalDevice(), vulkan_format, &properties);
@@ -1751,6 +1819,7 @@ uint32_t VKContext::GetDataFormatSupport(DataFormat fmt) const {
 	if (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) {
 		flags |= FMT_STORAGE_IMAGE;
 	}
+	dataFormatSupportCache_[fmt] = flags;
 	return flags;
 }
 
@@ -1769,10 +1838,9 @@ public:
 	}
 	~VKFramebuffer() {
 		_assert_msg_(buf_, "Null buf_ in VKFramebuffer - double delete?");
-		buf_->Vulkan()->Delete().QueueCallback([](VulkanContext *vulkan, void *fb) {
-			VKRFramebuffer *vfb = static_cast<VKRFramebuffer *>(fb);
-			delete vfb;
-		}, buf_);
+		buf_->Vulkan()->Delete().QueueCallback([buf = buf_](VulkanContext *vulkan) {
+			delete buf;
+		});
 		buf_ = nullptr;
 	}
 	VKRFramebuffer *GetFB() const { return buf_; }
@@ -1823,6 +1891,10 @@ bool VKContext::BlitFramebuffer(Framebuffer *srcfb, int srcX1, int srcY1, int sr
 
 bool VKContext::CopyFramebufferToMemory(Framebuffer *srcfb, Aspect aspects, int x, int y, int w, int h, Draw::DataFormat format, void *pixels, int pixelStride, ReadbackMode mode, const char *tag) {
 	VKFramebuffer *src = (VKFramebuffer *)srcfb;
+	if (!src && vulkan_->GetSwapchain() == VK_NULL_HANDLE) {
+		// No backbuffer to read, as in headless.
+		return false;
+	}
 
 	int aspectMask = 0;
 	if (aspects & Aspect::COLOR_BIT) aspectMask |= VK_IMAGE_ASPECT_COLOR_BIT;

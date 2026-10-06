@@ -53,19 +53,13 @@ enum {
 DrawEngineGLES::DrawEngineGLES(Draw::DrawContext *draw) : inputLayoutMap_(16), draw_(draw) {
 	render_ = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 
-	decOptions_.expandAllWeightsToFloat = false;
 	decOptions_.expand8BitNormalsToFloat = false;
 
 	InitDeviceObjects();
-
-	tessDataTransferGLES = new TessellationDataTransferGLES(render_);
-	tessDataTransfer = tessDataTransferGLES;
 }
 
 DrawEngineGLES::~DrawEngineGLES() {
 	DestroyDeviceObjects();
-
-	delete tessDataTransferGLES;
 }
 
 void DrawEngineGLES::DeviceLost() {
@@ -92,12 +86,11 @@ void DrawEngineGLES::InitDeviceObjects() {
 	std::vector<GLRInputLayout::Entry> entries;
 	entries.push_back({ ATTR_POSITION, 4, GL_FLOAT, GL_FALSE, offsetof(TransformedVertex, x) });
 	entries.push_back({ ATTR_TEXCOORD, 3, GL_FLOAT, GL_FALSE, offsetof(TransformedVertex, u) });
-	entries.push_back({ ATTR_COLOR0, 4, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color0) });
-	entries.push_back({ ATTR_COLOR1, 3, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color1) });
+	entries.push_back({ ATTR_COLOR0, 4, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color0_32) });
+	entries.push_back({ ATTR_COLOR1, 3, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color1_32) });
 	entries.push_back({ ATTR_NORMAL, 1, GL_FLOAT, GL_FALSE, offsetof(TransformedVertex, fog) });
 	softwareInputLayout_ = render_->CreateInputLayout(entries, stride);
 
-	draw_->SetInvalidationCallback(std::bind(&DrawEngineGLES::Invalidate, this, std::placeholders::_1));
 }
 
 void DrawEngineGLES::DestroyDeviceObjects() {
@@ -105,6 +98,7 @@ void DrawEngineGLES::DestroyDeviceObjects() {
 		return;
 	}
 	draw_->SetInvalidationCallback(InvalidationCallback());
+	invalidationCallbackInstalled_ = false;
 
 	// Beware: this could be called twice in a row, sometimes.
 	for (int i = 0; i < GLRenderManager::MAX_INFLIGHT_FRAMES; i++) {
@@ -135,6 +129,10 @@ void DrawEngineGLES::ClearInputLayoutMap() {
 
 void DrawEngineGLES::BeginFrame() {
 	DrawEngineCommon::BeginFrame();
+	if (!invalidationCallbackInstalled_) {
+		draw_->SetInvalidationCallback(std::bind(&DrawEngineGLES::Invalidate, this, std::placeholders::_1));
+		invalidationCallbackInstalled_ = true;
+	}
 
 	FrameData &frameData = frameData_[render_->GetCurFrame()];
 	frameData.pushIndex->Begin();
@@ -147,7 +145,6 @@ void DrawEngineGLES::EndFrame() {
 	FrameData &frameData = frameData_[render_->GetCurFrame()];
 	frameData.pushIndex->End();
 	frameData.pushVertex->End();
-	tessDataTransferGLES->EndFrame();
 }
 
 struct GlTypeInfo {
@@ -236,32 +233,54 @@ void DrawEngineGLES::Flush() {
 		numDrawVerts_ = 0;
 		numDrawInds_ = 0;
 		vertexCountInDrawCalls_ = 0;
+		expandedVertsInDrawCalls_ = 0;
+		numVertsToDecode_ = 0;
 		decodeVertsCounter_ = 0;
 		decodeIndsCounter_ = 0;
 		return;
 	}
 
-	bool textureNeedsApply = false;
-	if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
-		textureCache_->SetTexture();
-		gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
-		textureNeedsApply = true;
-	} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
-		// This catches the case of clearing a texture. (#10957)
-		gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
-	}
-
 	GEPrimitiveType prim = prevPrim_;
 
-	Shader *vshader = shaderManager_->ApplyVertexShader(CanUseHardwareTransform(prim), useHWTessellation_, dec_->VertexType(), decOptions_.expandAllWeightsToFloat, applySkinInDecode_ || !CanUseHardwareTransform(prim), &vsid);
+	bool useHWTransform = CanUseHardwareTransform(prim);
+	if (clipInfoFlags_ & ClipInfoFlags::Valid) {
+		if (clipInfoFlags_ & ClipInfoFlags::SoftClipCull) {
+			useHWTransform = false;
+		}
+	}
+	if (clipInfoFlags_ != lastClipInfoFlags_) {
+		ClipInfoFlags changed = (ClipInfoFlags)((u32)clipInfoFlags_ ^ (u32)lastClipInfoFlags_);
+		if (changed & (ClipInfoFlags::DepthClampFragment | ClipInfoFlags::MinMaxZDiscard)) {
+			gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE);
+		}
+		if (changed & ClipInfoFlags::FlatZ) {
+			gstate_c.Dirty(DIRTY_TEXTURE_PARAMS);
+		}
+		lastClipInfoFlags_ = clipInfoFlags_;
+	}
+
+	if (useHWTransform != lastUseHwTransform_) {
+		gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE);
+		lastUseHwTransform_ = useHWTransform;
+	}
 
 	GLRBuffer *vertexBuffer = nullptr;
 	GLRBuffer *indexBuffer = nullptr;
 	uint32_t vertexBufferOffset = 0;
 	uint32_t indexBufferOffset = 0;
 
-	if (vshader->UseHWTransform()) {
-		if (applySkinInDecode_ && (lastVType_ & GE_VTYPE_WEIGHT_MASK)) {
+	Shader *vshader = shaderManager_->ApplyVertexShader(useHWTransform, dec_->VertexType(), clipInfoFlags_, &vsid);
+	if (!vshader) {
+		// Both the requested shader and the software transform fallback failed to compile.
+		// Not much we can do here, let's skip drawing. Note that the failure is cached.
+		WARN_LOG_N_TIMES(novshader, 5, Log::G3D, "Skipping draw, no vertex shader");
+		goto bail;
+	}
+
+	useHWTransform = vshader->UseHWTransform();  // In case shader compilation failed and it fell back.
+
+	if (useHWTransform) {
+		if (lastVType_ & GE_VTYPE_WEIGHT_MASK) {
 			// If software skinning, we're predecoding into "decoded". So make sure we're done, then push that content.
 			DecodeVerts(dec_, decoded_);
 			uint32_t size = numDecodedVerts_ * dec_->GetDecVtxFmt().stride;
@@ -277,8 +296,8 @@ void DrawEngineGLES::Flush() {
 		int vertexCount;
 		int maxIndex;
 		bool useElements;
-		DecodeVerts(dec_, decoded_);
 		DecodeIndsAndGetData(&prim, &vertexCount, &maxIndex, &useElements, false);
+		gpuStats.perFrame.numVertsDrawn += vertexCount;
 
 		if (useElements) {
 			uint32_t esz = sizeof(uint16_t) * vertexCount;
@@ -295,21 +314,31 @@ void DrawEngineGLES::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
-		if (textureNeedsApply) {
-			textureCache_->ApplyTexture();
+		if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
+			TextureApplyResult textureResult = textureCache_->ApplyTexture(true);
+			textureCache_->ApplySampler(textureResult, clipInfoFlags_ & ClipInfoFlags::FlatZ, false);
+			gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
+		} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
+			// This catches the case of clearing a texture. (#10957)
+			gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
 		}
 
 		// Need to ApplyDrawState after ApplyTexture because depal can launch a render pass and that wrecks the state.
 		ApplyDrawState(prim);
 		ApplyDrawStateLate(false, 0);
 		
-		LinkedShader *program = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, framebufferManager_->UseBufferedRendering());
+		LinkedShader *program = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, clipInfoFlags_, false);
+		if (!program) {
+			// Failed to link. No program is bound, so drawing would use whatever was bound before.
+			goto bail;
+		}
+
 		GLRInputLayout *inputLayout = SetupDecFmtForDraw(dec_->GetDecVtxFmt());
 		if (useElements) {
 			render_->DrawIndexed(inputLayout,
 				vertexBuffer, vertexBufferOffset,
 				indexBuffer, indexBufferOffset,
-				glprim[prim], vertexCount, GL_UNSIGNED_SHORT);
+				glprim[prim], vertexCount, GL_UNSIGNED_SHORT, 1, maxIndex - 1);
 		} else {
 			render_->Draw(
 				inputLayout, vertexBuffer, vertexBufferOffset,
@@ -320,14 +349,7 @@ void DrawEngineGLES::Flush() {
 		}
 	} else {
 		PROFILE_THIS_SCOPE("soft");
-		const VertexDecoder *swDec = dec_;
-		if (swDec->nweights != 0) {
-			u32 withSkinning = lastVType_ | (1 << 26);
-			if (withSkinning != lastVType_) {
-				swDec = GetVertexDecoder(withSkinning);
-			}
-		}
-		DecodeVerts(swDec, decoded_);
+		DecodeVerts(dec_, decoded_);
 		int vertexCount = DecodeInds();
 
 		bool hasColor = (lastVType_ & GE_VTYPE_COL_MASK) != GE_VTYPE_COL_NONE;
@@ -337,33 +359,7 @@ void DrawEngineGLES::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
-		gpuStats.numUncachedVertsDrawn += vertexCount;
 		prim = IndexGenerator::GeneralPrim((GEPrimitiveType)drawInds_[0].prim);
-
-		u16 *inds = decIndex_;
-		SoftwareTransformResult result{};
-		// TODO: Keep this static?  Faster than repopulating?
-		SoftwareTransformParams params{};
-		params.decoded = decoded_;
-		params.transformed = transformed_;
-		params.transformedExpanded = transformedExpanded_;
-		params.fbman = framebufferManager_;
-		params.texCache = textureCache_;
-		params.allowClear = true;  // Clear in OpenGL respects scissor rects, so we'll use it.
-		params.allowSeparateAlphaClear = true;
-		params.flippedY = framebufferManager_->UseBufferedRendering();
-		params.usesHalfZ = false;
-
-		// We need correct viewport values in gstate_c already.
-		if (gstate_c.IsDirty(DIRTY_VIEWPORTSCISSOR_STATE)) {
-			ConvertViewportAndScissor(
-				framebufferManager_->GetDisplayLayoutConfigCopy(),
-				framebufferManager_->UseBufferedRendering(),
-				framebufferManager_->GetRenderWidth(), framebufferManager_->GetRenderHeight(),
-				framebufferManager_->GetTargetBufferWidth(), framebufferManager_->GetTargetBufferHeight(),
-				vpAndScissor_);
-			UpdateCachedViewportState(vpAndScissor_);
-		}
 
 		int maxIndex = numDecodedVerts_;
 
@@ -380,55 +376,58 @@ void DrawEngineGLES::Flush() {
 		// We could piggyback on the viewport transform below, but it gets complicated since it's different per-backend. Which we really
 		// should clean up one day...
 		if (useDepthRaster_) {
-			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, swDec, vertexCount);
+			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, dec_, vertexCount);
 		}
 
-		SoftwareTransform swTransform(params);
-
-		const Lin::Vec3 trans(gstate_c.vpXOffset, gstate_c.vpYOffset, gstate_c.vpZOffset);
-		const Lin::Vec3 scale(gstate_c.vpWidthScale, gstate_c.vpHeightScale, gstate_c.vpDepthScale);
-		const bool invertedY = gstate_c.vpHeight * (params.flippedY ? 1.0 : -1.0f) < 0;
-		swTransform.SetProjMatrix(gstate.projMatrix, gstate_c.vpWidth < 0, invertedY, trans, scale);
-
-		swTransform.Transform(prim, swDec->VertexType(), swDec->GetDecVtxFmt(), numDecodedVerts_, &result);
-		// Non-zero depth clears are unusual, but some drivers don't match drawn depth values to cleared values.
-		// Games sometimes expect exact matches (see #12626, for example) for equal comparisons.
-		if (result.action == SW_CLEAR && everUsedEqualDepth_ && gstate.isClearModeDepthMask() && result.depth > 0.0f && result.depth < 1.0f)
-			result.action = SW_NOT_READY;
-
-		if (textureNeedsApply) {
-			gstate_c.pixelMapped = result.pixelMapped;
+		bool textureNeedsApply = false;
+		TextureApplyResult textureResult;
+		if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
+			gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
 			gstate_c.dstSquared = false;
-			textureCache_->ApplyTexture();
+			textureResult = textureCache_->ApplyTexture(true);
+			textureNeedsApply = true;
+		} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
+			// This catches the case of clearing a texture. (#10957)
+			gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
+		}
+
+		u16 *inds = decIndex_;
+		SoftwareTransformResult result{};
+		SoftwareTransformParams params{};
+		params.everUsedEqualDepth = everUsedEqualDepth_;
+		params.decoded = decoded_;
+		params.transformed = transformed_;
+		params.transformedExpanded = transformedExpanded_;
+		params.allowClear = true;  // Clear in OpenGL respects scissor rects, so we'll use it.
+		params.allowSeparateAlphaClear = true;
+		params.clipInfoFlags = clipInfoFlags_;
+
+		const SoftwareTransformAction action = RunSoftwareTransform(params, prim, dec_->VertexType(), dec_->GetDecVtxFmt(), numDecodedVerts_, VERTEX_BUFFER_MAX, vertexCount, inds, RemainingIndices(inds), &result);
+		if (textureNeedsApply) {
+			textureCache_->ApplySampler(textureResult, clipInfoFlags_ & ClipInfoFlags::FlatZ, result.pixelMapped);
 			if (gstate_c.dstSquared) {
 				gstate_c.Dirty(DIRTY_BLEND_STATE);
 			}
-			gstate_c.pixelMapped = false;
 		}
 
 		// Need to ApplyDrawState after ApplyTexture because depal can launch a render pass and that wrecks the state.
 		ApplyDrawState(prim);
-
-		if (result.action == SW_NOT_READY)
-			swTransform.BuildDrawingParams(prim, vertexCount, swDec->VertexType(), inds, RemainingIndices(inds), numDecodedVerts_, VERTEX_BUFFER_MAX, &result);
-		if (result.setSafeSize)
-			framebufferManager_->SetSafeSize(result.safeWidth, result.safeHeight);
-
 		ApplyDrawStateLate(result.setStencil, result.stencilValue);
 
-		LinkedShader *linked = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, framebufferManager_->UseBufferedRendering());
+		LinkedShader *linked = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, clipInfoFlags_, result.pixelMapped);
 		if (!linked) {
 			// Not much we can do here. Let's skip drawing.
 			goto bail;
 		}
 
-		if (result.action == SW_DRAW_INDEXED) {
-			vertexBufferOffset = (uint32_t)frameData.pushVertex->Push(result.drawBuffer, numDecodedVerts_ * sizeof(TransformedVertex), 4, &vertexBuffer);
-			indexBufferOffset = (uint32_t)frameData.pushIndex->Push(inds, sizeof(uint16_t) * result.drawNumTrans, 2, &indexBuffer);
+		if (action == SW_DRAW_INDEXED) {
+			vertexBufferOffset = (uint32_t)frameData.pushVertex->Push(result.drawBuffer, result.drawVertexCount * sizeof(TransformedVertex), 4, &vertexBuffer);
+			indexBufferOffset = (uint32_t)frameData.pushIndex->Push(inds, sizeof(uint16_t) * result.drawIndexCount, 2, &indexBuffer);
 			render_->DrawIndexed(
 				softwareInputLayout_, vertexBuffer, vertexBufferOffset, indexBuffer, indexBufferOffset,
-				glprim[prim], result.drawNumTrans, GL_UNSIGNED_SHORT);
-		} else if (result.action == SW_CLEAR) {
+				glprim[prim], result.drawIndexCount, GL_UNSIGNED_SHORT, 1, result.drawVertexCount - 1);
+			gpuStats.perFrame.numVertsDrawn += result.drawIndexCount;
+		} else if (action == SW_CLEAR) {
 			u32 clearColor = result.color;
 			float clearDepth = result.depth;
 
@@ -460,81 +459,4 @@ bail:
 	ResetAfterDrawInline();
 	framebufferManager_->SetColorUpdated(gstate_c.skipDrawReason);
 	gpuCommon_->NotifyFlush();
-}
-
-// TODO: Refactor this to a single USE flag.
-bool DrawEngineGLES::SupportsHWTessellation() {
-	bool hasTexelFetch = gl_extensions.GLES3 || (!gl_extensions.IsGLES && gl_extensions.VersionGEThan(3, 3, 0)) || gl_extensions.EXT_gpu_shader4;
-	return hasTexelFetch && gstate_c.UseAll(GPU_USE_VERTEX_TEXTURE_FETCH | GPU_USE_TEXTURE_FLOAT | GPU_USE_INSTANCE_RENDERING);
-}
-
-bool DrawEngineGLES::UpdateUseHWTessellation(bool enable) const {
-	return enable && SupportsHWTessellation();
-}
-
-void TessellationDataTransferGLES::SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) {
-	bool hasColor = (vertType & GE_VTYPE_COL_MASK) != 0;
-	bool hasTexCoord = (vertType & GE_VTYPE_TC_MASK) != 0;
-
-	int size = size_u * size_v;
-	float *pos = new float[size * 4];
-	float *tex = hasTexCoord ? new float[size * 4] : nullptr;
-	float *col = hasColor ? new float[size * 4] : nullptr;
-	int stride = 4;
-
-	CopyControlPoints(pos, tex, col, stride, stride, stride, points, size, vertType);
-	// Removed the 1D texture support, it's unlikely to be relevant for performance.
-	// Control Points
-	if (prevSizeU < size_u || prevSizeV < size_v) {
-		prevSizeU = size_u;
-		prevSizeV = size_v;
-		if (data_tex[0])
-			renderManager_->DeleteTexture(data_tex[0]);
-		data_tex[0] = renderManager_->CreateTexture(GL_TEXTURE_2D, size_u * 3, size_v, 1, 1);
-		renderManager_->TextureImage(data_tex[0], 0, size_u * 3, size_v, 1, Draw::DataFormat::R32G32B32A32_FLOAT, nullptr, GLRAllocType::NONE, false);
-		renderManager_->FinalizeTexture(data_tex[0], 0, false);
-	}
-	renderManager_->BindTexture(TEX_SLOT_SPLINE_POINTS, data_tex[0]);
-	// Position
-	renderManager_->TextureSubImage(TEX_SLOT_SPLINE_POINTS, data_tex[0], 0, 0, 0, size_u, size_v, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)pos, GLRAllocType::NEW);
-	// Texcoord
-	if (hasTexCoord)
-		renderManager_->TextureSubImage(TEX_SLOT_SPLINE_POINTS, data_tex[0], 0, size_u, 0, size_u, size_v, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)tex, GLRAllocType::NEW);
-	// Color
-	if (hasColor)
-		renderManager_->TextureSubImage(TEX_SLOT_SPLINE_POINTS, data_tex[0], 0, size_u * 2, 0, size_u, size_v, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)col, GLRAllocType::NEW);
-
-	// Weight U
-	if (prevSizeWU < weights.size_u) {
-		prevSizeWU = weights.size_u;
-		if (data_tex[1])
-			renderManager_->DeleteTexture(data_tex[1]);
-		data_tex[1] = renderManager_->CreateTexture(GL_TEXTURE_2D, weights.size_u * 2, 1, 1, 1);
-		renderManager_->TextureImage(data_tex[1], 0, weights.size_u * 2, 1, 1, Draw::DataFormat::R32G32B32A32_FLOAT, nullptr, GLRAllocType::NONE, false);
-		renderManager_->FinalizeTexture(data_tex[1], 0, false);
-	}
-	renderManager_->BindTexture(TEX_SLOT_SPLINE_WEIGHTS_U, data_tex[1]);
-	renderManager_->TextureSubImage(TEX_SLOT_SPLINE_WEIGHTS_U, data_tex[1], 0, 0, 0, weights.size_u * 2, 1, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)weights.u, GLRAllocType::NONE);
-
-	// Weight V
-	if (prevSizeWV < weights.size_v) {
-		prevSizeWV = weights.size_v;
-		if (data_tex[2])
-			renderManager_->DeleteTexture(data_tex[2]);
-		data_tex[2] = renderManager_->CreateTexture(GL_TEXTURE_2D, weights.size_v * 2, 1, 1, 1);
-		renderManager_->TextureImage(data_tex[2], 0, weights.size_v * 2, 1, 1, Draw::DataFormat::R32G32B32A32_FLOAT, nullptr, GLRAllocType::NONE, false);
-		renderManager_->FinalizeTexture(data_tex[2], 0, false);
-	}
-	renderManager_->BindTexture(TEX_SLOT_SPLINE_WEIGHTS_V, data_tex[2]);
-	renderManager_->TextureSubImage(TEX_SLOT_SPLINE_WEIGHTS_V, data_tex[2], 0, 0, 0, weights.size_v * 2, 1, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)weights.v, GLRAllocType::NONE);
-}
-
-void TessellationDataTransferGLES::EndFrame() {
-	for (int i = 0; i < 3; i++) {
-		if (data_tex[i]) {
-			renderManager_->DeleteTexture(data_tex[i]);
-			data_tex[i] = nullptr;
-		}
-	}
-	prevSizeU = prevSizeV = prevSizeWU = prevSizeWV = 0;
 }

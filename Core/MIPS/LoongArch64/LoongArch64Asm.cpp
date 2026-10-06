@@ -134,7 +134,7 @@ void LoongArch64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
 	SaveStaticRegisters();
 	RestoreRoundingMode(true);
 	WriteDebugProfilerStatus(IRProfilerStatus::TIMER_ADVANCE);
-	QuickCallFunction(&CoreTiming::Advance, R20);
+	QuickCallFunctionR(&CoreTiming::Advance, CTXREG, R20);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 	ApplyRoundingMode(true);
 	LoadStaticRegisters();
@@ -186,7 +186,7 @@ void LoongArch64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
 	// No block found, let's jit.  We don't need to save static regs, they're all callee saved.
 	RestoreRoundingMode(true);
 	WriteDebugProfilerStatus(IRProfilerStatus::COMPILING);
-	QuickCallFunction(&MIPSComp::JitAt, R20);
+	QuickCallFunctionR(&MIPSComp::JitAt, CTXREG, R20);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 	ApplyRoundingMode(true);
 

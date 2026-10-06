@@ -125,7 +125,6 @@ void IndexGenerator::AddStrip(int numVerts, int indexOffset, bool clockwise) {
 		}
 	}
 	inds_ += numTris * 3;
-	// wind doesn't need to be updated, an even number of triangles have been drawn.
 #elif PPSSPP_ARCH(ARM_NEON)
 	uint16x8_t ibase8 = vdupq_n_u16(indexOffset);
 	const u16 *offsets = clockwise ? offsets_clockwise : offsets_counter_clockwise;
@@ -343,6 +342,7 @@ void IndexGenerator::TranslatePrim(int prim, int numInds, const u16_le *inds, in
 	}
 }
 
+// The PSP ignores the upper 16 bits of 32-bit indices. The u16 output drops them the same way.
 void IndexGenerator::TranslatePrim(int prim, int numInds, const u32_le *inds, int indexOffset, bool clockwise) {
 	switch (prim) {
 	case GE_PRIM_POINTS: TranslatePoints<u32_le>(numInds, inds, indexOffset); break;

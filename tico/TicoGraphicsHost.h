@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "Common/GraphicsContext.h"
+#include "Common/GPU/GraphicsContext.h"
 #include "Core/CoreParameter.h"
 
 class TicoGraphicsHost {

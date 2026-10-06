@@ -59,7 +59,6 @@
   </ImportGroup>
   <ImportGroup>
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-    <Import Project="$([Microsoft.Build.Utilities.ToolLocationHelper]::GetPlatformExtensionSDKLocation(`WindowsMobile, Version=$(WindowsTargetPlatformVersion)`, $(TargetPlatformIdentifier), $(TargetPlatformVersion),  $(SDKReferenceDirectoryRoot), $(SDKExtensionDirectoryRoot), $(SDKReferenceRegistryRoot)))\DesignTime\CommonConfiguration\Neutral\WindowsMobile.props" Condition="exists('$([Microsoft.Build.Utilities.ToolLocationHelper]::GetPlatformExtensionSDKLocation(`WindowsMobile, Version=$(WindowsTargetPlatformVersion)`, $(TargetPlatformIdentifier), $(TargetPlatformVersion),  $(SDKReferenceDirectoryRoot), $(SDKExtensionDirectoryRoot), $(SDKReferenceRegistryRoot)))\DesignTime\CommonConfiguration\Neutral\WindowsMobile.props')" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -320,10 +319,6 @@
       <FileType>Document</FileType>
       <Link>Content\%(Filename)%(Extension)</Link>
     </Image>
-    <None Include="..\Assets\vfpu\*.dat">
-      <DeploymentContent>true</DeploymentContent>
-      <Link>Content\vfpu\%(Filename)%(Extension)</Link>
-    </None>
     <None Include="..\Assets\upload\*.*">
       <DeploymentContent>true</DeploymentContent>
       <Link>Content\upload\%(Filename)%(Extension)</Link>

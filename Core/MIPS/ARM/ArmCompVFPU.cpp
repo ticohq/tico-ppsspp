@@ -19,6 +19,7 @@
 #if PPSSPP_ARCH(ARM)
 
 #include <cmath>
+#include <cstring>
 #include "Common/CPUDetect.h"
 #include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Math/math_util.h"
@@ -229,6 +230,13 @@ namespace MIPSComp
 		CONDITIONAL_DISABLE(LSU_VFPU);
 		CheckMemoryBreakpoint();
 
+		if (js.kernelMode) {
+			// Send all memory accesses to the interpreter in kernel mode.
+			// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+			DISABLE;
+			return;
+		}
+
 		s32 offset = (signed short)(op & 0xFFFC);
 		int vt = ((op >> 16) & 0x1f) | ((op & 3) << 5);
 		MIPSGPReg rs = _RS;
@@ -236,7 +244,7 @@ namespace MIPSComp
 		bool doCheck = false;
 		switch (op >> 26)
 		{
-		case 50: //lv.s  // VI(vt) = Memory::Read_U32(addr);
+		case 50: //lv.s
 			{
 				if (!gpr.IsImm(rs) && jo.cachePointers && g_Config.bFastMemory && (offset & 3) == 0 && offset < 0x400 && offset > -0x400) {
 					gpr.MapRegAsPointer(rs);
@@ -281,7 +289,7 @@ namespace MIPSComp
 			}
 			break;
 
-		case 58: //sv.s   // Memory::Write_U32(VI(vt), addr);
+		case 58: //sv.s
 			{
 				if (!gpr.IsImm(rs) && jo.cachePointers && g_Config.bFastMemory && (offset & 3) == 0 && offset < 0x400 && offset > -0x400) {
 					gpr.MapRegAsPointer(rs);
@@ -333,6 +341,13 @@ namespace MIPSComp
 	void ArmJit::Comp_SVQ(MIPSOpcode op) {
 		CONDITIONAL_DISABLE(LSU_VFPU);
 		CheckMemoryBreakpoint();
+
+		if (js.kernelMode) {
+			// Send all memory accesses to the interpreter in kernel mode.
+			// TODO: Do something faster - but it hardly matters, currently this is VSH-only.
+			DISABLE;
+			return;
+		}
 
 		int imm = (signed short)(op&0xFFFC);
 		int vt = (((op >> 16) & 0x1f)) | ((op&1) << 5);
@@ -897,6 +912,12 @@ namespace MIPSComp
 		case 21: // d[i] = logf(s[i])/log(2.0f); break; //vlog2
 			DISABLE;
 			break;
+		case 16: // vrcp
+		case 17: // vrsq
+		case 22: // vsqrt
+		case 24: // vnrcp
+			CompVV2OpCall(op);
+			return;
 		case 26: // d[i] = -sinf((float)M_PI_2 * s[i]); break; // vnsin
 			DISABLE;
 			break;
@@ -993,23 +1014,6 @@ namespace MIPSComp
 				VMOV(fpr.V(tempregs[i]), S1);
 				SetCC(CC_AL);
 				break;
-			case 16: // d[i] = 1.0f / s[i]; break; //vrcp
-				if (i == 0) {
-					MOVI2F(S0, 1.0f, SCRATCHREG1);
-				}
-				VDIV(fpr.V(tempregs[i]), S0, fpr.V(sregs[i]));
-				break;
-			case 17: // d[i] = 1.0f / sqrtf(s[i]); break; //vrsq
-				if (i == 0) {
-					MOVI2F(S0, 1.0f, SCRATCHREG1);
-				}
-				VSQRT(S1, fpr.V(sregs[i]));
-				VDIV(fpr.V(tempregs[i]), S0, S1);
-				break;
-			case 22: // d[i] = sqrtf(s[i]); break; //vsqrt
-				VSQRT(fpr.V(tempregs[i]), fpr.V(sregs[i]));
-				VABS(fpr.V(tempregs[i]), fpr.V(tempregs[i]));
-				break;
 			case 23: // d[i] = asinf(s[i] * (float)M_2_PI); break; //vasin
 				// Seems to work well enough but can disable if it becomes a problem.
 				// Should be easy enough to translate to NEON. There we can load all the constants
@@ -1037,12 +1041,6 @@ namespace MIPSComp
 				// Correction factor for PSP range. Could be baked into the calculation above?
 				MOVI2F(S1, 1.0f / (M_PI / 2), SCRATCHREG1);
 				VMUL(fpr.V(tempregs[i]), fpr.V(tempregs[i]), S1);
-				break;
-			case 24: // d[i] = -1.0f / s[i]; break; // vnrcp
-				if (i == 0) {
-					MOVI2F(S0, -1.0f, SCRATCHREG1);
-				}
-				VDIV(fpr.V(tempregs[i]), S0, fpr.V(sregs[i]));
 				break;
 			default:
 				ERROR_LOG(Log::JIT, "case missing in vfpu vv2op");
@@ -1318,11 +1316,13 @@ namespace MIPSComp
 		int vd = _VD;
 		int imm = (op >> 8) & 0x7F;
 		if (imm < VFPU_CTRL_MAX) {
-			fpr.MapRegV(vd);
+			fpr.MapRegV(vd, MAP_DIRTY | MAP_NOINIT);
 			if (imm == VFPU_CTRL_CC) {
 				gpr.MapReg(MIPS_REG_VFPUCC, 0);
 				VMOV(fpr.V(vd), gpr.R(MIPS_REG_VFPUCC));
 			} else {
+				// In case we have a saved prefix.
+				FlushPrefixV();
 				ADDI2R(SCRATCHREG1, CTXREG, offsetof(MIPSState, vfpuCtrl[0]) + imm * 4, SCRATCHREG2);
 				VLDR(fpr.V(vd), SCRATCHREG1, 0);
 			}
@@ -2104,6 +2104,75 @@ namespace MIPSComp
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
+	// Float bits in and out, so the calls look the same with softfp and hardfp.
+	static u32 CallWithBits(float (*func)(float), u32 x) {
+		float f;
+		memcpy(&f, &x, sizeof(f));
+		f = func(f);
+		memcpy(&x, &f, sizeof(x));
+		return x;
+	}
+
+	static u32 VRcpBits(u32 x) {
+		return CallWithBits(&vfpu_rcp, x);
+	}
+
+	static u32 VNRcpBits(u32 x) {
+		return CallWithBits(&vfpu_rcp, x) ^ 0x80000000;
+	}
+
+	static u32 VRSqrtBits(u32 x) {
+		return CallWithBits(&vfpu_rsqrt, x);
+	}
+
+	static u32 VSqrtBits(u32 x) {
+		return CallWithBits(&vfpu_sqrt, x);
+	}
+
+	// vrcp, vrsq, vsqrt and vnrcp call the exact functions. The lanes stay in S16-S19 across the
+	// calls (callee-saved), and the results are stored to the destinations' homes.
+	void ArmJit::CompVV2OpCall(MIPSOpcode op) {
+		// Like the interpreter, these apply the prefixes to the last lane only.
+		if (js.HasSPrefix() || (js.HasDPrefix() && GetVecSize(op) != V_Single)) {
+			DISABLE;
+		}
+
+		const int optype = (op >> 16) & 0x1f;
+		u32 (*func)(u32) = &VRcpBits;
+		if (optype == 17) {
+			func = &VRSqrtBits;
+		} else if (optype == 22) {
+			func = &VSqrtBits;
+		} else if (optype == 24) {
+			func = &VNRcpBits;
+		}
+
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		u8 sregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(dregs, sz, _VD);
+
+		gpr.FlushBeforeCall();
+		fpr.FlushAll();
+
+		for (int i = 0; i < n; i++) {
+			VLDR((ARMReg)(S16 + i), CTXREG, fpr.GetMipsRegOffsetV(sregs[i]));
+		}
+		for (int i = 0; i < n; i++) {
+			VMOV(R0, (ARMReg)(S16 + i));
+			// FlushBeforeCall saves R1.
+			QuickCallFunction(R1, func);
+			VMOV((ARMReg)(S16 + i), R0);
+		}
+		for (int i = 0; i < n; i++) {
+			VSTR((ARMReg)(S16 + i), CTXREG, fpr.GetMipsRegOffsetV(dregs[i]));
+		}
+
+		ApplyPrefixD(dregs, sz);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
+	}
+
 	static double SinCos(float angle) {
 		union { struct { float sin; float cos; }; double out; } sincos;
 		vfpu_sincos(angle, sincos.sin, sincos.cos);
@@ -2146,17 +2215,12 @@ namespace MIPSComp
 
 	// Very heavily used by FF:CC. Should be replaced by a fast approximation instead of
 	// calling the math library.
-	// Apparently this may not work on hardfp. I don't think we have any platforms using this though.
 	void ArmJit::Comp_VRot(MIPSOpcode op) {
 		// VRot probably doesn't accept prefixes anyway.
 		CONDITIONAL_DISABLE(VFPU_VEC);
 		if (js.HasUnknownPrefix()) {
 			DISABLE;
 		}
-
-#if PPSSPP_ARCH(ARM_HARDFP)
-		DISABLE;
-#endif
 
 		int vd = _VD;
 		int vs = _VS;
@@ -2181,6 +2245,16 @@ namespace MIPSComp
 		if (vd2 >= 0)
 			GetVectorRegs(dregs2, sz, vd2);
 		GetVectorRegs(&sreg, V_Single, vs);
+		// With the angle in a destination lane, the cosine is taken of what was written there.
+		// The assembler refuses that, so leave it to the interpreter, and don't pair such a vrot.
+		for (int i = 0; i < n; i++) {
+			if (dregs[i] == sreg) {
+				DISABLE;
+			}
+			if (vd2 >= 0 && dregs2[i] == sreg) {
+				vd2 = -1;
+			}
+		}
 
 		int imm = (op >> 16) & 0x1f;
 

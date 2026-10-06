@@ -18,7 +18,7 @@ namespace {
 
 constexpr const char *kSourceAssetsRoot = "romfs:/assets";
 constexpr const char *kAssetInstallMarker = "sdmc:/tico/system/psp/.tico_assets_version";
-constexpr const char *kAssetInstallVersion = "ppsspp-tico-assets-v3";
+constexpr const char *kAssetInstallVersion = "ppsspp-tico-assets-v4";
 constexpr size_t kCopyBufferSize = 64 * 1024;
 
 constexpr std::array<const char *, 4> kRomfsOnlyTicoAssets = {{

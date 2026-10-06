@@ -72,8 +72,9 @@ inline s64 cyclesToUs(s64 cycles) {
 	return (cycles * 1000000) / CPU_HZ;
 }
 
+class MIPSState;
+
 namespace CoreTiming {
-	typedef void (*MHzChangeCallback)();
 	typedef void (*TimedCallback)(u64 userdata, int cyclesLate);
 
 	struct EventType {
@@ -88,13 +89,25 @@ namespace CoreTiming {
 	};
 	typedef LinkedListItem<BaseEvent> Event;
 
-	void Init();
+	void Init(MIPSState *mips);
 	void Shutdown();
 
-	u64 GetTicks();
+	u64 GetTicks(MIPSState *mips);
 	u64 GetIdleTicks();
 	u64 GetGlobalTimeUs();
 	u64 GetGlobalTimeUsScaled();
+	// GetGlobalTimeUs() without the internal rebasing, so it's safe to call off the CPU thread -
+	// for the debugger's status poll. Same value, just doesn't help the next call along.
+	u64 PeekGlobalTimeUs();
+
+	// Debugger support (cpu.runUntilTime): break as soon as emulated time reaches this many
+	// microseconds. Advance() shortens its slice to land exactly on it rather than overshooting,
+	// so this stops at a reproducible point rather than "somewhere in the next frame". 0 clears it.
+	// Core_Break() clears it too, so a deadline can't outlive the run it belonged to.
+	// Deliberately in microseconds and not ticks: games change the CPU clock mid-run (CrossCraft
+	// Classic goes 222 -> 333MHz during startup), so a tick count fixed up front drifts.
+	void SetBreakDeadlineUs(u64 us);
+	u64 GetBreakDeadlineUs();
 
 	// Returns the event_type identifier.
 	int RegisterEvent(const char *name, TimedCallback callback);
@@ -112,25 +125,22 @@ namespace CoreTiming {
 	const Event *GetFirstEvent();
 	void RemoveEvent(int event_type);
 	bool IsScheduled(int event_type);
-	void Advance();
-	void ForceCheck();
+	void Advance(MIPSState *mips);
+	void ForceCheck(MIPSState *mips);
 
 	// Pretend that the main CPU has executed enough cycles to reach the next event.
-	void Idle(int maxIdle = 0);
+	void Idle(MIPSState *mips, int maxIdle = 0);
 
 	// Clear all pending events. This should ONLY be done on exit or state load.
 	void ClearPendingEvents();
 
 	void LogPendingEvents();
 
-	// Warning: not included in save states.
-	void RegisterMHzChangeCallback(MHzChangeCallback callback);
-
 	std::string GetScheduledEventsSummary();
 
 	void DoState(PointerWrap &p);
 
-	void SetClockFrequencyHz(int cpuHz);
+	bool SetClockFrequencyHz(int cpuHz);  // Return false if the frequency was already set.
 	int GetClockFrequencyHz();
 
 	// TODO: Add accessors?

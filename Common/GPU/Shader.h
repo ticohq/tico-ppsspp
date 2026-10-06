@@ -29,7 +29,6 @@ const char *ShaderLanguageAsString(ShaderLanguage lang);
 enum class ShaderStage {
 	Vertex,
 	Fragment,
-	Geometry,
 	Compute,
 };
 
@@ -57,6 +56,7 @@ struct ShaderLanguageDesc {
 	const char *vsOutPrefix = "";
 	const char *viewportYSign = "";
 
+	bool depthMinusOneToOne = false;
 	bool vertexIndex = false;
 	bool glslES30 = false;  // really glslES30Features. TODO: Clean this up.
 	bool bitwiseOps = false;

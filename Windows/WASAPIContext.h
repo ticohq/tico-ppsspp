@@ -103,15 +103,15 @@ private:
 	HANDLE audioEvent_ = nullptr;
 	std::thread audioThread_;
 	int curSamplesPerSec_ = 0;
+	std::atomic<int> curChannels_{0};  // Cached from format_->nChannels to avoid unsafe pointer access from audio thread
 	UINT32 defaultPeriodFrames_ = 0;
 	UINT32 fundamentalPeriodFrames_ = 0;
 	UINT32 minPeriodFrames_ = 0;
 	UINT32 maxPeriodFrames_ = 0;
 	std::atomic<bool> running_ = true;
 
-	// NOTE: these do not need to be atomic, due to usage.
-	UINT32 actualPeriodFrames_ = 0;  // may not be the requested.
-	UINT32 reportedBufferSize_ = 0;
+	std::atomic<UINT32> actualPeriodFrames_{0};  // may not be the requested.
+	std::atomic<UINT32> reportedBufferSize_{0};
 
 	Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator_;
 	DeviceNotificationClient notificationClient_;

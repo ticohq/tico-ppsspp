@@ -25,7 +25,6 @@ INCFLAGS += \
 	-I$(EXTDIR)/glslang \
 	-I$(EXTDIR)/glslang-build \
 	-I$(EXTDIR)/native \
-	-I$(EXTDIR)/minimp3 \
 	-I$(EXTDIR)/zlib \
 	-I$(EXTDIR)/cpu_features/include \
 	-I$(ZSTDDIR) \
@@ -173,9 +172,6 @@ else
 endif
 
 SOURCES_C += $(LIBRETRODIR)/ext/glew/glew.c
-
-SOURCES_CXX += \
-	$(EXTDIR)/minimp3/minimp3.cpp
 
 SOURCES_C += \
 	$(EXTDIR)/libkirk/AES.c \
@@ -450,6 +446,7 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Data/Format/ZIMSave.cpp \
 	$(COMMONDIR)/Data/Hash/Hash.cpp \
 	$(COMMONDIR)/Data/Text/I18n.cpp \
+	$(COMMONDIR)/Data/Text/Demangle.cpp \
 	$(COMMONDIR)/Data/Text/Parsers.cpp \
 	$(COMMONDIR)/Data/Text/WrapText.cpp \
 	$(COMMONDIR)/File/VFS/VFS.cpp \
@@ -491,6 +488,7 @@ SOURCES_CXX += \
 	$(COMMONDIR)/GPU/Vulkan/VulkanDescSet.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanProfiler.cpp \
 	$(COMMONDIR)/GPU/Vulkan/VulkanBarrier.cpp \
+	$(COMMONDIR)/GPU/Vulkan/VulkanGraphicsContext.cpp \
 	$(COMMONDIR)/Input/GestureDetector.cpp \
 	$(COMMONDIR)/Input/InputState.cpp \
 	$(COMMONDIR)/Math/curves.cpp \
@@ -516,18 +514,7 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Thread/ThreadUtil.cpp \
 	$(COMMONDIR)/Thread/ParallelLoop.cpp \
 	$(COMMONDIR)/Thread/ThreadManager.cpp \
-	$(COMMONDIR)/UI/AsyncImageFileView.cpp \
-	$(COMMONDIR)/UI/Root.cpp \
-	$(COMMONDIR)/UI/Screen.cpp \
-	$(COMMONDIR)/UI/UI.cpp \
-	$(COMMONDIR)/UI/Context.cpp \
-	$(COMMONDIR)/UI/UIScreen.cpp \
-	$(COMMONDIR)/UI/Notice.cpp \
-	$(COMMONDIR)/UI/Tween.cpp \
 	$(COMMONDIR)/UI/IconCache.cpp \
-	$(COMMONDIR)/UI/View.cpp \
-	$(COMMONDIR)/UI/ViewGroup.cpp \
-	$(COMMONDIR)/UI/ScrollView.cpp \
 	$(COMMONDIR)/System/Display.cpp \
 	$(COMMONDIR)/System/Request.cpp \
 	$(COMMONDIR)/System/OSD.cpp \
@@ -591,7 +578,6 @@ SOURCES_CXX += \
 	$(GPUDIR)/Debugger/Stepping.cpp \
 	$(GPUDIR)/Common/FragmentShaderGenerator.cpp \
 	$(GPUDIR)/Common/VertexShaderGenerator.cpp \
-	$(GPUDIR)/Common/GeometryShaderGenerator.cpp \
 	$(GPUDIR)/Common/TextureCacheCommon.cpp \
 	$(GPUDIR)/Common/TextureScalerCommon.cpp \
 	$(GPUDIR)/Common/SoftwareTransformCommon.cpp \
@@ -599,6 +585,7 @@ SOURCES_CXX += \
 	$(GPUDIR)/Common/DepthRaster.cpp \
 	$(GPUDIR)/Common/StencilCommon.cpp \
 	$(GPUDIR)/Software/TransformUnit.cpp \
+	$(GPUDIR)/Software/GEMath.cpp \
 	$(GPUDIR)/Software/SoftGpu.cpp \
 	$(GPUDIR)/Software/Sampler.cpp \
 	$(GPUDIR)/GeConstants.cpp \
@@ -736,14 +723,17 @@ SOURCES_CXX += \
 	       $(COREDIR)/Instance.cpp \
 	       $(COREDIR)/Debugger/Breakpoints.cpp \
 	       $(COREDIR)/Debugger/SymbolMap.cpp \
+	       $(COREDIR)/Debugger/LineInfo.cpp \
 	       $(COREDIR)/Debugger/MemBlockInfo.cpp \
 	       $(COREDIR)/Dialog/PSPDialog.cpp \
 	       $(COREDIR)/Dialog/PSPGamedataInstallDialog.cpp \
 	       $(COREDIR)/Dialog/PSPMsgDialog.cpp \
 	       $(COREDIR)/Dialog/PSPNetconfDialog.cpp \
 	       $(COREDIR)/Dialog/PSPNpSigninDialog.cpp \
+	       $(COREDIR)/Dialog/PSPHtmlViewerDialog.cpp \
 	       $(COREDIR)/Dialog/PSPOskDialog.cpp \
 	       $(COREDIR)/Dialog/PSPOskConstants.cpp \
+	       $(COREDIR)/Dialog/PSPPlaceholderDialog.cpp \
 	       $(COREDIR)/Dialog/PSPSaveDialog.cpp \
 	       $(COREDIR)/Dialog/PSPScreenshotDialog.cpp \
 	       $(COREDIR)/Dialog/SavedataParam.cpp \
@@ -780,6 +770,7 @@ SOURCES_CXX += \
 	       $(COREDIR)/HLE/sceAudiocodec.cpp \
 	       $(COREDIR)/HLE/sceAudioRouting.cpp \
 	       $(COREDIR)/HLE/sceCcc.cpp \
+	       $(COREDIR)/HLE/sceChkreg.cpp \
 	       $(COREDIR)/HLE/sceChnnlsv.cpp \
 	       $(COREDIR)/HLE/sceCtrl.cpp \
 	       $(COREDIR)/HLE/sceDeflt.cpp \
@@ -809,7 +800,9 @@ SOURCES_CXX += \
 	       $(COREDIR)/HLE/sceKernelThread.cpp \
 	       $(COREDIR)/HLE/sceKernelTime.cpp \
 	       $(COREDIR)/HLE/sceKernelVTimer.cpp \
+	       $(COREDIR)/HLE/sceVideocodec.cpp \
 	       $(COREDIR)/HLE/sceMpeg.cpp \
+	       $(COREDIR)/HLE/sceMpegbase.cpp \
 	       $(COREDIR)/HLE/sceNet.cpp \
 	       $(COREDIR)/HLE/sceNet_lib.cpp \
 	       $(COREDIR)/HLE/NetAdhocCommon.cpp \
@@ -821,6 +814,7 @@ SOURCES_CXX += \
 	       $(COREDIR)/HLE/proAdhocServer.cpp \
 	       $(COREDIR)/HLE/proAdhoc.cpp \
 	       $(COREDIR)/HLE/sceOpenPSID.cpp \
+	       $(COREDIR)/HLE/sceResmgr.cpp \
 	       $(COREDIR)/HLE/sceP3da.cpp \
 	       $(COREDIR)/HLE/sceMt19937.cpp \
 	       $(COREDIR)/HLE/sceMd5.cpp \
@@ -841,6 +835,7 @@ SOURCES_CXX += \
 	       $(COREDIR)/HLE/sceUsbCam.cpp \
 	       $(COREDIR)/HLE/sceUtility.cpp \
 	       $(COREDIR)/HLE/sceVaudio.cpp \
+	       $(COREDIR)/HLE/sceVshBridge.cpp \
 	       $(COREDIR)/HLE/scePspNpDrm_user.cpp \
 	       $(COREDIR)/HLE/sceNp.cpp \
 	       $(COREDIR)/HLE/sceNp2.cpp \
@@ -849,9 +844,11 @@ SOURCES_CXX += \
 	       $(COREDIR)/HW/BufferQueue.cpp \
 	       $(COREDIR)/HW/Camera.cpp \
 	       $(COREDIR)/HW/Display.cpp \
+	       $(COREDIR)/HW/GpioMMIO.cpp \
 	       $(COREDIR)/HW/SimpleAudioDec.cpp \
 	       $(COREDIR)/HW/Atrac3Standalone.cpp \
 	       $(COREDIR)/HW/AsyncIOManager.cpp \
+	       $(COREDIR)/HW/AvcDecoder.cpp \
 	       $(COREDIR)/HW/MediaEngine.cpp \
 	       $(COREDIR)/HW/MpegDemux.cpp \
 	       $(COREDIR)/HW/MemoryStick.cpp \
@@ -882,12 +879,12 @@ SOURCES_CXX += \
 	       $(COREDIR)/MIPS/MIPSDebugInterface.cpp \
 	       $(COREDIR)/MIPS/MIPSDis.cpp \
 	       $(COREDIR)/MIPS/MIPSDisVFPU.cpp \
-	       $(COREDIR)/MIPS/MIPSInt.cpp \
-	       $(COREDIR)/MIPS/MIPSIntVFPU.cpp \
+	       $(COREDIR)/MIPS/Interpreter.cpp \
+	       $(COREDIR)/MIPS/InterpreterDispatch.cpp \
+	       $(COREDIR)/MIPS/InterpreterVFPU.cpp \
 	       $(COREDIR)/MIPS/MIPSTables.cpp \
 	       $(COREDIR)/MIPS/MIPSStackWalk.cpp \
 	       $(COREDIR)/MIPS/MIPSVFPUUtils.cpp \
-	       $(COREDIR)/MIPS/MIPSVFPUFallbacks.cpp \
 	       $(COREDIR)/MIPS/MIPSTracer.cpp \
 	       $(COREDIR)/MemFault.cpp \
 	       $(COREDIR)/MemMap.cpp \
@@ -904,6 +901,9 @@ SOURCES_CXX += \
 	       $(COREDIR)/Util/BlockAllocator.cpp \
 	       $(COREDIR)/Util/MemStick.cpp \
 	       $(COREDIR)/Util/PPGeDraw.cpp \
+	       $(COREDIR)/Util/KL4E.cpp \
+	       $(COREDIR)/Util/PSARUnpack.cpp \
+	       $(COREDIR)/Util/PkgUnpack.cpp \
 	       $(COREDIR)/Util/RecentFiles.cpp \
 	       $(COREDIR)/Util/AudioFormat.cpp \
 	       $(COREDIR)/Util/PathUtil.cpp \
@@ -1043,7 +1043,7 @@ SOURCES_CXX += \
 	$(GPUDIR)/Vulkan/TextureCacheVulkan.cpp \
 	$(GPUDIR)/Vulkan/VulkanUtil.cpp \
 	$(LIBRETRODIR)/LibretroVulkanContext.cpp \
-	$(LIBRETRODIR)/libretro_vulkan.cpp
+	$(LIBRETRODIR)/LibretroVulkanPresentation.cpp
 
 
 ifeq ($(PLATFORM_EXT), win32)

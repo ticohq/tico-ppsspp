@@ -78,7 +78,7 @@ static const IRMeta irMeta[] = {
 	{ IROp::Ext16to32, "Ext16to32", "GG" },
 	{ IROp::ReverseBits, "ReverseBits", "GG" },
 	{ IROp::Load8, "Load8", "GGC" },
-	{ IROp::Load8Ext, "Load8", "GGC" },
+	{ IROp::Load8Ext, "Load8Ext", "GGC" },
 	{ IROp::Load16, "Load16", "GGC" },
 	{ IROp::Load16Ext, "Load16Ext", "GGC" },
 	{ IROp::Load32, "Load32", "GGC" },
@@ -105,10 +105,14 @@ static const IRMeta irMeta[] = {
 	{ IROp::FSqrt, "FSqrt", "FF" },
 	{ IROp::FSin, "FSin", "FF" },
 	{ IROp::FCos, "FCos", "FF" },
-	{ IROp::FSqrt, "FSqrt", "FF" },
 	{ IROp::FRSqrt, "FRSqrt", "FF" },
 	{ IROp::FRecip, "FRecip", "FF" },
 	{ IROp::FAsin, "FAsin", "FF" },
+	{ IROp::FVSqrt, "FVSqrt", "FF" },
+	{ IROp::FExp2, "FExp2", "FF" },
+	{ IROp::FLog2, "FLog2", "FF" },
+	{ IROp::FHalfToFloat, "FHalfToFloat", "FFI" },
+	{ IROp::FSinCos, "FSinCos", "2F" },
 	{ IROp::FNeg, "FNeg", "FF" },
 	{ IROp::FSign, "FSign", "FF" },
 	{ IROp::FAbs, "FAbs", "FF" },
@@ -127,6 +131,12 @@ static const IRMeta irMeta[] = {
 	{ IROp::FMovToGPR, "FMovToGPR", "GF" },
 	{ IROp::OptFMovToGPRShr8, "OptFMovToGPRShr8", "GF" },
 	{ IROp::OptFCvtSWFromGPR, "OptFCvtSWFromGPR", "FG" },
+	{ IROp::OptExitToConstIfEqElse, "OptExitIfEqElse", "CGG", IRFLAG_EXIT },
+	{ IROp::OptExitToConstIfNeqElse, "OptExitIfNeqElse", "CGG", IRFLAG_EXIT },
+	{ IROp::OptExitToConstIfGtZElse, "OptExitIfGtZElse", "CG", IRFLAG_EXIT },
+	{ IROp::OptExitToConstIfGeZElse, "OptExitIfGeZElse", "CG", IRFLAG_EXIT },
+	{ IROp::OptExitToConstIfLtZElse, "OptExitIfLtZElse", "CG", IRFLAG_EXIT },
+	{ IROp::OptExitToConstIfLeZElse, "OptExitIfLeZElse", "CG", IRFLAG_EXIT },
 	{ IROp::FpCondFromReg, "FpCondFromReg", "_G" },
 	{ IROp::FpCondToReg, "FpCondToReg", "G" },
 	{ IROp::FpCtrlFromReg, "FpCtrlFromReg", "_G" },
@@ -157,8 +167,6 @@ static const IRMeta irMeta[] = {
 	{ IROp::Vec4Unpack8To32, "Vec4Unpack8To32", "VF" },
 	{ IROp::Vec4DuplicateUpperBitsAndShift1, "Vec4DuplicateUpperBitsAndShift1", "VV" },
 
-	{ IROp::Vec4ClampToZero, "Vec4ClampToZero", "VV" },
-	{ IROp::Vec2ClampToZero, "Vec2ClampToZero", "22" },
 	{ IROp::Vec4Pack32To8, "Vec4Pack32To8", "FV" },
 	{ IROp::Vec4Pack31To8, "Vec4Pack31To8", "FV" },
 	{ IROp::Vec2Pack32To16, "Vec2Pack32To16", "F2" },
@@ -176,6 +184,7 @@ static const IRMeta irMeta[] = {
 	{ IROp::ExitToConstIfLtZ, "ExitIfLtZ", "CG", IRFLAG_EXIT },
 	{ IROp::ExitToReg, "ExitToReg", "_G", IRFLAG_EXIT },
 	{ IROp::Syscall, "Syscall", "_C", IRFLAG_EXIT },
+	{ IROp::SyscallUnresolved, "SyscallUnresolved", "C", IRFLAG_EXIT },
 	{ IROp::Break, "Break", "", IRFLAG_EXIT },
 	{ IROp::SetPC, "SetPC", "_G" },
 	{ IROp::SetPCConst, "SetPC", "_C" },
@@ -206,31 +215,35 @@ void InitIR() {
 	}
 }
 
-void IRWriter::Write(IROp op, u8 dst, u8 src1, u8 src2) {
+void IRWriter::Write(IROp op, u8 dst, u8 src1, u8 src2, u32 constant) {
 	IRInst inst;
 	inst.op = op;
 	inst.dest = dst;
 	inst.src1 = src1;
 	inst.src2 = src2;
-	inst.constant = nextConst_;
+	inst.constant = constant;
 	insts_.push_back(inst);
+}
 
-	nextConst_ = 0;
+void IRWriter::WriteFC(IROp op, u8 dst, u8 src1, u8 src2, float fconstant) {
+	u32 constant;
+	memcpy(&constant, &fconstant, sizeof(u32));
+
+	IRInst inst;
+	inst.op = op;
+	inst.dest = dst;
+	inst.src1 = src1;
+	inst.src2 = src2;
+	inst.constant = constant;
+	insts_.push_back(inst);
 }
 
 void IRWriter::WriteSetConstant(u8 dst, u32 value) {
-	Write(IROp::SetConst, dst, AddConstant(value));
+	Write(IROp::SetConst, dst, 0, 0, value);
 }
 
-int IRWriter::AddConstant(u32 value) {
-	nextConst_ = value;
-	return 255;
-}
-
-int IRWriter::AddConstantFloat(float value) {
-	u32 val;
-	memcpy(&val, &value, 4);
-	return AddConstant(val);
+void IRWriter::WriteSetConstantFloat(u8 dst, float value) {
+	WriteFC(IROp::SetConstF, dst, 0, 0, value);
 }
 
 void IRWriter::ReplaceConstant(size_t instNumber, u32 newConstant) {

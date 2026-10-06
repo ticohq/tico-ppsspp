@@ -153,7 +153,12 @@ Arm64JitBackend::LoadStoreArg Arm64JitBackend::PrepareSrc1Address(IRInst inst) {
 			MOVI2R(SCRATCH1, imm);
 			addrArg.regOffset = SCRATCH1;
 			addrArg.useRegisterOffset = true;
-			addrArg.signExtendRegOffset = true;
+			// Careful: the register offset is only the W half, extended into the 64-bit base.
+			// A negative imm here is a real displacement from a pointerified register, so it
+			// has to be sign extended. A positive one may be a full 32-bit address off
+			// MEMBASEREG with the top bit set, which we un-sign-extended above - SXTW would
+			// just make it negative again and point us ~2GB below the memory view.
+			addrArg.signExtendRegOffset = imm < 0;
 		}
 	}
 
@@ -195,9 +200,70 @@ void Arm64JitBackend::CompIR_CondStore(IRInst inst) {
 	}
 }
 
+bool Arm64JitBackend::TryCompileLoadStorePair(IRInst inst) {
+	if (compilingIndex_ + 1 >= compilingCount_ || inst.src1 == MIPS_REG_ZERO)
+		return false;
+	const IRInst next = compilingInsts_[compilingIndex_ + 1];
+	if (next.op != inst.op || next.src1 != inst.src1)
+		return false;
+	const int32_t offset = (int32_t)inst.constant;
+	const int32_t nextOffset = (int32_t)next.constant;
+	if (nextOffset != offset + 4 && nextOffset != offset - 4)
+		return false;
+	// The pair's scaled 7-bit signed offset.
+	const int32_t low = std::min(offset, nextOffset);
+	if ((low & 3) != 0 || low < -256 || low > 252)
+		return false;
+	// The base must be usable as a pointer.
+	if (!regs_.IsGPRMappedAsPointer(inst.src1) && (!jo.cachePointers || regs_.IsGPRClobbered(inst.src1)))
+		return false;
+
+	const bool isLoad = inst.op == IROp::Load32 || inst.op == IROp::LoadFloat;
+	const bool isFloat = inst.op == IROp::LoadFloat || inst.op == IROp::StoreFloat;
+	// A load may not change the base, and an LDP can't write one register twice.
+	if (isLoad && (next.dest == inst.dest || (!isFloat && (inst.dest == inst.src1 || next.dest == inst.src1))))
+		return false;
+	// Nor can a stored value be the base, which is mapped as a pointer.
+	if (!isLoad && !isFloat && (inst.src3 == inst.src1 || next.src3 == inst.src1))
+		return false;
+
+	const IRReg regLow = offset < nextOffset ? inst.dest : next.dest;
+	const IRReg regHigh = offset < nextOffset ? next.dest : inst.dest;
+	if (isFloat) {
+		regs_.SpillLockFPR(regLow, regHigh);
+		regs_.SpillLockGPR(inst.src1);
+	} else {
+		regs_.SpillLockGPR(inst.src1, regLow, regHigh);
+	}
+	ARM64Reg base = regs_.MapGPRAsPointer(inst.src1);
+
+	if (isFloat) {
+		MIPSMap flags = isLoad ? MIPSMap::NOINIT : MIPSMap::INIT;
+		regs_.MapFPR(regLow, flags);
+		regs_.MapFPR(regHigh, flags);
+		if (isLoad)
+			fp_.LDP(32, INDEX_SIGNED, regs_.F(regLow), regs_.F(regHigh), base, low);
+		else
+			fp_.STP(32, INDEX_SIGNED, regs_.F(regLow), regs_.F(regHigh), base, low);
+	} else if (isLoad) {
+		regs_.MapGPR(regLow, MIPSMap::NOINIT);
+		regs_.MapGPR(regHigh, MIPSMap::NOINIT);
+		LDP(INDEX_SIGNED, regs_.R(regLow), regs_.R(regHigh), base, low);
+	} else {
+		ARM64Reg valueLow = regs_.MapGPR(regLow);
+		ARM64Reg valueHigh = regs_.MapGPR(regHigh);
+		STP(INDEX_SIGNED, valueLow, valueHigh, base, low);
+	}
+
+	skipNextInst_ = true;
+	return true;
+}
+
 void Arm64JitBackend::CompIR_FLoad(IRInst inst) {
 	CONDITIONAL_DISABLE;
 
+	if (inst.op == IROp::LoadFloat && TryCompileLoadStorePair(inst))
+		return;
 	LoadStoreArg addrArg = PrepareSrc1Address(inst);
 
 	switch (inst.op) {
@@ -221,6 +287,8 @@ void Arm64JitBackend::CompIR_FLoad(IRInst inst) {
 void Arm64JitBackend::CompIR_FStore(IRInst inst) {
 	CONDITIONAL_DISABLE;
 
+	if (inst.op == IROp::StoreFloat && TryCompileLoadStorePair(inst))
+		return;
 	LoadStoreArg addrArg = PrepareSrc1Address(inst);
 
 	switch (inst.op) {
@@ -244,6 +312,8 @@ void Arm64JitBackend::CompIR_FStore(IRInst inst) {
 void Arm64JitBackend::CompIR_Load(IRInst inst) {
 	CONDITIONAL_DISABLE;
 
+	if (inst.op == IROp::Load32 && TryCompileLoadStorePair(inst))
+		return;
 	regs_.SpillLockGPR(inst.dest, inst.src1);
 	LoadStoreArg addrArg = PrepareSrc1Address(inst);
 	// With NOINIT, MapReg won't subtract MEMBASEREG even if dest == src1.
@@ -340,6 +410,8 @@ void Arm64JitBackend::CompIR_LoadShift(IRInst inst) {
 void Arm64JitBackend::CompIR_Store(IRInst inst) {
 	CONDITIONAL_DISABLE;
 
+	if (inst.op == IROp::Store32 && TryCompileLoadStorePair(inst))
+		return;
 	regs_.SpillLockGPR(inst.src3, inst.src1);
 	LoadStoreArg addrArg = PrepareSrc1Address(inst);
 

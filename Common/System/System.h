@@ -18,6 +18,7 @@
 
 enum SystemPermission {
 	SYSTEM_PERMISSION_STORAGE,
+	SYSTEM_PERMISSION_LOCAL_NETWORK,
 };
 
 enum PermissionStatus {
@@ -45,7 +46,6 @@ enum {
 
 enum class LaunchUrlType {
 	BROWSER_URL,
-	MARKET_URL,
 	EMAIL_ADDRESS,
 	LOCAL_FILE,
 	LOCAL_FOLDER,  // Shows the folder. Not supported on all systems of course.
@@ -85,11 +85,6 @@ enum class SystemRequestType {
 	GRAPHICS_BACKEND_FAILED_ALERT,
 	CREATE_GAME_SHORTCUT,
 	SHOW_FILE_IN_FOLDER,
-
-	// Commonly ignored, used when automated tests generate output.
-	SEND_DEBUG_OUTPUT,
-	// Note: height specified as param3, width based on param1.size() / param3.
-	SEND_DEBUG_SCREENSHOT,
 
 	NOTIFY_UI_EVENT,  // Used to manage events that are useful for popup virtual keyboards.
 	SET_KEEP_SCREEN_BRIGHT,
@@ -155,6 +150,10 @@ enum SystemProperty {
 	SYSPROP_HAS_ADDITIONAL_STORAGE,
 	SYSPROP_ADDITIONAL_STORAGE_DIRS,
 	SYSPROP_TEMP_DIRS,
+	
+	SYSPROP_CAN_GET_FREE_SPACE_FAST,
+
+	SYSPROP_IS_HEADLESS,
 
 	SYSPROP_HAS_FILE_BROWSER,
 	SYSPROP_HAS_FOLDER_BROWSER,
@@ -171,6 +170,7 @@ enum SystemProperty {
 
 	SYSPROP_CAN_CREATE_SHORTCUT,
 	SYSPROP_CAN_SHOW_FILE,
+	SYSPROP_CAN_LAUNCH_URL,  // System_LaunchUrl can open a web page.
 
 	SYSPROP_SUPPORTS_HTTPS,
 
@@ -220,8 +220,6 @@ enum SystemProperty {
 
 	SYSPROP_KEYBOARD_LAYOUT,
 
-	SYSPROP_SKIP_UI,
-
 	SYSPROP_USER_DOCUMENTS_DIR,
 
 	// iOS app store limitation: The documents directory should be the only browsable directory.
@@ -242,9 +240,12 @@ enum SystemProperty {
 	SYSPROP_USE_APP_STORE,
 	SYSPROP_SUPPORTS_SHARE_TEXT,
 
+	SYSPROP_CAN_RESTRICT_ORIENTATION,
+
 	SYSPROP_INSTALLER_NAME,  // Useful on Android to check if we were installed from the play store.
 };
 
+// NOTE: Unlike requests or UIMessage, these are synchronous!
 enum class SystemNotification {
 	UI,
 	MEM_VIEW,
@@ -268,6 +269,8 @@ enum class SystemNotification {
 	AUDIO_MODE_CHANGED,
 	APP_SWITCH_MODE_CHANGED,
 	PAD_STATE_CHANGED,
+	CONFIG_LOADED,
+	BEFORE_CONFIG_SAVE_ON_EXIT,
 };
 
 // I guess it's not super great architecturally to centralize this, since it's not general - but same with a lot of

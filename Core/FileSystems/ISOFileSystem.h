@@ -58,6 +58,8 @@ public:
 	void Describe(char *buf, size_t size) const override { snprintf(buf, size, "ISO"); }  // TODO: Ask the fileLoader about the origins
 
 	std::shared_ptr<BlockDevice> GetBlockDevice() override { return blockDevice; }
+
+	const std::string &Error() const { return errorString_; }
 private:
 	struct TreeEntry {
 		~TreeEntry();
@@ -70,6 +72,10 @@ private:
 		u32 startingPosition = 0;
 		s64 size = 0;
 		bool isDirectory = false;
+		// The date/time from the ISO9660 directory record, as Unix UTC seconds (0 if there
+		// wasn't a usable one). ISO9660 only has the one timestamp per file, so it gets
+		// reported as all three of atime/ctime/mtime.
+		s64 recordTime = 0;
 
 		u32 startsector = 0;
 		u32 dirsize = 0;
@@ -91,12 +97,13 @@ private:
 
 	typedef std::map<u32, OpenFileEntry> EntryMap;
 	EntryMap entries;
-	IHandleAllocator *hAlloc;
-	TreeEntry *treeroot;
+	IHandleAllocator *hAlloc = nullptr;
+	TreeEntry *treeroot = nullptr;
 	std::shared_ptr<BlockDevice> blockDevice;
-	mutable u32 lastReadBlock_;
+	mutable u32 lastReadBlock_ = 0;
 
-	TreeEntry entireISO;
+	TreeEntry entireISO{};
+	std::string errorString_;
 
 	void ReadDirectory(TreeEntry *root) const;
 	const TreeEntry *GetFromPath(std::string_view path, bool catchError = true);

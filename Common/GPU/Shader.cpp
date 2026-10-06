@@ -20,7 +20,6 @@ const char *ShaderStageAsString(ShaderStage stage) {
 	switch (stage) {
 	case ShaderStage::Fragment: return "Fragment";
 	case ShaderStage::Vertex: return "Vertex";
-	case ShaderStage::Geometry: return "Geometry";
 	case ShaderStage::Compute: return "Compute";
 	default: return "(unknown)";
 	}
@@ -50,6 +49,7 @@ void ShaderLanguageDesc::Init(ShaderLanguage lang) {
 		lastFragData = nullptr;
 		gles = false;
 		forceMatrix4x4 = true;
+		depthMinusOneToOne = true;
 		break;
 	case GLSL_3xx:
 		// Just used in the shader test.
@@ -67,6 +67,7 @@ void ShaderLanguageDesc::Init(ShaderLanguage lang) {
 		gles = true;
 		forceMatrix4x4 = true;
 		glslES30 = true;
+		depthMinusOneToOne = true;
 		break;
 	case GLSL_VULKAN:
 		fragColor0 = "fragColor0";
@@ -86,6 +87,7 @@ void ShaderLanguageDesc::Init(ShaderLanguage lang) {
 		forceMatrix4x4 = false;
 		coefsFromBuffers = true;
 		vertexIndex = true;
+		depthMinusOneToOne = false;
 		break;
 	case HLSL_D3D11:
 		fragColor0 = "outfragment.target";
@@ -107,6 +109,7 @@ void ShaderLanguageDesc::Init(ShaderLanguage lang) {
 		coefsFromBuffers = true;
 		vsOutPrefix = "Out.";
 		viewportYSign = "-";
+		depthMinusOneToOne = false;
 		break;
 	}
 }

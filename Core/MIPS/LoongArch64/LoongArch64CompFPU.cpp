@@ -80,6 +80,11 @@ void LoongArch64JitBackend::CompIR_FCondAssign(IRInst inst) {
 	CONDITIONAL_DISABLE;
 
 	regs_.Map(inst);
+
+	// Allocate this before the branch below. Allocating can spill a register, and that store
+	// would then sit on the unordered-only path while the regcache believes it always ran.
+	LoongArch64Reg isSrc1LowerReg = regs_.GetAndLockTempGPR();
+
 	FCMP_COND_S(FCC0, regs_.F(inst.src1), regs_.F(inst.src2), LoongArch64Fcond::CUN);
 	MOVCF2GR(SCRATCH1, FCC0);
 	FixupBranch unordered = BNEZ(SCRATCH1);
@@ -109,7 +114,6 @@ void LoongArch64JitBackend::CompIR_FCondAssign(IRInst inst) {
 	AND(R_RA, SCRATCH1, SCRATCH2);
 	SRLI_W(R_RA, R_RA, 31);
 
-	LoongArch64Reg isSrc1LowerReg = regs_.GetAndLockTempGPR();
 	SLT(isSrc1LowerReg, SCRATCH1, SCRATCH2);
 	// Flip the flag (to reverse the min/max) based on if both were negative.
 	XOR(isSrc1LowerReg, isSrc1LowerReg, R_RA);
@@ -154,10 +158,10 @@ void LoongArch64JitBackend::CompIR_FAssign(IRInst inst) {
 	case IROp::FSign:
 	{
 		regs_.Map(inst);
-		// Check if it's negative zero, either 0x20/0x200 is zero.
+		// Zero or a denormal signs as zero: 0x20/0x200 are the zeros, 0x10/0x100 the subnormals.
 		FCLASS_S(SCRATCHF1, regs_.F(inst.src1));
 		MOVFR2GR_S(SCRATCH1, SCRATCHF1);
-		ANDI(SCRATCH1, SCRATCH1, 0x220);
+		ANDI(SCRATCH1, SCRATCH1, 0x330);
 		SLTUI(SCRATCH1, SCRATCH1, 1);
 		// Okay, it's zero if zero, 1 otherwise.  Convert 1 to a constant 1.0.
 		// Probably non-zero is the common case, so we make that the straight line.
@@ -221,7 +225,13 @@ void LoongArch64JitBackend::CompIR_FCvt(IRInst inst) {
 
 	switch (inst.op) {
 	case IROp::FCvtWS:
-		CompIR_Generic(inst);
+		// FCSR's rounding mode is the game's (ApplyRoundingMode). NaN converts to zero, so patch
+		// in INT_MAX like FRound does.
+		regs_.Map(inst);
+		QuickFLI(32, SCRATCHF1, (uint32_t)0x7fffffffl, SCRATCH1);
+		FCMP_COND_S(FCC0, regs_.F(inst.src1), regs_.F(inst.src1), LoongArch64Fcond::CUN);
+		FTINT_W_S(regs_.F(inst.dest), regs_.F(inst.src1));
+		FSEL(regs_.F(inst.dest), regs_.F(inst.dest), SCRATCHF1, FCC0);
 		break;
 
 	case IROp::FCvtSW:
@@ -231,8 +241,8 @@ void LoongArch64JitBackend::CompIR_FCvt(IRInst inst) {
 
 	case IROp::FCvtScaledWS:
 		regs_.Map(inst);
-		// Prepare for the NAN result
-		QuickFLI(32, SCRATCHF1, (uint32_t)(0x7FFFFFFF), SCRATCH1);
+		// Prepare for the NAN result, which the FSELs below pick out of SCRATCHF2.
+		QuickFLI(32, SCRATCHF2, (uint32_t)(0x7FFFFFFF), SCRATCH1);
 		// Prepare the multiplier.
 		QuickFLI(32, SCRATCHF1, (float)(1UL << (inst.src2 & 0x1F)), SCRATCH1);
 
@@ -552,7 +562,7 @@ void LoongArch64JitBackend::CompIR_RoundingMode(IRInst inst) {
 void LoongArch64JitBackend::CompIR_FSpecial(IRInst inst) {
 	CONDITIONAL_DISABLE;
 
-	auto callFuncF_F = [&](float (*func)(float)) {
+	auto callWithF0 = [&](const u8 *func) {
 		regs_.FlushBeforeCall();
 		WriteDebugProfilerStatus(IRProfilerStatus::MATH_HELPER);
 
@@ -569,6 +579,10 @@ void LoongArch64JitBackend::CompIR_FSpecial(IRInst inst) {
 			FLD_S(F0, CTXREG, offset);
 		}
 		QuickCallFunction(func, SCRATCH1);
+	};
+
+	auto callFuncF_F = [&](float (*func)(float)) {
+		callWithF0((const u8 *)func);
 
 		regs_.MapFPR(inst.dest, MIPSMap::NOINIT);
 		// If it's already F0, we're done - MapReg doesn't actually overwrite the reg in that case.
@@ -589,17 +603,45 @@ void LoongArch64JitBackend::CompIR_FSpecial(IRInst inst) {
 		break;
 
 	case IROp::FRSqrt:
-		regs_.Map(inst);
-		FRSQRT_S(regs_.F(inst.dest), regs_.F(inst.src1));
+		callFuncF_F(&vfpu_rsqrt);
 		break;
 
 	case IROp::FRecip:
-		regs_.Map(inst);
-		FRECIP_S(regs_.F(inst.dest), regs_.F(inst.src1));
+		callFuncF_F(&vfpu_rcp);
 		break;
 
 	case IROp::FAsin:
 		callFuncF_F(&vfpu_asin);
+		break;
+
+	case IROp::FVSqrt:
+		callFuncF_F(&vfpu_sqrt);
+		break;
+
+	case IROp::FExp2:
+		callFuncF_F(&vfpu_exp2);
+		break;
+
+	case IROp::FLog2:
+		callFuncF_F(&vfpu_log2);
+		break;
+
+	case IROp::FHalfToFloat:
+		callFuncF_F(inst.src2 ? &vfpu_h2f_upper : &vfpu_h2f_lower);
+		break;
+
+	case IROp::FSinCos:
+		// The sine comes back in the low 32 bits of F0, the cosine in the high.
+		callWithF0((const u8 *)&vfpu_sincos_packed);
+		MOVFR2GR_S(SCRATCH1, F0);
+		MOVFRH2GR_S(SCRATCH2, F0);
+		regs_.SpillLockFPR(inst.dest, inst.dest + 1);
+		regs_.MapFPR(inst.dest, MIPSMap::NOINIT);
+		regs_.MapFPR(inst.dest + 1, MIPSMap::NOINIT);
+		regs_.ReleaseSpillLockFPR(inst.dest, inst.dest + 1);
+		MOVGR2FR_W(regs_.F(inst.dest), SCRATCH1);
+		MOVGR2FR_W(regs_.F(inst.dest + 1), SCRATCH2);
+		WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 		break;
 
 	default:

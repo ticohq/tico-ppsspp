@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cstdio>
@@ -31,6 +32,7 @@
 #include "Core/Core.h"
 #include "Core/Config.h"
 #include "Core/HLE/sceKernelThread.h"
+#include "Core/HLE/__sceAudio.h"
 #include "Core/MIPS/MIPS.h"
 
 static const int initialHz = 222000000;
@@ -48,41 +50,47 @@ static std::set<int> usedEventTypes;
 static std::set<int> restoredEventTypes;
 static int nextEventTypeRestoreId = -1;
 
-Event *first;
-Event *eventPool = 0;
+static Event *first;
+static Event *eventPool = 0;
 
 // Downcount has been moved to currentMIPS, to save a couple of clocks in every ARM JIT block
 // as we can already reach that structure through a register.
 int slicelength;
 
-alignas(16) s64 globalTimer;
-s64 idledCycles;
-s64 lastGlobalTimeTicks;
-s64 lastGlobalTimeUs;
+alignas(16) static s64 globalTimer;
+static s64 idledCycles;
+static s64 lastGlobalTimeTicks;
+static s64 lastGlobalTimeUs;
+// See SetBreakDeadlineUs. 0 = none. Deliberately not saved in savestates - it belongs to a
+// debugger session, not to the emulated machine.
+static s64 breakDeadlineUs;
+static s64 breakDeadlineTicks;
+static void RecomputeBreakDeadline();
 
-std::vector<MHzChangeCallback> mhzChangeCallbacks;
-
-void FireMhzChange() {
-	for (MHzChangeCallback cb : mhzChangeCallbacks) {
-		cb();
-	}
-}
-
-void SetClockFrequencyHz(int cpuHz) {
+bool SetClockFrequencyHz(int cpuHz) {
 	if (cpuHz <= 0) {
 		// Paranoid check, protecting against division by zero and similar nonsense.
-		return;
+		return true;  // encourage logging
+	}
+
+	if (cpuHz == CPU_HZ) {
+		// Already at the correct frequency. Bail, false means we'll log at a lower level.
+		return false;
 	}
 
 	// When the mhz changes, we keep track of what "time" it was before hand.
 	// This way, time always moves forward, even if mhz is changed.
 	lastGlobalTimeUs = GetGlobalTimeUs();
-	lastGlobalTimeTicks = GetTicks();
+	lastGlobalTimeTicks = GetTicks(currentMIPS);
 
 	CPU_HZ = cpuHz;
-	// TODO: Rescale times of scheduled events?
 
-	FireMhzChange();
+	// The remaining time to a debugger deadline is now a different number of ticks.
+	RecomputeBreakDeadline();
+
+	// TODO: Rescale times of scheduled events?
+	__AudioCPUMHzChange();
+	return true;
 }
 
 int GetClockFrequencyHz() {
@@ -94,16 +102,44 @@ u64 GetGlobalTimeUsScaled() {
 }
 
 u64 GetGlobalTimeUs() {
-	s64 ticksSinceLast = GetTicks() - lastGlobalTimeTicks;
+	s64 ticksSinceLast = GetTicks(currentMIPS) - lastGlobalTimeTicks;
 	int freq = GetClockFrequencyHz();
 	s64 usSinceLast = ticksSinceLast * 1000000 / freq;
 	if (ticksSinceLast > UINT_MAX) {
 		// Adjust the calculated value to avoid overflow errors.
 		lastGlobalTimeUs += usSinceLast;
-		lastGlobalTimeTicks = GetTicks();
+		lastGlobalTimeTicks = GetTicks(currentMIPS);
 		usSinceLast = 0;
 	}
 	return lastGlobalTimeUs + usSinceLast;
+}
+
+// Turns the microsecond deadline into the tick count Advance() compares against. Has to be redone
+// whenever the clock frequency changes, since that changes how many ticks the remaining time is.
+static void RecomputeBreakDeadline() {
+	if (!breakDeadlineUs) {
+		breakDeadlineTicks = 0;
+		return;
+	}
+	const s64 remainingUs = breakDeadlineUs - (s64)GetGlobalTimeUs();
+	breakDeadlineTicks = (s64)GetTicks(currentMIPS) + (remainingUs > 0 ? usToCycles(remainingUs) : 0);
+}
+
+void SetBreakDeadlineUs(u64 us) {
+	breakDeadlineUs = (s64)us;
+	RecomputeBreakDeadline();
+}
+
+u64 GetBreakDeadlineUs() {
+	return (u64)breakDeadlineUs;
+}
+
+u64 PeekGlobalTimeUs() {
+	// Same sum as above without the rebasing, so this stays callable from a thread that isn't the
+	// CPU thread. The rebasing exists purely to keep the multiply below from overflowing, and it
+	// happens often enough on the CPU thread that ticksSinceLast stays small here.
+	const s64 ticksSinceLast = GetTicks(currentMIPS) - lastGlobalTimeTicks;
+	return lastGlobalTimeUs + ticksSinceLast * 1000000 / GetClockFrequencyHz();
 }
 
 const Event *GetFirstEvent() {
@@ -157,16 +193,11 @@ void RestoreRegisterEvent(int &event_type, const char *name, TimedCallback callb
 	if (event_type == -1)
 		event_type = nextEventTypeRestoreId++;
 	if (event_type >= (int)event_types.size()) {
-		// Give it any unused event id starting from the end.
-		// Older save states with messed up ids have gaps near the end.
-		for (int i = (int)event_types.size() - 1; i >= 0; --i) {
-			if (usedEventTypes.count(i) == 0) {
-				event_type = i;
-				break;
-			}
-		}
+		// An event the state doesn't have. Grow the table: an unused slot below may still belong to
+		// a state event whose module restores it later.
+		event_types.resize(event_type + 1, EventType{ AntiCrashCallback, "INVALID EVENT" });
 	}
-	_assert_msg_(event_type >= 0 && event_type < (int)event_types.size(), "Invalid event type %d", event_type);
+	_assert_msg_(event_type >= 0 && event_type < (int)event_types.size(), "Invalid event type %d (%s, of %d)", event_type, name, (int)event_types.size());
 	event_types[event_type] = EventType{ callback, name };
 	usedEventTypes.insert(event_type);
 	restoredEventTypes.insert(event_type);
@@ -179,15 +210,15 @@ void UnregisterAllEvents() {
 	restoredEventTypes.clear();
 }
 
-void Init()
-{
-	currentMIPS->downcount = INITIAL_SLICE_LENGTH;
+void Init(MIPSState *mips) {
+	mips->downcount = INITIAL_SLICE_LENGTH;
 	slicelength = INITIAL_SLICE_LENGTH;
 	globalTimer = 0;
 	idledCycles = 0;
 	lastGlobalTimeTicks = 0;
 	lastGlobalTimeUs = 0;
-	mhzChangeCallbacks.clear();
+	breakDeadlineUs = 0;
+	breakDeadlineTicks = 0;
 	CPU_HZ = initialHz;
 }
 
@@ -203,18 +234,16 @@ void Shutdown()
 	}
 }
  
-u64 GetTicks()
-{
-	if (currentMIPS) {
-		return (u64)globalTimer + slicelength - currentMIPS->downcount;
+u64 GetTicks(MIPSState *mips) {
+	if (mips) {
+		return (u64)globalTimer + slicelength - mips->downcount;
 	} else {
 		// Reporting can actually end up here during weird task switching sequences on Android
 		return false;
 	}
 }
 
-u64 GetIdleTicks()
-{
+u64 GetIdleTicks() {
 	return (u64)idledCycles;
 }
 
@@ -254,8 +283,17 @@ void ScheduleEvent(s64 cyclesIntoFuture, int event_type, u64 userdata)
 	Event *ne = GetNewEvent();
 	ne->userdata = userdata;
 	ne->type = event_type;
-	ne->time = GetTicks() + cyclesIntoFuture;
+	ne->time = GetTicks(currentMIPS) + cyclesIntoFuture;
 	AddEventToQueue(ne);
+
+	// The slice was sized to end at the next event. If this one is due sooner, end it there, or it
+	// fires late: an alarm set by a thread that keeps running went off hundreds of us late
+	// (pspautotests threads/scheduling/alarmcosts).
+	if (cyclesIntoFuture < currentMIPS->downcount) {
+		const int diff = (int)std::max<s64>(cyclesIntoFuture, 0) - currentMIPS->downcount;
+		slicelength += diff;
+		currentMIPS->downcount += diff;
+	}
 }
 
 // Returns cycles left in timer.
@@ -268,7 +306,7 @@ s64 UnscheduleEvent(int event_type, u64 userdata)
 	{
 		if (first->type == event_type && first->userdata == userdata)
 		{
-			result = first->time - GetTicks();
+			result = first->time - GetTicks(currentMIPS);
 
 			Event *next = first->next;
 			FreeEvent(first);
@@ -287,7 +325,7 @@ s64 UnscheduleEvent(int event_type, u64 userdata)
 	{
 		if (ptr->type == event_type && ptr->userdata == userdata)
 		{
-			result = ptr->time - GetTicks();
+			result = ptr->time - GetTicks(currentMIPS);
 
 			prev->next = ptr->next;
 			FreeEvent(ptr);
@@ -303,12 +341,7 @@ s64 UnscheduleEvent(int event_type, u64 userdata)
 	return result;
 }
 
-void RegisterMHzChangeCallback(MHzChangeCallback callback) {
-	mhzChangeCallbacks.push_back(callback);
-}
-
-bool IsScheduled(int event_type)
-{
+bool IsScheduled(int event_type) {
 	if (!first)
 		return false;
 	Event *e = first;
@@ -359,12 +392,12 @@ void RemoveEvent(int event_type)
 
 void ProcessEvents() {
 	while (first) {
-		if (first->time <= (s64)GetTicks()) {
-			// INFO_LOG(Log::CPU, "%s (%lld, %lld) ", first->name ? first->name : "?", (u64)GetTicks(), (u64)first->time);
+		if (first->time <= (s64)GetTicks(currentMIPS)) {
+			// INFO_LOG(Log::CPU, "%s (%lld, %lld) ", first->name ? first->name : "?", (u64)GetTicks(currentMIPS), (u64)first->time);
 			Event *evt = first;
 			first = first->next;
-			if (evt->type >= 0 && evt->type < event_types.size()) {
-				event_types[evt->type].callback(evt->userdata, (int)(GetTicks() - evt->time));
+			if (evt->type >= 0 && evt->type < (int)event_types.size()) {
+				event_types[evt->type].callback(evt->userdata, (int)(GetTicks(currentMIPS) - evt->time));
 			} else {
 				_dbg_assert_msg_(false, "Bad event type %d", evt->type);
 			}
@@ -376,12 +409,11 @@ void ProcessEvents() {
 	}
 }
 
-void ForceCheck()
-{
-	int cyclesExecuted = slicelength - currentMIPS->downcount;
+void ForceCheck(MIPSState *mips) {
+	int cyclesExecuted = slicelength - mips->downcount;
 	globalTimer += cyclesExecuted;
 	// This will cause us to check for new events immediately.
-	currentMIPS->downcount = -1;
+	mips->downcount = -1;
 	// But let's not eat a bunch more time in Advance() because of this.
 	slicelength = -1;
 
@@ -390,11 +422,19 @@ void ForceCheck()
 #endif
 }
 
-void Advance() {
+void Advance(MIPSState *mips) {
 	PROFILE_THIS_SCOPE("advance");
-	int cyclesExecuted = slicelength - currentMIPS->downcount;
+	int cyclesExecuted = slicelength - mips->downcount;
 	globalTimer += cyclesExecuted;
-	currentMIPS->downcount = slicelength;
+	mips->downcount = slicelength;
+
+	// Debugger deadline - see SetBreakDeadlineTicks. Checked before the events so the break lands
+	// on the requested tick rather than after whatever the events do.
+	if (breakDeadlineTicks && globalTimer >= breakDeadlineTicks) {
+		breakDeadlineTicks = 0;
+		breakDeadlineUs = 0;
+		Core_Break(BreakReason::RunUntilTime, mips->pc);
+	}
 
 	ProcessEvents();
 
@@ -402,7 +442,7 @@ void Advance() {
 		// This should never happen in PPSSPP.
 		if (slicelength < 10000) {
 			slicelength += 10000;
-			currentMIPS->downcount += 10000;
+			mips->downcount += 10000;
 		}
 	} else {
 		// Note that events can eat cycles as well.
@@ -412,7 +452,18 @@ void Advance() {
 
 		const int diff = target - slicelength;
 		slicelength += diff;
-		currentMIPS->downcount += diff;
+		mips->downcount += diff;
+	}
+
+	// Shorten the slice so we come back exactly on the deadline instead of up to a whole slice
+	// past it - the point of cpu.runUntilTime is that it stops at a reproducible place.
+	if (breakDeadlineTicks) {
+		const s64 remaining = breakDeadlineTicks - globalTimer;
+		if (remaining > 0 && remaining < slicelength) {
+			const int diff = (int)remaining - slicelength;
+			slicelength += diff;
+			mips->downcount += diff;
+		}
 	}
 }
 
@@ -424,13 +475,13 @@ void LogPendingEvents() {
 	}
 }
 
-void Idle(int maxIdle) {
-	int cyclesDown = currentMIPS->downcount;
+void Idle(MIPSState *mips, int maxIdle) {
+	int cyclesDown = mips->downcount;
 	if (maxIdle != 0 && cyclesDown > maxIdle)
 		cyclesDown = maxIdle;
 
 	if (first && cyclesDown > 0) {
-		int cyclesExecuted = slicelength - currentMIPS->downcount;
+		int cyclesExecuted = slicelength - mips->downcount;
 		int cyclesNextEvent = (int) (first->time - globalTimer);
 
 		if (cyclesNextEvent < cyclesExecuted + cyclesDown)
@@ -444,9 +495,9 @@ void Idle(int maxIdle) {
 	// VERBOSE_LOG(Log::CPU, "Idle for %i cycles! (%f ms)", cyclesDown, cyclesDown / (float)(CPU_HZ * 0.001f));
 
 	idledCycles += cyclesDown;
-	currentMIPS->downcount -= cyclesDown;
-	if (currentMIPS->downcount == 0)
-		currentMIPS->downcount = -1;
+	mips->downcount -= cyclesDown;
+	if (mips->downcount == 0)
+		mips->downcount = -1;
 }
 
 std::string GetScheduledEventsSummary() {
@@ -493,18 +544,30 @@ void DoState(PointerWrap &p) {
 	int current = n;
 	Do(p, n);
 	if (n > current) {
-		WARN_LOG(Log::SaveState, "Savestate failure: more events than current (can't ever remove an event)");
-		p.SetError(p.ERROR_FAILURE);
-		return;
+		if (p.mode != PointerWrap::MODE_READ) {
+			WARN_LOG(Log::SaveState, "Savestate failure: more events than current");
+			p.SetError(p.ERROR_FAILURE);
+			return;
+		}
+		// An older state can have event types that have since been merged or removed, like the
+		// per-object wait timeouts. Keep their slots: modules that still know them restore them
+		// below, and the rest stay harmless placeholders.
+		event_types.resize(n);
+		current = n;
 	}
 
-	// These (should) be filled in later by the modules.
-	for (int i = 0; i < current; ++i) {
-		event_types[i].callback = AntiCrashCallback;
-		event_types[i].name = "INVALID EVENT";
+	// These (should) be filled in later by the modules. Only when loading: a save that fails partway
+	// wouldn't get to all the restores, and would leave the running game with broken events.
+	if (p.mode == PointerWrap::MODE_READ) {
+		for (int i = 0; i < current; ++i) {
+			event_types[i].callback = AntiCrashCallback;
+			event_types[i].name = "INVALID EVENT";
+		}
+		// The state's own events are 0..n-1, so one it doesn't have gets the first id after those.
+		nextEventTypeRestoreId = n;
+		usedEventTypes.clear();
 	}
-	nextEventTypeRestoreId = n - 1;
-	usedEventTypes.clear();
+	// Needed in every pass, or each restore would look like a duplicate and get a new id.
 	restoredEventTypes.clear();
 
 	if (s >= 3) {
@@ -528,8 +591,12 @@ void DoState(PointerWrap &p) {
 		lastGlobalTimeTicks = 0;
 		lastGlobalTimeUs = 0;
 	}
+	if (p.mode == PointerWrap::MODE_READ) {
+		// A debugger's run-until deadline is in emulated us, and the ticks it maps to just changed.
+		RecomputeBreakDeadline();
+	}
 
-	FireMhzChange();
+	__AudioCPUMHzChange();
 }
 
 }	// namespace

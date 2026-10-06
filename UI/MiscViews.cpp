@@ -397,6 +397,11 @@ void ViewSearch::ApplySearchFilter(UI::ViewGroup *viewGroup, bool setKeyboardFoc
 			if (v->CanBeFocused() && !firstMatch) {
 				firstMatch = v;
 			}
+		} else if (v->CanBeFocused() && NormalizeForSearch(v->SearchAlias()).find(filter) != std::string::npos) {
+			match = true;
+			if (!firstMatch) {
+				firstMatch = v;
+			}
 		} else {
 			std::string label = v->DescribeText();
 			// This is a bit of a hack to recognize a pending game title.
@@ -436,12 +441,27 @@ void ViewSearch::ApplySearchFilter(UI::ViewGroup *viewGroup, bool setKeyboardFoc
 	}
 }
 
+static bool IsSearchableChar(int unichar) {
+	// 127 gets produced from Ctrl+Backspace on Windows for some reason.
+	return unichar >= 0x20 && unichar != 127;
+}
+
+static bool IsFirstSearchableChar(int unichar) {
+	// Don't allow spaces as the first character, it looks confusing (empty search field)
+	return IsSearchableChar(unichar) && unichar != ' ' && unichar != '`' && unichar != '.' && unichar != ',';
+}
+
 bool ViewSearch::Key(UI::ViewGroup *viewGroup, const KeyInput &input) {
 	bool retval = false;
 	// Only one is visible at a time, so we can just grab all Char input.
 	if (input.flags & KeyInputFlags::CHAR) {
 		const int unichar = input.keyCode;
-		if (unichar >= 0x20 && unichar != 127) {  // 127 gets produced from Ctrl+Backspace on Windows for some reason.
+		if (IsSearchableChar(unichar)) {
+			// Don't allow spaces as the first character, it looks confusing (empty search field)
+			if (searchFilter.empty() && !IsFirstSearchableChar(unichar)) {
+				return false;
+			}
+
 			// TODO: Save focus state here.
 			// Insert it! (todo: do it with a string insert)
 			char buf[8];
@@ -453,7 +473,7 @@ bool ViewSearch::Key(UI::ViewGroup *viewGroup, const KeyInput &input) {
 	} else if (input.flags & KeyInputFlags::DOWN) {
 		if (input.keyCode == NKCODE_DEL) {
 			if (!searchFilter.empty()) {
-				if (input.flags & KeyInputFlags::MOD_CTRL) {
+				if (input.flags & KeyInputFlags::ModCtrl) {
 					// Ctrl+Backspace deletes the last word. Delete until the last space.
 					size_t pos = searchFilter.find_last_of(' ');
 					if (pos != searchFilter.npos) {

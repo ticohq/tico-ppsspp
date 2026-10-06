@@ -19,9 +19,10 @@
 
 #include "CommonTypes.h"
 #include "GPU/Common/DrawEngineCommon.h"
-#include "GPU/Common/GPUDebugInterface.h"
+#include "GPU/GPUCommon.h"
 #include "GPU/Software/SoftGpu.h"
 #include "GPU/Math3D.h"
+#include "GPU/Software/GEMath.h"
 
 using namespace Math3D;
 
@@ -43,10 +44,9 @@ enum class CullType {
 	OFF = 2,
 };
 
-struct ScreenCoords
-{
-	ScreenCoords() {}
-	ScreenCoords(int x, int y, u16 z) : x(x), y(y), z(z) {}
+struct ScreenCoords {
+	ScreenCoords() = default;
+	ScreenCoords(int _x, int _y, u16 _z) : x(_x), y(_y), z(_z) {}
 
 	int x;
 	int y;
@@ -54,24 +54,21 @@ struct ScreenCoords
 
 	Vec2<int> xy() const { return Vec2<int>(x, y); }
 
-	ScreenCoords operator * (const float t) const
-	{
+	ScreenCoords operator * (const float t) const {
 		return ScreenCoords((int)(x * t), (int)(y * t), (u16)(z * t));
 	}
 
-	ScreenCoords operator / (const int t) const
-	{
+	ScreenCoords operator / (const int t) const {
 		return ScreenCoords(x / t, y / t, z / t);
 	}
 
-	ScreenCoords operator + (const ScreenCoords& oth) const
-	{
+	ScreenCoords operator + (const ScreenCoords& oth) const {
 		return ScreenCoords(x + oth.x, y + oth.y, z + oth.z);
 	}
 };
 
 struct DrawingCoords {
-	DrawingCoords() {}
+	DrawingCoords() = default;
 	DrawingCoords(s16 x, s16 y) : x(x), y(y) {}
 
 	s16 x;
@@ -92,9 +89,9 @@ struct ClipVertexData {
 		clippos = ::Lerp(a.clippos, b.clippos, t);
 		// Ignore screenpos because Lerp() is only used pre-calculation of screenpos.
 		v.texturecoords = ::Lerp(a.v.texturecoords, b.v.texturecoords, t);
-		v.fogdepth = ::Lerp(a.v.fogdepth, b.v.fogdepth, t);
-
-		u16 t_int = (u16)(t * 256);
+		// Colors and fog (already 8-bit per vertex) take t rounded to 1/256 (gpu/probe exp136).
+		const int t_int = (int)(t * 256.0f + 0.5f);
+		v.fogdepth = (float)(((int)(a.v.fogdepth * 256.0f) * (256 - t_int) + (int)(b.v.fogdepth * 256.0f) * t_int) >> 8) * (1.0f / 256.0f);
 		v.color0 = LerpInt<Vec4<int>, 256>(Vec4<int>::FromRGBA(a.v.color0), Vec4<int>::FromRGBA(b.v.color0), t_int).ToRGBA();
 		v.color1 = LerpInt<Vec3<int>, 256>(Vec3<int>::FromRGB(a.v.color1), Vec3<int>::FromRGB(b.v.color1), t_int).ToRGB();
 	}
@@ -109,17 +106,23 @@ struct ClipVertexData {
 
 class VertexReader;
 
+
 class SoftwareDrawEngine;
 class SoftwareVertexReader;
+class StringWriter;
 
 class TransformUnit {
 public:
+	TransformUnit(const TransformUnit &) = delete;
+	TransformUnit &operator=(const TransformUnit &) = delete;
 	TransformUnit();
 	~TransformUnit();
 
 	static WorldCoords ModelToWorldNormal(const ModelCoords& coords);
-	static WorldCoords ModelToWorld(const ModelCoords& coords);
 	static ScreenCoords ClipToScreen(const ClipCoords &coords, bool *outsideRangeFlag);
+	// Where an edge from an inside vertex crosses the near plane, as the GE computes it.
+	static float NearPlaneT(const ClipCoords &in, const ClipCoords &out);
+	static ClipCoords NearPlanePoint(const ClipCoords &in, const ClipCoords &out, float t);
 	static inline DrawingCoords ScreenToDrawing(int x, int y) {
 		DrawingCoords ret;
 		// When offset > coord, this is negative and force-scissors.
@@ -135,20 +138,20 @@ public:
 	void SubmitPrimitive(const void* vertices, const void* indices, GEPrimitiveType prim_type, int vertex_count, u32 vertex_type, int *bytesRead, SoftwareDrawEngine *drawEngine);
 	void SubmitImmVertex(const ClipVertexData &vert, SoftwareDrawEngine *drawEngine);
 
-	static bool GetCurrentDrawAsDebugVertices(int count, std::vector<GPUDebugVertex> &vertices, std::vector<u16> &indices);
-
 	void Flush(GPUCommon *common, const char *reason);
 	void FlushIfOverlap(GPUCommon *common, const char *reason, bool modifying, uint32_t addr, uint32_t stride, uint32_t w, uint32_t h);
 	void NotifyClutUpdate(const void *src);
+	void NotifyTexFlush();
 
-	void GetStats(char *buffer, size_t bufsize);
+	void GetStats(StringWriter &w);
 
 	void SetDirty(SoftDirty flags);
 	SoftDirty GetDirty();
 
 private:
 	ClipVertexData ReadVertex(const VertexReader &vreader, const TransformState &state);
-	void SendTriangle(CullType cullType, const ClipVertexData *verts, int provoking = 2);
+	// orderReversed: verts are in the opposite order of how the GE takes the triangle (matters for clipping).
+	void SendTriangle(CullType cullType, const ClipVertexData *verts, int provoking = 2, bool orderReversed = false);
 
 	u8 *decoded_ = nullptr;
 	BinManager *binner_ = nullptr;
@@ -164,6 +167,8 @@ private:
 	friend SoftwareVertexReader;
 };
 
+enum class ClipInfoFlags;
+
 class SoftwareDrawEngine : public DrawEngineCommon {
 public:
 	SoftwareDrawEngine();
@@ -174,7 +179,7 @@ public:
 
 	void NotifyConfigChanged() override;
 	void Flush() override;
-	void DispatchSubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, bool clockwise, int *bytesRead) override;
+	void DispatchSubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, bool clockwise, int *bytesRead, ClipInfoFlags clipInfoFlags) override;
 	void DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex *buffer, int vertexCount, int cullMode, bool continuation) override;
 
 	VertexDecoder *FindVertexDecoder(u32 vtype);
@@ -190,7 +195,4 @@ public:
 		FreeAlignedMemory(p);
 	}
 #endif
-
-protected:
-	bool UpdateUseHWTessellation(bool enable) const override { return false; }
 };

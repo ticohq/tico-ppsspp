@@ -90,6 +90,8 @@ LOCAL_CFLAGS += -DSTACK_LINE_READER_BUFFER_SIZE=1024 -DHAVE_DLFCN_H -DRC_DISABLE
 
 # http://software.intel.com/en-us/articles/getting-started-on-optimizing-ndk-project-for-multiple-cpu-architectures
 
+# On x86_64, we test all emitters in the unit test so we need them included here.
+
 ifeq ($(TARGET_ARCH_ABI),x86)
 ARCH_FILES := \
   $(SRC)/Common/ABI.cpp \
@@ -101,6 +103,11 @@ ARCH_FILES := \
   $(SRC)/Common/ABI.cpp \
   $(SRC)/Common/x64Emitter.cpp \
   $(SRC)/Common/x64Analyzer.cpp \
+  $(SRC)/Common/ArmEmitter.cpp \
+  $(SRC)/Common/Arm64Emitter.cpp \
+  $(SRC)/Common/RiscVEmitter.cpp \
+  $(SRC)/Common/LoongArch64Emitter.cpp \
+  $(SRC)/ext/disarm.cpp \
   $(SRC)/Common/Thunk.cpp
 else ifeq ($(findstring armeabi-v7a,$(TARGET_ARCH_ABI)),armeabi-v7a)
 ARCH_FILES := \
@@ -127,7 +134,8 @@ NATIVE_FILES :=\
   $(SRC)/Common/GPU/OpenGL/GLRenderManager.cpp \
   $(SRC)/Common/GPU/OpenGL/GLQueueRunner.cpp \
   $(SRC)/Common/GPU/OpenGL/GLProfiler.cpp \
-  $(SRC)/Common/GPU/OpenGL/DataFormatGL.cpp
+  $(SRC)/Common/GPU/OpenGL/DataFormatGL.cpp \
+  $(SRC)/Common/GPU/OpenGL/OpenGLGraphicsContext.cpp
 
 VULKAN_FILES := \
   $(SRC)/Common/GPU/Vulkan/thin3d_vulkan.cpp \
@@ -142,7 +150,8 @@ VULKAN_FILES := \
   $(SRC)/Common/GPU/Vulkan/VulkanMemory.cpp \
   $(SRC)/Common/GPU/Vulkan/VulkanDescSet.cpp \
   $(SRC)/Common/GPU/Vulkan/VulkanProfiler.cpp \
-  $(SRC)/Common/GPU/Vulkan/VulkanBarrier.cpp
+  $(SRC)/Common/GPU/Vulkan/VulkanBarrier.cpp \
+  $(SRC)/Common/GPU/Vulkan/VulkanGraphicsContext.cpp
 
 VMA_FILES := \
   $(SRC)/ext/vma/vk_mem_alloc.cpp
@@ -156,10 +165,8 @@ SPIRV_CROSS_FILES := \
   $(SRC)/ext/SPIRV-Cross/spirv_cross_parsed_ir.cpp
 
 NAETT_FILES := \
-  ${SRC}/ext/naett/naett.c
-
-MINIMP3_FILES := \
-    ${SRC}/ext/minimp3/minimp3.cpp
+  ${SRC}/ext/naett-lib/src/naett_core.c \
+  ${SRC}/ext/naett-lib/src/naett_android.c
 
 AT3_STANDALONE_FILES := \
 	${SRC}/ext/at3_standalone/atrac.cpp \
@@ -296,7 +303,6 @@ EXEC_AND_LIB_FILES := \
   $(SPIRV_CROSS_FILES) \
   $(RCHEEVOS_FILES) \
   $(NAETT_FILES) \
-  $(MINIMP3_FILES) \
   $(AT3_STANDALONE_FILES) \
   $(EXT_FILES) \
   $(NATIVE_FILES) \
@@ -324,6 +330,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Common/Data/Format/ZIMSave.h \
   $(SRC)/Common/Data/Hash/Hash.cpp \
   $(SRC)/Common/Data/Text/I18n.cpp \
+  $(SRC)/Common/Data/Text/Demangle.cpp \
   $(SRC)/Common/Data/Text/Parsers.cpp \
   $(SRC)/Common/Data/Text/WrapText.cpp \
   $(SRC)/Common/File/AndroidStorage.cpp \
@@ -377,6 +384,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Common/UI/AsyncImageFileView.cpp \
   $(SRC)/Common/UI/Root.cpp \
   $(SRC)/Common/UI/Screen.cpp \
+  $(SRC)/Common/UI/ScreenManager.cpp \
   $(SRC)/Common/UI/UI.cpp \
   $(SRC)/Common/UI/Context.cpp \
   $(SRC)/Common/UI/UIScreen.cpp \
@@ -504,12 +512,12 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/MIPS/MIPSDis.cpp \
   $(SRC)/Core/MIPS/MIPSDisVFPU.cpp \
   $(SRC)/Core/MIPS/MIPSAsm.cpp \
-  $(SRC)/Core/MIPS/MIPSInt.cpp.arm \
-  $(SRC)/Core/MIPS/MIPSIntVFPU.cpp.arm \
+  $(SRC)/Core/MIPS/Interpreter.cpp.arm \
+  $(SRC)/Core/MIPS/InterpreterDispatch.cpp \
+  $(SRC)/Core/MIPS/InterpreterVFPU.cpp.arm \
   $(SRC)/Core/MIPS/MIPSStackWalk.cpp \
   $(SRC)/Core/MIPS/MIPSTables.cpp \
   $(SRC)/Core/MIPS/MIPSVFPUUtils.cpp.arm \
-  $(SRC)/Core/MIPS/MIPSVFPUFallbacks.cpp.arm \
   $(SRC)/Core/MIPS/MIPSCodeUtils.cpp.arm \
   $(SRC)/Core/MIPS/MIPSDebugInterface.cpp \
   $(SRC)/Core/MIPS/MIPSTracer.cpp \
@@ -560,7 +568,6 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/GPU/Common/PostShader.cpp \
   $(SRC)/GPU/Common/ShaderUniforms.cpp \
   $(SRC)/GPU/Common/VertexShaderGenerator.cpp \
-  $(SRC)/GPU/Common/GeometryShaderGenerator.cpp \
   $(SRC)/GPU/Common/TextureReplacer.cpp \
   $(SRC)/GPU/Common/ReplacedTexture.cpp \
   $(SRC)/GPU/Debugger/Breakpoints.cpp \
@@ -582,6 +589,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/GPU/Software/Clipper.cpp \
   $(SRC)/GPU/Software/DrawPixel.cpp.arm \
   $(SRC)/GPU/Software/FuncId.cpp \
+  $(SRC)/GPU/Software/GEMath.cpp \
   $(SRC)/GPU/Software/Lighting.cpp \
   $(SRC)/GPU/Software/Rasterizer.cpp.arm \
   $(SRC)/GPU/Software/RasterizerRectangle.cpp.arm \
@@ -599,8 +607,10 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HW/BufferQueue.cpp \
   $(SRC)/Core/HW/Camera.cpp \
   $(SRC)/Core/HW/Display.cpp \
+  $(SRC)/Core/HW/GpioMMIO.cpp \
   $(SRC)/Core/HW/MemoryStick.cpp \
   $(SRC)/Core/HW/MpegDemux.cpp.arm \
+  $(SRC)/Core/HW/AvcDecoder.cpp.arm \
   $(SRC)/Core/HW/MediaEngine.cpp.arm \
   $(SRC)/Core/HW/SasAudio.cpp.arm \
   $(SRC)/Core/HW/SasReverb.cpp.arm \
@@ -609,10 +619,12 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/ControlMapper.cpp \
   $(SRC)/Core/Core.cpp \
   $(SRC)/Core/Compatibility.cpp \
+  $(SRC)/Core/CmdLine.cpp \
   $(SRC)/Core/Config.cpp \
   $(SRC)/Core/ConfigSettings.cpp \
   $(SRC)/Core/CoreTiming.cpp \
   $(SRC)/Core/CwCheat.cpp \
+  $(SRC)/Core/EmuThread.cpp \
   $(SRC)/Core/FrameTiming.cpp \
   $(SRC)/Core/HDRemaster.cpp \
   $(SRC)/Core/Instance.cpp \
@@ -642,6 +654,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/WebServer.cpp \
   $(SRC)/Core/Debugger/Breakpoints.cpp \
   $(SRC)/Core/Debugger/DisassemblyManager.cpp \
+  $(SRC)/Core/Debugger/LineInfo.cpp \
   $(SRC)/Core/Debugger/MemBlockInfo.cpp \
   $(SRC)/Core/Debugger/SymbolMap.cpp \
   $(SRC)/Core/Debugger/WebSocket.cpp \
@@ -652,12 +665,15 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/Debugger/WebSocket/GameBroadcaster.cpp \
   $(SRC)/Core/Debugger/WebSocket/GameSubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/GPUBufferSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/GPUDisasmSubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/GPURecordSubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/GPUStatsSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/HLEKernelObjectSubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/HLESubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/InputBroadcaster.cpp \
   $(SRC)/Core/Debugger/WebSocket/InputSubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/LogBroadcaster.cpp \
+  $(SRC)/Core/Debugger/WebSocket/LogConfigSubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/MemorySubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/MemoryInfoSubscriber.cpp \
   $(SRC)/Core/Debugger/WebSocket/ReplaySubscriber.cpp \
@@ -669,6 +685,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/Dialog/PSPMsgDialog.cpp \
   $(SRC)/Core/Dialog/PSPNetconfDialog.cpp \
   $(SRC)/Core/Dialog/PSPNpSigninDialog.cpp \
+  $(SRC)/Core/Dialog/PSPHtmlViewerDialog.cpp \
   $(SRC)/Core/Dialog/PSPOskDialog.cpp \
   $(SRC)/Core/Dialog/PSPOskConstants.cpp \
   $(SRC)/Core/Dialog/PSPScreenshotDialog.cpp \
@@ -693,6 +710,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceAudiocodec.cpp.arm \
   $(SRC)/Core/HLE/sceAudioRouting.cpp \
   $(SRC)/Core/HLE/sceChnnlsv.cpp \
+  $(SRC)/Core/HLE/sceChkreg.cpp \
   $(SRC)/Core/HLE/sceCcc.cpp \
   $(SRC)/Core/HLE/sceCtrl.cpp.arm \
   $(SRC)/Core/HLE/sceDeflt.cpp \
@@ -721,7 +739,9 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceKernelThread.cpp.arm \
   $(SRC)/Core/HLE/sceKernelTime.cpp \
   $(SRC)/Core/HLE/sceKernelVTimer.cpp \
+  $(SRC)/Core/HLE/sceVideocodec.cpp \
   $(SRC)/Core/HLE/sceMpeg.cpp \
+  $(SRC)/Core/HLE/sceMpegbase.cpp \
   $(SRC)/Core/HLE/sceMd5.cpp \
   $(SRC)/Core/HLE/sceMp4.cpp \
   $(SRC)/Core/HLE/sceAac.cpp \
@@ -743,6 +763,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceNetInet.cpp \
   $(SRC)/Core/HLE/sceNetResolver.cpp \
   $(SRC)/Core/HLE/sceOpenPSID.cpp \
+  $(SRC)/Core/HLE/sceResmgr.cpp \
   $(SRC)/Core/HLE/sceP3da.cpp \
   $(SRC)/Core/HLE/sceMt19937.cpp \
   $(SRC)/Core/HLE/sceParseHttp.cpp \
@@ -764,6 +785,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceUsbMic.cpp \
   $(SRC)/Core/HLE/sceUtility.cpp \
   $(SRC)/Core/HLE/sceVaudio.cpp \
+  $(SRC)/Core/HLE/sceVshBridge.cpp \
   $(SRC)/Core/HLE/scePspNpDrm_user.cpp \
   $(SRC)/Core/HLE/sceGameUpdate.cpp \
   $(SRC)/Core/HLE/sceNp.cpp \
@@ -789,6 +811,9 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/Util/GameManager.cpp \
   $(SRC)/Core/Util/BlockAllocator.cpp \
   $(SRC)/Core/Util/PPGeDraw.cpp \
+  $(SRC)/Core/Util/KL4E.cpp \
+  $(SRC)/Core/Util/PSARUnpack.cpp \
+  $(SRC)/Core/Util/PkgUnpack.cpp \
   $(SRC)/Core/Util/RecentFiles.cpp \
   $(SRC)/Core/Util/VideoPlayer.cpp \
   $(SRC)/git-version.cpp
@@ -914,8 +939,6 @@ LOCAL_STATIC_LIBRARIES += ppsspp_common ppsspp_core libarmips libzstd
 LOCAL_MODULE := ppsspp_jni
 LOCAL_SRC_FILES := \
   $(SRC)/android/jni/app-android.cpp \
-  $(SRC)/android/jni/AndroidJavaGLContext.cpp \
-  $(SRC)/android/jni/AndroidVulkanContext.cpp \
   $(SRC)/android/jni/AndroidAudio.cpp \
   $(SRC)/android/jni/OpenSLContext.cpp \
   $(SRC)/UI/ImDebugger/ImDebugger.cpp \
@@ -951,6 +974,7 @@ LOCAL_SRC_FILES := \
   $(SRC)/UI/SystemInfoScreen.cpp \
   $(SRC)/UI/GamepadEmu.cpp \
   $(SRC)/UI/JoystickHistoryView.cpp \
+  $(SRC)/UI/LoadStateConfirmScreen.cpp \
   $(SRC)/UI/GameInfoCache.cpp \
   $(SRC)/UI/GameScreen.cpp \
   $(SRC)/UI/UploadScreen.cpp \
@@ -964,6 +988,9 @@ LOCAL_SRC_FILES := \
   $(SRC)/UI/BaseScreens.cpp \
   $(SRC)/UI/Background.cpp \
   $(SRC)/UI/CwCheatScreen.cpp \
+  $(SRC)/UI/InstallPkgScreen.cpp \
+  $(SRC)/UI/FirmwareScreen.cpp \
+  $(SRC)/UI/InstallUpdateScreen.cpp \
   $(SRC)/UI/InstallZipScreen.cpp \
   $(SRC)/UI/JitCompareScreen.cpp \
   $(SRC)/UI/OnScreenDisplay.cpp \
@@ -990,7 +1017,7 @@ ifeq ($(HEADLESS),1)
   LOCAL_MODULE := ppsspp_headless
   LOCAL_SRC_FILES := \
     $(SRC)/headless/Headless.cpp \
-    $(SRC)/headless/HeadlessHost.cpp \
+    $(SRC)/headless/ReverseEngineer.cpp \
     $(SRC)/headless/Compare.cpp
 
   include $(BUILD_EXECUTABLE)
@@ -1009,38 +1036,32 @@ ifeq ($(UNITTEST),1)
   LOCAL_CFLAGS += -fPIE
   LOCAL_LDFLAGS += -fPIE -pie
 
-  ifeq ($(findstring arm64-v8a,$(TARGET_ARCH_ABI)),arm64-v8a)
-    TESTARMEMITTER_FILE = $(SRC)/unittest/TestArm64Emitter.cpp
-  else ifeq ($(findstring armeabi-v7a,$(TARGET_ARCH_ABI)),armeabi-v7a)
-    TESTARMEMITTER_FILE = $(SRC)/unittest/TestArmEmitter.cpp
-  else
-    TESTARMEMITTER_FILE = \
-      $(SRC)/Common/ArmEmitter.cpp \
-      $(SRC)/Common/Arm64Emitter.cpp \
-      $(SRC)/Common/RiscVEmitter.cpp \
-      $(SRC)/Common/LoongArch64Emitter.cpp \
-      $(SRC)/Core/MIPS/ARM/ArmRegCacheFPU.cpp \
-      $(SRC)/Core/Util/DisArm64.cpp \
-      $(SRC)/ext/disarm.cpp \
-      $(SRC)/ext/riscv-disas.cpp \
-      $(SRC)/ext/loongarch-disasm.cpp \
-      $(SRC)/unittest/TestArmEmitter.cpp \
-      $(SRC)/unittest/TestArm64Emitter.cpp \
-      $(SRC)/unittest/TestRiscVEmitter.cpp \
-      $(SRC)/unittest/TestLoongArch64Emitter.cpp \
-      $(SRC)/unittest/TestX64Emitter.cpp
-  endif
-
   LOCAL_MODULE := ppsspp_unittest
   LOCAL_SRC_FILES := \
     $(SRC)/unittest/JitHarness.cpp \
+    $(SRC)/Core/MIPS/ARM/ArmRegCacheFPU.cpp \
+    $(SRC)/Core/Util/DisArm64.cpp \
+    $(SRC)/ext/riscv-disas.cpp \
+    $(SRC)/ext/loongarch-disasm.cpp \
+    $(SRC)/unittest/TestArmEmitter.cpp \
+    $(SRC)/unittest/TestArm64Emitter.cpp \
+	$(SRC)/unittest/TestX64Emitter.cpp \
+    $(SRC)/unittest/TestRiscVEmitter.cpp \
+    $(SRC)/unittest/TestLoongArch64Emitter.cpp \
+    $(SRC)/unittest/TestCrossSIMD.cpp \
     $(SRC)/unittest/TestIRPassSimplify.cpp \
     $(SRC)/unittest/TestShaderGenerators.cpp \
     $(SRC)/unittest/TestSoftwareGPUJit.cpp \
     $(SRC)/unittest/TestThreadManager.cpp \
     $(SRC)/unittest/TestVertexJit.cpp \
+    $(SRC)/unittest/TestTextureReplacer.cpp \
     $(SRC)/unittest/TestVFS.cpp \
-    $(TESTARMEMITTER_FILE) \
+    $(SRC)/unittest/TestDemangle.cpp \
+    $(SRC)/unittest/TestLzrc.cpp \
+    $(SRC)/unittest/TestMpegCsc.cpp \
+    $(SRC)/unittest/TestSplineTessellation.cpp \
+    $(SRC)/unittest/TestGEMath.cpp \
+    $(SRC)/unittest/TestZipSlip.cpp \
     $(SRC)/unittest/UnitTest.cpp
 
   include $(BUILD_EXECUTABLE)

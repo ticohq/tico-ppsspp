@@ -2,6 +2,7 @@
 #include "Common/Data/Text/I18n.h"
 #include "UI/SimpleDialogScreen.h"
 #include "Common/UI/PopupScreens.h"
+#include "Common/UI/ScreenManager.h"
 #include "UI/MiscViews.h"
 
 ViewLayoutMode UISimpleBaseDialogScreen::LayoutMode() const {
@@ -45,7 +46,7 @@ void UISimpleBaseDialogScreen::CreateViews() {
 ViewLayoutMode UITwoPaneBaseDialogScreen::LayoutMode() const {
 	const bool portrait = GetDeviceOrientation() == DeviceOrientation::Portrait;
 	if (portrait) {
-		if ((flags_ & TwoPaneFlags::SettingsCanScroll) || (flags_ & TwoPaneFlags::ContentsCanScroll)) {
+		if ((flags_ & TwoPaneFlags::SettingsCanScroll) && !(flags_ & TwoPaneFlags::SettingsToTheRight)) {
 			return ViewLayoutMode::IgnoreBottomInset;
 		} else {
 			return ViewLayoutMode::ApplyInsets;

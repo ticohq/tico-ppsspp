@@ -39,20 +39,22 @@ VkPresentModeKHR GetSwitchPresentMode(Draw::DrawContext *draw) {
 class TicoVulkanGraphicsContext final : public GraphicsContext {
 public:
 	~TicoVulkanGraphicsContext() override {
-		Shutdown();
+		ShutdownAll();
 	}
 
-	bool InitFromRenderThread(std::string *errorMessage) override {
+	// The whole of Vulkan at once (API, surface, swapchain and draw context):
+	// tico's host creates it before the emulator runs, on its one thread.
+	bool InitAll(std::string *errorMessage) {
 		auto fail = [&](const std::string &message) {
 			ERROR_LOG(Log::G3D, "TicoVulkanGraphicsContext init failed: %s", message.c_str());
 			if (errorMessage) {
 				*errorMessage = message;
 			}
-			Shutdown();
+			ShutdownAll();
 			return false;
 		};
 
-		INFO_LOG(Log::G3D, "TicoVulkanGraphicsContext::InitFromRenderThread begin");
+		INFO_LOG(Log::G3D, "TicoVulkanGraphicsContext::InitAll begin");
 		init_glslang();
 		glslangInitialized_ = true;
 
@@ -126,11 +128,16 @@ public:
 			return fail("Vulkan swapchain did not expose any backbuffers");
 		}
 
-		INFO_LOG(Log::G3D, "TicoVulkanGraphicsContext::InitFromRenderThread complete");
+		INFO_LOG(Log::G3D, "TicoVulkanGraphicsContext::InitAll complete");
 		return true;
 	}
 
-	void Shutdown() override {
+	// PPSSPP may tear the API down itself; ShutdownAll is safe to run twice.
+	void ShutdownAPI() override {
+		ShutdownAll();
+	}
+
+	void ShutdownAll() {
 		renderManager_ = nullptr;
 
 		if (draw_ && vulkan_ && vulkan_->IsSwapchainInited()) {
@@ -217,8 +224,8 @@ bool TicoGraphicsHost::Init(std::string *error_message, GraphicsContext **ctx, G
 		return false;
 	}
 
-	GraphicsContext *graphicsContext = new TicoVulkanGraphicsContext();
-	if (!graphicsContext->InitFromRenderThread(error_message)) {
+	TicoVulkanGraphicsContext *graphicsContext = new TicoVulkanGraphicsContext();
+	if (!graphicsContext->InitAll(error_message)) {
 		delete graphicsContext;
 		*ctx = nullptr;
 		return false;
@@ -234,7 +241,7 @@ void TicoGraphicsHost::Shutdown() {
 		return;
 	}
 
-	gfx_->Shutdown();
+	gfx_->ShutdownAPI();
 	delete gfx_;
 	gfx_ = nullptr;
 }

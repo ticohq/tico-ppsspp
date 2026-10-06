@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -39,7 +38,7 @@ class PointerWrap;
 class MIPSState;
 
 namespace MIPSComp {
-	void JitAt();
+	void JitAt(MIPSState *mips);
 
 	class MIPSFrontendInterface {
 	public:
@@ -170,7 +169,6 @@ namespace MIPSComp {
 	u32 ResolveNotTakenTarget(const BranchInfo &branchInfo);
 
 	extern JitInterface *jit;
-	extern std::recursive_mutex jitLock;
 
 	void DoDummyJitState(PointerWrap &p);
 

@@ -47,8 +47,10 @@
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/HLE/FunctionWrappers.h"
 #include "Core/HLE/sceSas.h"
+#include "Core/HLE/sceVideocodec.h"
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceKernelThread.h"
+#include "Core/HLE/sceKernelInterrupt.h"
 
 // TODO - allow more than one, associating each with one Core pointer (passed in to all the functions)
 // No known games use more than one instance of Sas though.
@@ -203,6 +205,12 @@ void __SasDoState(PointerWrap &p) {
 	CoreTiming::RestoreRegisterEvent(sasMixEvent, "SasMix", sasMixFinish);
 }
 
+void __SasWaitForMix() {
+	if (sasThreadState == SasThreadState::QUEUED) {
+		__SasDrain();
+	}
+}
+
 void __SasShutdown() {
 	__SasDisableThread();
 
@@ -256,7 +264,13 @@ static u32 sceSasGetEndFlag(u32 core) {
 }
 
 static int delaySasResult(int result) {
-	const int usec = sas->EstimateMixUs();
+	// The mix runs on the Media Engine, after anything else it's busy with.
+	const int usec = MEScheduleJob(sas->EstimateMixUs());
+
+	// Nothing can wait in an interrupt handler (the wait would go to the idle thread it runs on.)
+	if (__IsInInterrupt()) {
+		return result;
+	}
 
 	// No event, fall back.
 	if (sasMixEvent == -1) {
@@ -422,7 +436,7 @@ static u32 sceSasSetVolume(u32 core, int voiceNum, int leftVol, int rightVol, in
 	bool overVolume = abs(leftVol) > PSP_SAS_VOL_MAX || abs(rightVol) > PSP_SAS_VOL_MAX;
 	overVolume = overVolume || abs(effectLeftVol) > PSP_SAS_VOL_MAX || abs(effectRightVol) > PSP_SAS_VOL_MAX;
 	if (overVolume) {
-		return hleLogError(Log::sceSas, SCE_SAS_ERROR_INVALID_VOLUME);
+		return hleLogWarning(Log::sceSas, SCE_SAS_ERROR_INVALID_VOLUME, "invalid volume");
 	}
 
 	__SasDrain();
@@ -609,8 +623,7 @@ static u32 sceSasRevParam(u32 core, int delay, int feedback) {
 	}
 
 	__SasDrain();
-	sas->waveformEffect.delay = delay;
-	sas->waveformEffect.feedback = feedback;
+	sas->SetWaveformEffectParams(delay, feedback);
 	return hleLogDebug(Log::sceSas, 0);
 }
 
@@ -637,6 +650,14 @@ static u32 sceSasGetGrain(u32 core) {
 }
 
 static u32 sceSasSetGrain(u32 core, int grain) {
+	// Unlike sceSasInit, this took no validation at all - a bad grain size could
+	// both throw on the allocation below and (for a moderately large but successfully
+	// allocated value beyond PSP_SAS_MAX_GRAIN) read out of bounds of the fixed-size
+	// mixTemp_ buffer during mixing. Apply the same bounds sceSasInit uses.
+	if (grain < 0x40 || grain > 0x800 || (grain & 0x1F) != 0) {
+		ERROR_LOG_REPORT(Log::sceSas, "sceSasSetGrain(%08x, %i): bad grain size", core, grain);
+		return hleNoLog(SCE_SAS_ERROR_INVALID_GRAIN);
+	}
 	__SasDrain();
 	sas->SetGrainSize(grain);
 	return hleLogInfo(Log::sceSas, 0);
@@ -665,7 +686,7 @@ static u32 sceSasGetAllEnvelopeHeights(u32 core, u32 heightsAddr) {
 	__SasDrain();
 	for (int i = 0; i < PSP_SAS_VOICES_MAX; i++) {
 		int voiceHeight = sas->voices[i].envelope.GetHeight();
-		Memory::Write_U32(voiceHeight, heightsAddr + i * 4);
+		Memory::WriteOrException_U32(voiceHeight, heightsAddr + i * 4);
 	}
 
 	return hleLogDebug(Log::sceSas, 0);
@@ -686,6 +707,12 @@ static u32 __sceSasSetVoiceATRAC3(u32 core, int voiceNum, u32 atrac3Context) {
 		return hleLogWarning(Log::sceSas, SCE_SAS_ERROR_INVALID_VOICE, "invalid voicenum");
 	}
 
+	// Not sure what an appropriate range length check is. It's at least 256 though.
+	if (!Memory::IsValid4AlignedRange(atrac3Context, 256)) {
+		// Untested
+		return hleLogError(Log::sceSas, SCE_SAS_ERROR_INVALID_PARAMETER, "invalid ATRAC3 context address");
+	}
+
 	__SasDrain();
 	SasVoice &v = sas->voices[voiceNum];
 	if (v.type == VOICETYPE_ATRAC3) {
@@ -695,7 +722,7 @@ static u32 __sceSasSetVoiceATRAC3(u32 core, int voiceNum, u32 atrac3Context) {
 	v.loop = false;
 	v.playing = true;
 	v.atrac3.SetContext(atrac3Context);
-	Memory::Write_U32(atrac3Context, core + 56 * voiceNum + 20);
+	Memory::WriteUnchecked_U32(atrac3Context, core + 56 * voiceNum + 20);
 	return hleLogDebug(Log::sceSas, 0);
 }
 
@@ -729,7 +756,7 @@ static u32 __sceSasUnsetATRAC3(u32 core, int voiceNum) {
 	v.on = false;
 	// This unpauses.  Some games, like Sol Trigger, depend on this.
 	v.paused = false;
-	Memory::Write_U32(0, core + 56 * voiceNum + 20);
+	Memory::WriteOrException_U32(0, core + 56 * voiceNum + 20);
 
 	return hleLogDebug(Log::sceSas, 0);
 }
@@ -744,7 +771,7 @@ void __SasGetDebugStats(char *stats, size_t bufsize) {
 
 const HLEFunction sceSasCore[] = {
 	{0X42778A9F, &WrapU_UUUUU<sceSasInit>,               "__sceSasInit",                  'x', "xxxxx"  },
-	{0XA3589D81, &WrapU_UU<_sceSasCore>,                 "__sceSasCore",                  'x', "xx"     },
+	{0XA3589D81, &WrapU_UU<_sceSasCore>,                 "__sceSasCore",                  'x', "xx",    HLE_NOT_IN_INTERRUPT },
 	{0X50A14DFC, &WrapU_UUII<_sceSasCoreWithMix>,        "__sceSasCoreWithMix",           'x', "xxii"   },
 	{0X68A46B95, &WrapU_U<sceSasGetEndFlag>,             "__sceSasGetEndFlag",            'x', "x"      },
 	{0X440CA7D8, &WrapU_UIIIII<sceSasSetVolume>,         "__sceSasSetVolume",             'x', "xiiiii" },

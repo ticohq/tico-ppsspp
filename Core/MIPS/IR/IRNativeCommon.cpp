@@ -149,7 +149,7 @@ void IRNativeBackend::DoMIPSInst(uint32_t value) {
 	if constexpr (enableDebugStats)
 		debugSeenNotCompiled[MIPSGetName(op)]++;
 
-	MIPSInterpret(op);
+	MIPSInterpret(currentMIPS, op);
 }
 
 // This is called from IR->JIT implementation to fall back to the IR interpreter for missing ops.
@@ -422,16 +422,16 @@ void IRNativeBackend::CompileIRInst(IRInst inst) {
 		CompIR_VecPack(inst);
 		break;
 
-	case IROp::Vec4ClampToZero:
-	case IROp::Vec2ClampToZero:
-		CompIR_VecClamp(inst);
-		break;
-
 	case IROp::FSin:
 	case IROp::FCos:
 	case IROp::FRSqrt:
 	case IROp::FRecip:
 	case IROp::FAsin:
+	case IROp::FVSqrt:
+	case IROp::FExp2:
+	case IROp::FLog2:
+	case IROp::FHalfToFloat:
+	case IROp::FSinCos:
 		CompIR_FSpecial(inst);
 		break;
 
@@ -440,6 +440,7 @@ void IRNativeBackend::CompileIRInst(IRInst inst) {
 		break;
 
 	case IROp::Syscall:
+	case IROp::SyscallUnresolved:
 	case IROp::CallReplacement:
 	case IROp::Break:
 		CompIR_System(inst);

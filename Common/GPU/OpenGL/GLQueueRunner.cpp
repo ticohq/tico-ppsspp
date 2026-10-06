@@ -130,6 +130,15 @@ void GLQueueRunner::RunInitSteps(const FastVec<GLRInitStep> &steps, bool skipGLC
 				}
 				break;
 			}
+			case GLRInitStepType::TEXTURE_SUBIMAGE:
+			{
+				if (step.texture_subimage.allocType == GLRAllocType::ALIGNED) {
+					FreeAlignedMemory(step.texture_subimage.data);
+				} else if (step.texture_subimage.allocType == GLRAllocType::NEW) {
+					delete[] step.texture_subimage.data;
+				}
+				break;
+			}
 			case GLRInitStepType::CREATE_PROGRAM:
 			{
 				WARN_LOG(Log::G3D, "CREATE_PROGRAM found with skipGLCalls, not good");
@@ -138,6 +147,7 @@ void GLQueueRunner::RunInitSteps(const FastVec<GLRInitStep> &steps, bool skipGLC
 			case GLRInitStepType::CREATE_SHADER:
 			{
 				WARN_LOG(Log::G3D, "CREATE_SHADER found with skipGLCalls, not good");
+				delete[] step.create_shader.code;
 				break;
 			}
 			default:
@@ -400,6 +410,31 @@ void GLQueueRunner::RunInitSteps(const FastVec<GLRInitStep> &steps, bool skipGLC
 			CHECK_GL_ERROR_IF_DEBUG();
 			break;
 		}
+		case GLRInitStepType::TEXTURE_SUBIMAGE:
+		{
+			GLRTexture *tex = step.texture_subimage.texture;
+			CHECK_GL_ERROR_IF_DEBUG();
+			if (boundTexture != tex->texture) {
+				glBindTexture(tex->target, tex->texture);
+				boundTexture = tex->texture;
+			}
+			_assert_(tex->target == GL_TEXTURE_2D);
+			_assert_(step.texture_subimage.data != nullptr);
+			GLenum internalFormat, format, type;
+			int alignment;
+			Thin3DFormatToGLFormatAndType(step.texture_subimage.format, internalFormat, format, type, alignment);
+			glTexSubImage2D(tex->target, step.texture_subimage.level,
+				step.texture_subimage.x, step.texture_subimage.y,
+				step.texture_subimage.width, step.texture_subimage.height,
+				format, type, step.texture_subimage.data);
+			if (step.texture_subimage.allocType == GLRAllocType::ALIGNED) {
+				FreeAlignedMemory(step.texture_subimage.data);
+			} else if (step.texture_subimage.allocType == GLRAllocType::NEW) {
+				delete[] step.texture_subimage.data;
+			}
+			CHECK_GL_ERROR_IF_DEBUG();
+			break;
+		}
 		case GLRInitStepType::TEXTURE_FINALIZE:
 		{
 			CHECK_GL_ERROR_IF_DEBUG();
@@ -433,8 +468,7 @@ void GLQueueRunner::RunInitSteps(const FastVec<GLRInitStep> &steps, bool skipGLC
 		// Calling glGetError() isn't great, but at the end of init, only after creating textures, shouldn't be too bad...
 		GLenum err = glGetError();
 		if (err == GL_OUT_OF_MEMORY) {
-			WARN_LOG(Log::G3D, "GL ran out of GPU memory; switching to low memory mode");
-			sawOutOfMemory_ = true;
+			WARN_LOG(Log::G3D, "GL ran out of GPU memory! Bad!");
 		} else if (err != GL_NO_ERROR) {
 			// We checked the err anyway, might as well log if there is one.
 			std::string errorString = GLEnumToString(err);
@@ -644,6 +678,9 @@ void GLQueueRunner::RunSteps(const std::vector<GLRStep *> &steps, GLFrameData &f
 								delete[] c.texture_subimage.data;
 							}
 						}
+						break;
+					case GLRRenderCommand::UNIFORMSTEREOMATRIX:
+						delete[] c.uniformStereoMatrix4.mData;
 						break;
 					default:
 						break;
@@ -1233,7 +1270,9 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 					glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf);
 					curElemArrayBuffer = buf;
 				}
-				if (c.draw.instances == 1) {
+				if (c.draw.instances == 1 && c.draw.maxIndex >= 0 && (!gl_extensions.IsGLES || gl_extensions.GLES3)) {
+					glDrawRangeElements(c.draw.mode, 0, c.draw.maxIndex, c.draw.count, c.draw.indexType, (void *)(intptr_t)c.draw.indexOffset);
+				} else if (c.draw.instances == 1) {
 					glDrawElements(c.draw.mode, c.draw.count, c.draw.indexType, (void *)(intptr_t)c.draw.indexOffset);
 				} else {
 					glDrawElementsInstanced(c.draw.mode, c.draw.count, c.draw.indexType, (void *)(intptr_t)c.draw.indexOffset, c.draw.instances);
@@ -1263,15 +1302,13 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				break;
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
-			if (tex->canWrap) {
-				if (tex->wrapS != c.textureSampler.wrapS) {
-					glTexParameteri(tex->target, GL_TEXTURE_WRAP_S, c.textureSampler.wrapS);
-					tex->wrapS = c.textureSampler.wrapS;
-				}
-				if (tex->wrapT != c.textureSampler.wrapT) {
-					glTexParameteri(tex->target, GL_TEXTURE_WRAP_T, c.textureSampler.wrapT);
-					tex->wrapT = c.textureSampler.wrapT;
-				}
+			if (tex->wrapS != c.textureSampler.wrapS) {
+				glTexParameteri(tex->target, GL_TEXTURE_WRAP_S, c.textureSampler.wrapS);
+				tex->wrapS = c.textureSampler.wrapS;
+			}
+			if (tex->wrapT != c.textureSampler.wrapT) {
+				glTexParameteri(tex->target, GL_TEXTURE_WRAP_T, c.textureSampler.wrapT);
+				tex->wrapT = c.textureSampler.wrapT;
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
 			if (tex->magFilter != c.textureSampler.magFilter) {
@@ -1284,10 +1321,12 @@ void GLQueueRunner::PerformRenderPass(const GLRStep &step, bool first, bool last
 				tex->minFilter = c.textureSampler.minFilter;
 			}
 			CHECK_GL_ERROR_IF_DEBUG();
-			if (tex->anisotropy != c.textureSampler.anisotropy) {
-				if (c.textureSampler.anisotropy != 0.0f) {
-					glTexParameterf(tex->target, GL_TEXTURE_MAX_ANISOTROPY_EXT, c.textureSampler.anisotropy);
-				}
+			// 0.0f means "don't care", used by callers that never want anisotropy. Note that we must
+			// only record the value when we actually set it, or we'd think we had reset the texture
+			// to something we never applied.
+			if (tex->anisotropy != c.textureSampler.anisotropy && c.textureSampler.anisotropy != 0.0f && caps_.anisoSupported) {
+				// Values above the device maximum are not allowed, and the minimum is 1.0.
+				glTexParameterf(tex->target, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::max(1.0f, std::min(c.textureSampler.anisotropy, maxAnisotropyLevel_)));
 				tex->anisotropy = c.textureSampler.anisotropy;
 			}
 			CHECK_GL_ERROR_IF_DEBUG();

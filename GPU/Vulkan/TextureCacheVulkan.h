@@ -33,9 +33,12 @@ class DrawEngineVulkan;
 
 class VulkanContext;
 class VulkanTexture;
+class StringWriter;
 
 class SamplerCache {
 public:
+	SamplerCache(const SamplerCache &) = delete;
+	SamplerCache &operator=(const SamplerCache &) = delete;
 	SamplerCache(VulkanContext *vulkan) : vulkan_(vulkan), cache_(16) {}
 	~SamplerCache();
 	VkSampler GetOrCreateSampler(const SamplerCacheKey &key);
@@ -76,7 +79,7 @@ public:
 
 	bool GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level, bool *isFramebuffer) override;
 
-	void GetStats(char *ptr, size_t size);
+	void GetStats(StringWriter &w);
 
 	std::vector<std::string> DebugGetSamplerIDs() const;
 	std::string DebugGetSamplerString(const std::string &id, DebugShaderStringType stringType);
@@ -88,7 +91,7 @@ protected:
 	void Unbind() override;
 	void ReleaseTexture(TexCacheEntry *entry, bool delete_them) override;
 	void BindAsClutTexture(Draw::Texture *tex, bool smooth) override;
-	void ApplySamplingParams(const SamplerCacheKey &key) override;
+	void ApplySamplerByKey(const SamplerCacheKey &key) override;
 	void BoundFramebufferTexture() override;
 
 private:
@@ -117,7 +120,6 @@ private:
 
 	void LoadVulkanTextureLevel(TexCacheEntry &entry, uint8_t *writePtr, int rowPitch,  int level, int scaleFactor, VkFormat dstFmt);
 	static VkFormat GetDestFormat(GETextureFormat format, GEPaletteFormat clutFormat) ;
-	void UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBase, bool clutIndexIsSimple) override;
 
 	void BuildTexture(TexCacheEntry *const entry) override;
 
@@ -128,7 +130,8 @@ private:
 	bool RunMultipassCompute(VulkanContext *vulkan, VkCommandBuffer cmdInit, VkImageView dstView, VkBuffer texBuf, uint32_t bufferOffset, int srcSize, int srcWidth, int srcHeight, int dstWidth, int dstHeight);
 	bool ScaleBufferToImage(VulkanContext *vulkan, VkCommandBuffer cmdInit, VkImageView dstView, VkBuffer texBuf, uint32_t bufferOffset, int srcSize, int srcWidth, int srcHeight, int dstWidth, int dstHeight);
 
-	void LoadConstantBuffer(VulkanContext *vulkan, VkCommandBuffer cmdInit);
+	// Returns false if the constant buffer couldn't be loaded, in which case hardware scaling gets disabled.
+	bool LoadConstantBuffer(VulkanContext *vulkan, VkCommandBuffer cmdInit);
 
 	VulkanComputeShaderManager computeShaderManager_;
 
@@ -152,7 +155,4 @@ private:
 	Path cbufferPath_;
 	VulkanBuffer textureScaleCBuffer_;
 	bool cbufferInited_ = true;
-	bool cbufferFailed_ = false;
 };
-
-VkFormat getClutDestFormatVulkan(GEPaletteFormat format);

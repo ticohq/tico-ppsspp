@@ -30,6 +30,13 @@ void DoMap(PointerWrap &p, M &x, typename M::mapped_type &default_val) {
 	case PointerWrap::MODE_READ:
 	{
 		x.clear();
+		// Guard against an attacker-controlled count driving an enormous number of
+		// loop iterations/allocations, same spirit as DoVector's guard.
+		constexpr size_t minElemSize = SerializeMinElemSize<typename M::key_type>() + SerializeMinElemSize<typename M::mapped_type>();
+		if (number > p.Remaining() / minElemSize) {
+			p.SetError(PointerWrap::ERROR_FAILURE);
+			return;
+		}
 		while (number > 0) {
 			typename M::key_type first = typename M::key_type();
 			Do(p, first);
@@ -65,6 +72,8 @@ void Do(PointerWrap &p, std::map<K, T *> &x) {
 		for (auto &iter : x) {
 			delete iter.second;
 		}
+		// Right away: if reading the count fails, DoMap won't get as far as clearing.
+		x.clear();
 	}
 	T *dv = nullptr;
 	DoMap(p, x, dv);
@@ -82,6 +91,8 @@ void Do(PointerWrap &p, std::unordered_map<K, T *> &x) {
 		for (auto &iter : x) {
 			delete iter.second;
 		}
+		// Right away: if reading the count fails, DoMap won't get as far as clearing.
+		x.clear();
 	}
 	T *dv = nullptr;
 	DoMap(p, x, dv);
@@ -101,6 +112,13 @@ void DoMultimap(PointerWrap &p, M &x, typename M::mapped_type &default_val) {
 	case PointerWrap::MODE_READ:
 	{
 		x.clear();
+		// Guard against an attacker-controlled count driving an enormous number of
+		// loop iterations/allocations, same spirit as DoVector's guard.
+		constexpr size_t minElemSize = SerializeMinElemSize<typename M::key_type>() + SerializeMinElemSize<typename M::mapped_type>();
+		if (number > p.Remaining() / minElemSize) {
+			p.SetError(PointerWrap::ERROR_FAILURE);
+			return;
+		}
 		while (number > 0) {
 			typename M::key_type first = typename M::key_type();
 			Do(p, first);
@@ -135,6 +153,8 @@ void Do(PointerWrap &p, std::multimap<K, T *> &x) {
 		for (auto &iter : x) {
 			delete iter.second;
 		}
+		// Right away: if reading the count fails, DoMap won't get as far as clearing.
+		x.clear();
 	}
 	T *dv = nullptr;
 	DoMultimap(p, x, dv);
@@ -152,6 +172,8 @@ void Do(PointerWrap &p, std::unordered_multimap<K, T *> &x) {
 		for (auto &iter : x) {
 			delete iter.second;
 		}
+		// Right away: if reading the count fails, DoMap won't get as far as clearing.
+		x.clear();
 	}
 	T *dv = nullptr;
 	DoMultimap(p, x, dv);

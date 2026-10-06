@@ -23,15 +23,16 @@
 
 #include "Common/CommonTypes.h"
 #include "Common/Data/Convert/ColorConv.h"
+#include "Common/Data/Text/StringWriter.h"
 #include "Common/Math/CrossSIMD.h"
 #include "Common/Log.h"
 #include "Common/LogReporting.h"
-#include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/HDRemaster.h"
 #include "Core/MIPS/JitCommon/JitCommon.h"
 #include "Core/Util/AudioFormat.h"  // for clamp_u8
 #include "GPU/Common/ShaderCommon.h"
+#include "GPU/Common/VertexReader.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
 #include "GPU/Math3D.h"
@@ -46,19 +47,11 @@ static const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
 
 static constexpr bool validateJit = false;
 
-// When software skinning. This array is only used when non-jitted - when jitted, the matrix
-// is kept in registers.
+// This array might only be used when non-jitted - when jitted, the matrix is kept in registers whenever possible.
 alignas(16) static float skinMatrix[12];
 
 inline int align(int n, int align) {
 	return (n + (align - 1)) & ~(align - 1);
-}
-
-int TranslateNumBones(int bones) {
-	if (!bones) return 0;
-	if (bones < 4) return 4;
-	// if (bones < 8) return 8;   I get drawing problems in FF:CC with this!
-	return bones;
 }
 
 static int DecFmtSize(u8 fmt) {
@@ -81,6 +74,41 @@ static int DecFmtSize(u8 fmt) {
 	default:
 		return 0;
 	}
+}
+
+const char *DecFmtComponentToString(u8 fmt) {
+	switch (fmt) {
+	case DEC_NONE: return "NONE";
+	case DEC_FLOAT_1: return "FLOAT_1";
+	case DEC_FLOAT_2: return "FLOAT_2";
+	case DEC_FLOAT_3: return "FLOAT_3";
+	case DEC_FLOAT_4: return "FLOAT_4";
+	case DEC_S8_3: return "S8_3";
+	case DEC_S16_3: return "S16_3";
+	case DEC_U8_1:  return "U8_1";
+	case DEC_U8_2:  return "U8_2";
+	case DEC_U8_3:  return "U8_3";
+	case DEC_U8_4:  return "U8_4";
+	case DEC_U16_1: return "U16_1";
+	case DEC_U16_2: return "U16_2";
+	case DEC_U16_3: return "U16_3";
+	case DEC_U16_4: return "U16_4";
+	default: return "UNKNOWN";
+	}
+}
+
+std::string DecVtxFormat::ToString() const {
+	char buf[256];
+	StringWriter w(buf, sizeof(buf));
+	if (w0fmt) {
+		w.F("W0: %s ", DecFmtComponentToString(w0fmt));
+	}
+	w.F("W1: %s ", DecFmtComponentToString(w1fmt));
+	w.F("UV: %s ", DecFmtComponentToString(uvfmt));
+	w.F("C0: %s ", DecFmtComponentToString(c0fmt));
+	w.F("C1: %s ", DecFmtComponentToString(c1fmt));
+	w.F("N: %s", DecFmtComponentToString(nrmfmt));
+	return w.as_string();
 }
 
 void DecVtxFormat::ComputeID() {
@@ -142,8 +170,9 @@ void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBo
 		bool oob = false;
 		const u32_le *ind32 = (const u32_le *)inds;
 		for (int i = 0; i < count; i++) {
+			// The PSP ignores the upper 16 bits, so only the low ones count.
 			const u16 value = (u16)ind32[i];
-			// These aren't documented and should be rare.  Let's bounds check each one.
+			// Games setting the upper bits should be rare, so report them.
 			if (ind32[i] != value) {
 				oob = true;
 			}
@@ -192,66 +221,6 @@ void PrintDecodedVertex(const VertexReader &vtx) {
 	float pos[3];
 	vtx.ReadPosAuto(pos);
 	printf("P: %f %f %f\n", pos[0], pos[1], pos[2]);
-}
-
-void VertexDecoder::Step_WeightsU8(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
-	u8 *wt = (u8 *)(decoded + dec->decFmt.w0off);
-	const u8 *wdata = (const u8*)(ptr);
-	int j;
-	const int nweights = dec->nweights;
-	for (j = 0; j < nweights; j++)
-		wt[j] = wdata[j];
-	while (j & 3)   // Zero additional weights rounding up to 4.
-		wt[j++] = 0;
-}
-
-void VertexDecoder::Step_WeightsU16(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
-	u16 *wt = (u16 *)(decoded + dec->decFmt.w0off);
-	const u16_le *wdata = (const u16_le *)(ptr);
-	int j;
-	const int nweights = dec->nweights;
-	for (j = 0; j < nweights; j++)
-		wt[j] = wdata[j];
-	while (j & 3)   // Zero additional weights rounding up to 4.
-		wt[j++] = 0;
-}
-
-void VertexDecoder::Step_WeightsU8ToFloat(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
-	float *wt = (float *)(decoded + dec->decFmt.w0off);
-	const u8 *wdata = (const u8*)(ptr);
-	int j;
-	const int nweights = dec->nweights;
-	for (j = 0; j < nweights; j++) {
-		wt[j] = (float)wdata[j] * (1.0f / 128.0f);
-	}
-	while (j & 3)   // Zero additional weights rounding up to 4.
-		wt[j++] = 0;
-}
-
-void VertexDecoder::Step_WeightsU16ToFloat(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
-	float *wt = (float *)(decoded + dec->decFmt.w0off);
-	const u16_le *wdata = (const u16_le *)(ptr);
-	int j;
-	const int nweights = dec->nweights;
-	for (j = 0; j < nweights; j++) {
-		wt[j] = (float)wdata[j] * (1.0f / 32768.0f);
-	}
-	while (j & 3)   // Zero additional weights rounding up to 4.
-		wt[j++] = 0;
-}
-
-// Float weights should be uncommon, we can live with having to multiply these by 2.0
-// to avoid special checks in the vertex shader generator.
-// (PSP uses 0.0-2.0 fixed point numbers for weights)
-void VertexDecoder::Step_WeightsFloat(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
-	float *wt = (float *)(decoded + dec->decFmt.w0off);
-	const float_le *wdata = (const float_le *)(ptr);
-	int j;
-	for (j = 0; j < dec->nweights; j++) {
-		wt[j] = wdata[j];
-	}
-	while (j & 3)   // Zero additional weights rounding up to 4.
-		wt[j++] = 0.0f;
 }
 
 void VertexDecoder::ComputeSkinMatrix(const float weights[8]) const {
@@ -384,32 +353,48 @@ void VertexDecoder::Step_TcFloatThrough(const VertexDecoder *dec, const u8 *ptr,
 	gstate_c.vertBounds.maxV = std::max(gstate_c.vertBounds.maxV, (u16)uvdata[1]);
 }
 
+// The arm64 JIT and the NEON handwritten decoders fuse the UV prescale (FMLA), the x86 ones don't
+// (MULPS + ADDPS). Spell out which one happens here instead of leaving it to the compiler's
+// contraction setting: clang contracts this by default and MSVC doesn't, so relying on it makes the
+// steps disagree with the JIT on Windows on ARM only.
+static inline float PrescaleUV(float value, float scale, float offset) {
+#if PPSSPP_ARCH(ARM64_NEON) || PPSSPP_ARCH(RISCV64) || PPSSPP_ARCH(LOONGARCH64)
+	// The riscv64 and loongarch64 JITs fuse this too - and on those the compiler would contract
+	// the plain expression below into an FMA anyway, so say so rather than leaving it to chance.
+	return fmaf(value, scale, offset);
+#else
+	// Safe as long as x86 stays on the SSE2 baseline, which has nothing to contract into. A build
+	// targeting FMA would need this spelled out too, the other way around from the arm64 one.
+	return value * scale + offset;
+#endif
+}
+
 void VertexDecoder::Step_TcU8Prescale(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	float *uv = (float *)(decoded + dec->decFmt.uvoff);
 	const u8 *uvdata = (const u8 *)(ptr + dec->tcoff);
-	uv[0] = (float)uvdata[0] * (1.f / 128.f) * dec->prescaleUV_->uScale + dec->prescaleUV_->uOff;
-	uv[1] = (float)uvdata[1] * (1.f / 128.f) * dec->prescaleUV_->vScale + dec->prescaleUV_->vOff;
+	uv[0] = PrescaleUV((float)uvdata[0] * (1.f / 128.f), dec->prescaleUV_->uScale, dec->prescaleUV_->uOff);
+	uv[1] = PrescaleUV((float)uvdata[1] * (1.f / 128.f), dec->prescaleUV_->vScale, dec->prescaleUV_->vOff);
 }
 
 void VertexDecoder::Step_TcU16Prescale(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	float *uv = (float *)(decoded + dec->decFmt.uvoff);
 	const u16_le *uvdata = (const u16_le *)(ptr + dec->tcoff);
-	uv[0] = (float)uvdata[0] * (1.f / 32768.f) * dec->prescaleUV_->uScale + dec->prescaleUV_->uOff;
-	uv[1] = (float)uvdata[1] * (1.f / 32768.f) * dec->prescaleUV_->vScale + dec->prescaleUV_->vOff;
+	uv[0] = PrescaleUV((float)uvdata[0] * (1.f / 32768.f), dec->prescaleUV_->uScale, dec->prescaleUV_->uOff);
+	uv[1] = PrescaleUV((float)uvdata[1] * (1.f / 32768.f), dec->prescaleUV_->vScale, dec->prescaleUV_->vOff);
 }
 
 void VertexDecoder::Step_TcU16DoublePrescale(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	float *uv = (float *)(decoded + dec->decFmt.uvoff);
 	const u16_le *uvdata = (const u16_le *)(ptr + dec->tcoff);
-	uv[0] = (float)uvdata[0] * (1.f / 16384.f) * dec->prescaleUV_->uScale + dec->prescaleUV_->uOff;
-	uv[1] = (float)uvdata[1] * (1.f / 16384.f) * dec->prescaleUV_->vScale + dec->prescaleUV_->vOff;
+	uv[0] = PrescaleUV((float)uvdata[0] * (1.f / 16384.f), dec->prescaleUV_->uScale, dec->prescaleUV_->uOff);
+	uv[1] = PrescaleUV((float)uvdata[1] * (1.f / 16384.f), dec->prescaleUV_->vScale, dec->prescaleUV_->vOff);
 }
 
 void VertexDecoder::Step_TcFloatPrescale(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	float *uv = (float *)(decoded + dec->decFmt.uvoff);
 	const float_le *uvdata = (const float_le *)(ptr + dec->tcoff);
-	uv[0] = uvdata[0] * dec->prescaleUV_->uScale + dec->prescaleUV_->uOff;
-	uv[1] = uvdata[1] * dec->prescaleUV_->vScale + dec->prescaleUV_->vOff;
+	uv[0] = PrescaleUV(uvdata[0], dec->prescaleUV_->uScale, dec->prescaleUV_->uOff);
+	uv[1] = PrescaleUV(uvdata[1], dec->prescaleUV_->vScale, dec->prescaleUV_->vOff);
 }
 
 void VertexDecoder::Step_TcU8MorphToFloat(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
@@ -777,9 +762,7 @@ void VertexDecoder::Step_NormalS16Morph(const VertexDecoder *dec, const u8 *ptr,
 			acc[j] += sv[j] * multiplier;
 	}
 	float *normal = (float *)(decoded + dec->decFmt.nrmoff);
-	normal[0] = acc[0] * (1.0f / 32768.0f);
-	normal[1] = acc[1] * (1.0f / 32768.0f);
-	normal[2] = acc[2] * (1.0f / 32768.0f);
+	memcpy(normal, acc, sizeof(float) * 3);
 }
 
 void VertexDecoder::Step_NormalFloatMorph(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
@@ -866,9 +849,11 @@ void VertexDecoder::Step_PosS16(const VertexDecoder *dec, const u8 *ptr, u8 *dec
 }
 
 void VertexDecoder::Step_PosFloat(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
-	u8 *v = (u8 *)(decoded + dec->decFmt.posoff);
-	const u8 *fv = (const u8*)(ptr + dec->posoff);
-	memcpy(v, fv, 12);
+	Vec4F32 v = Vec4F32::Load((const float *)(ptr + dec->posoff));
+	// NaN and infinity only have to come out finite, so that the viewport scale can zero them later
+	// like the PSP does (0 * NaN == 0 there). The platforms differ in how (SSE clamps, NEON zeroes),
+	// and so do the JITs, which is fine.
+	v.CleanNaNInfs().Store((float *)(decoded + dec->decFmt.posoff));
 }
 
 void VertexDecoder::Step_PosS8Skin(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
@@ -886,6 +871,7 @@ void VertexDecoder::Step_PosS16Skin(const VertexDecoder *dec, const u8 *ptr, u8 
 }
 
 void VertexDecoder::Step_PosFloatSkin(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
+	// TODO: Clean for NaN/INF here.
 	float *pos = (float *)(decoded + dec->decFmt.posoff);
 	const float_le *fn = (const float_le *)(ptr + dec->posoff);
 	Vec3ByMatrix43(pos, fn, skinMatrix);
@@ -920,7 +906,9 @@ void VertexDecoder::Step_PosFloatThrough(const VertexDecoder *dec, const u8 *ptr
 	float *v = (float *)(decoded + dec->decFmt.posoff);
 	const float *fv = (const float *)(ptr + dec->posoff);
 	memcpy(v, fv, 8);
-	v[2] = fv[2] > 65535.0f ? 65535.0f : (fv[2] < 0.0f ? 0.0f : fv[2]);
+	// Depth is an integer in through mode: truncate, and clamp to 16 bits (NaN becomes 0).
+	const float z = fv[2];
+	v[2] = z >= 65535.0f ? 65535.0f : (z > 0.0f ? (float)(int)z : 0.0f);
 }
 
 void VertexDecoder::Step_PosS8Morph(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
@@ -1024,20 +1012,6 @@ void VertexDecoder::Step_PosFloatMorphSkin(const VertexDecoder *dec, const u8 *p
 	float *v = (float *)(decoded + dec->decFmt.posoff);
 	Vec3ByMatrix43(v, pos, skinMatrix);
 }
-
-static const StepFunction wtstep[4] = {
-	0,
-	&VertexDecoder::Step_WeightsU8,
-	&VertexDecoder::Step_WeightsU16,
-	&VertexDecoder::Step_WeightsFloat,
-};
-
-static const StepFunction wtstepToFloat[4] = {
-	0,
-	&VertexDecoder::Step_WeightsU8ToFloat,
-	&VertexDecoder::Step_WeightsU16ToFloat,
-	&VertexDecoder::Step_WeightsFloat,
-};
 
 // TODO: Morph weights correctly! This is missing. Not sure if any game actually
 // use this functionality at all.
@@ -1237,8 +1211,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		DEBUG_LOG(Log::G3D, "VTYPE: THRU=%i TC=%i COL=%i POS=%i NRM=%i WT=%i NW=%i IDX=%i MC=%i", (int)throughmode, tc, col, pos, nrm, weighttype, nweights, idx, morphcount);
 	}
 
-	skinInDecode = weighttype != 0 && VertTypeIDSkinInDecode(fmt);
-
+	skinInDecode = weighttype != 0;
 	if (weighttype) { // && nweights?
 		weightoff = size;
 		//size = align(size, wtalign[weighttype]);	unnecessary
@@ -1246,43 +1219,9 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		if (wtalign[weighttype] > biggest)
 			biggest = wtalign[weighttype];
 
-		if (skinInDecode) {
-			// No visible output, computes a matrix that is passed through the skinMatrix variable
-			// to the "nrm" and "pos" steps.
-			// Technically we should support morphing the weights too, but I have a hard time
-			// imagining that any game would use that.. but you never know.
-			steps_[numSteps_++] = wtstep_skin[weighttype];
-		} else {
-			int fmtBase = DEC_FLOAT_1;
-			if (options.expandAllWeightsToFloat) {
-				steps_[numSteps_++] = wtstepToFloat[weighttype];
-				fmtBase = DEC_FLOAT_1;
-			} else {
-				steps_[numSteps_++] = wtstep[weighttype];
-				if (weighttype == GE_VTYPE_WEIGHT_8BIT >> GE_VTYPE_WEIGHT_SHIFT) {
-					fmtBase = DEC_U8_1;
-				} else if (weighttype == GE_VTYPE_WEIGHT_16BIT >> GE_VTYPE_WEIGHT_SHIFT) {
-					fmtBase = DEC_U16_1;
-				} else if (weighttype == GE_VTYPE_WEIGHT_FLOAT >> GE_VTYPE_WEIGHT_SHIFT) {
-					fmtBase = DEC_FLOAT_1;
-				}
-			}
-
-			int numWeights = TranslateNumBones(nweights);
-
-			if (numWeights <= 4) {
-				decFmt.w0off = decOff;
-				decFmt.w0fmt = fmtBase + numWeights - 1;
-				decOff += DecFmtSize(decFmt.w0fmt);
-			} else {
-				decFmt.w0off = decOff;
-				decFmt.w0fmt = fmtBase + 3;
-				decOff += DecFmtSize(decFmt.w0fmt);
-				decFmt.w1off = decOff;
-				decFmt.w1fmt = fmtBase + numWeights - 5;
-				decOff += DecFmtSize(decFmt.w1fmt);
-			}
-		}
+		// No visible output, computes a matrix that is passed through the skinMatrix variable
+		// to the "nrm" and "pos" steps.
+		steps_[numSteps_++] = wtstep_skin[weighttype];
 	}
 
 	if (tc) {
@@ -1412,7 +1351,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 
 	if (reportNoPos) {
 		char temp[256]{};
-		ToString(temp, true);
+		ToString(temp, sizeof(temp), true);
 		ERROR_LOG(Log::G3D, "Vertices without position found (and ignored): (%08x) %s", fmt_, temp);
 	}
 
@@ -1435,6 +1374,12 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 	// Attempt to JIT as well. But only do that if the main CPU JIT is enabled, in order to aid
 	// debugging attempts - if the main JIT doesn't work, this one won't do any better, probably.
 	if (jitCache) {
+		// Compile doesn't check for space. We can't clear the cache here since other decoders point into it,
+		// so when it's full (only seen with garbage display lists), new decoders use the interpreter.
+		if (jitCache->GetSpaceLeft() < 4096) {
+			WARN_LOG(Log::G3D, "Vertex decoder JIT cache full, using the interpreter for %08x", fmt_);
+			return;
+		}
 		jitted_ = jitCache->Compile(*this, &jittedSize_);
 		if (!jitted_) {
 			WARN_LOG(Log::G3D, "Vertex decoder JIT failed! fmt = %08x (%s)", fmt_, GetString(SHADER_STRING_SHORT_DESC).c_str());
@@ -1549,8 +1494,8 @@ void VertexDecoder::CompareToJit(const u8 *startPtr, u8 *decodedptr, int count, 
 		controlReader.Goto(i);
 		jittedReader.Goto(i);
 		if (!DecodedVertsAreSimilar(controlReader, jittedReader)) {
-			char name[512]{};
-			ToString(name, true);
+			char name[256]{};
+			ToString(name, sizeof(name), true);
 			ERROR_LOG(Log::G3D, "Encountered vertexjit mismatch at %d/%d for %s", i, count, name);
 			if (morphcount > 1) {
 				printf("Morph:\n");
@@ -1604,26 +1549,30 @@ static const char * const idxnames[4] = { "-", "u8", "u16", "?" };
 static const char * const weightnames[4] = { "-", "u8", "u16", "f" };
 static const char * const colnames[8] = { "", "?", "?", "?", "565", "5551", "4444", "8888" };
 
-int VertexDecoder::ToString(char *output, bool spaces) const {
-	char *start = output;
-	output += sprintf(output, "[%08x] ", fmt_);
-	output += sprintf(output, "P: %s ", posnames[pos]);
-	if (nrm)
-		output += sprintf(output, "N: %s ", nrmnames[nrm]);
-	if (col)
-		output += sprintf(output, "C: %s ", colnames[col]);
-	if (tc)
-		output += sprintf(output, "T: %s ", tcnames[tc]);
-	if (weighttype)
-		output += sprintf(output, "W: %s (%ix) ", weightnames[weighttype], nweights);
-	if (idx)
-		output += sprintf(output, "I: %s ", idxnames[idx]);
-	if (morphcount > 1)
-		output += sprintf(output, "Morph: %i ", morphcount);
-	if (throughmode)
-		output += sprintf(output, " (through)");
+// There's a direct ToString function for vertex types in the GPU debugger, GeDescribeVertexType.
 
-	output += sprintf(output, " (%ib)", VertexSize());
+int VertexDecoder::ToString(char *buf, int bufSize, bool spaces) const {
+	StringWriter w(buf, bufSize);
+
+	char *start = buf;
+	w.F("[%08x] ", fmt_);
+	w.F("P: %s ", posnames[pos]);
+	if (nrm)
+		w.F("N: %s ", nrmnames[nrm]);
+	if (col)
+		w.F("C: %s ", colnames[col]);
+	if (tc)
+		w.F("T: %s ", tcnames[tc]);
+	if (weighttype)
+		w.F("W: %s (%ix) ", weightnames[weighttype], nweights);
+	if (idx)
+		w.F("I: %s ", idxnames[idx]);
+	if (morphcount > 1)
+		w.F("Morph: %i ", morphcount);
+	if (throughmode)
+		w.F(" (through)");
+
+	w.F(" (%ib)", VertexSize());
 
 	if (!spaces) {
 		size_t len = strlen(start);
@@ -1634,17 +1583,16 @@ int VertexDecoder::ToString(char *output, bool spaces) const {
 	}
 
 #ifdef _DEBUG
-	output += sprintf(output, " (%llu)", (long long)decodedCount);
+	w.F(" (%llu)", (long long)decodedCount);
 #endif
-
-	return output - start;
+	return (int)w.size();
 }
 
 std::string VertexDecoder::GetString(DebugShaderStringType stringType) const {
 	char buffer[256];
 	switch (stringType) {
 	case SHADER_STRING_SHORT_DESC:
-		ToString(buffer, true);
+		ToString(buffer, sizeof(buffer), true);
 		return std::string(buffer);
 	case SHADER_STRING_SOURCE_CODE:
 		{
@@ -1699,9 +1647,7 @@ VertexDecoderJitCache::VertexDecoderJitCache()
 }
 
 void VertexDecoderJitCache::Clear() {
-	if (g_Config.iCpuCore == (int)CPUCore::JIT || g_Config.iCpuCore == (int)CPUCore::JIT_IR) {
-		ClearCodeSpace(0);
-	}
+	ClearCodeSpace(0);
 }
 
 struct StepFunctionNameEntry {
@@ -1710,12 +1656,6 @@ struct StepFunctionNameEntry {
 };
 
 static const StepFunctionNameEntry stepFunctionNames[] = {
-	{VertexDecoder::Step_WeightsU8, "WeightsU8"},
-	{VertexDecoder::Step_WeightsU16, "WeightsU16"},
-	{VertexDecoder::Step_WeightsU8ToFloat, "WeightsU8ToFloat"},
-	{VertexDecoder::Step_WeightsU16ToFloat, "WeightsU16ToFloat"},
-	{VertexDecoder::Step_WeightsFloat, "WeightsFloat"},
-
 	{VertexDecoder::Step_WeightsU8Skin, "WeightsU8Skin"},
 	{VertexDecoder::Step_WeightsU16Skin, "WeightsU16Skin"},
 	{VertexDecoder::Step_WeightsFloatSkin, "WeightsFloatSkin"},

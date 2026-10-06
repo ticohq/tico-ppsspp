@@ -42,14 +42,16 @@ struct Draw2DPipelineInfo {
 	Slice<SamplerDef> samplers;
 };
 
-extern const UniformDef g_draw2Duniforms[5];
+extern const UniformDef g_draw2Duniforms[2];
 
 struct Draw2DPipeline {
 	Draw::Pipeline *pipeline;
 	Draw2DPipelineInfo info;
 	char *code;
 	void Release() {
-		pipeline->Release();
+		if (pipeline) {
+			pipeline->Release();
+		}
 		delete[] code;
 		delete this;
 	}

@@ -37,11 +37,13 @@ class IOFile;
 
 class LinkedShader {
 public:
+	LinkedShader(const LinkedShader &) = delete;
+	LinkedShader &operator=(const LinkedShader &) = delete;
 	LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, FShaderID FSID, Shader *fs, bool useHWTransform, bool preloading = false);
 	~LinkedShader();
 
 	void use(const ShaderID &VSID) const;
-	void UpdateUniforms(const ShaderID &VSID, bool useBufferedRendering, const ShaderLanguageDesc &shaderLanguage);
+	void UpdateUniforms(const ShaderID &VSID, const ShaderLanguageDesc &shaderLanguage, bool pixelMapped);
 	void Delete();
 
 	GLRenderManager *render_;
@@ -60,18 +62,20 @@ public:
 	int u_tex;
 	int u_proj;
 	int u_proj_lens;
-	int u_proj_through;
+	int u_xywh;
+	int u_vpScale;
+	int u_vpOffset;
 	int u_texenv;
 	int u_view;
 	int u_texmtx;
 	int u_world;
-	int u_depthRange;   // x,y = viewport xscale/xcenter. z,w=clipping minz/maxz (?)
-	int u_cullRangeMin;
-	int u_cullRangeMax;
-	int u_rotation;
 	int u_mipBias;
 	int u_scaleX;
 	int u_scaleY;
+	int u_NaN;
+
+	int u_rasterOffset;
+	int u_minZmaxZ;
 
 #ifdef USE_BONE_ARRAY
 	int u_bone;  // array, size is numBones
@@ -118,12 +122,6 @@ public:
 	int u_lightdiffuse[4];  // each light consist of vec4[3]
 	int u_lightspecular[4];  // attenuation
 	int u_lightambient[4];  // attenuation
-
-	// Spline Tessellation
-	int u_tess_points; // Control Points
-	int u_tess_weights_u;
-	int u_tess_weights_v;
-	int u_spline_counts;
 };
 
 // Real public interface
@@ -137,6 +135,8 @@ struct ShaderDescGLES {
 
 class Shader {
 public:
+	Shader(const Shader &) = delete;
+	Shader &operator=(const Shader &) = delete;
 	Shader(GLRenderManager *render, const char *code, const std::string &desc, const ShaderDescGLES &params);
 	~Shader();
 	GLRShader *shader;
@@ -159,6 +159,8 @@ private:
 
 class VertexDecoder;
 
+enum class ClipInfoFlags;
+
 class ShaderManagerGLES : public ShaderManagerCommon {
 public:
 	ShaderManagerGLES(Draw::DrawContext *draw);
@@ -168,13 +170,11 @@ public:
 
 	// This is the old ApplyShader split into two parts, because of annoying information dependencies.
 	// If you call ApplyVertexShader, you MUST call ApplyFragmentShader soon afterwards.
-	Shader *ApplyVertexShader(bool useHWTransform, bool useHWTessellation, u32 vertexType, bool weightsAsFloat, bool useSkinInDecode, VShaderID *VSID);
-	LinkedShader *ApplyFragmentShader(VShaderID VSID, Shader *vs, const ComputedPipelineState &pipelineState, bool useBufferedRendering);
+	Shader *ApplyVertexShader(bool useHWTransform, u32 vertexType, ClipInfoFlags clipInfoFlags, VShaderID *VSID);
+	LinkedShader *ApplyFragmentShader(VShaderID VSID, Shader *vs, const ComputedPipelineState &pipelineState, ClipInfoFlags clipInfoFlags, bool pixelMapped);
 
 	void DeviceLost() override;
 	void DeviceRestore(Draw::DrawContext *draw) override;
-
-	void DirtyLastShader() override;
 
 	int GetNumVertexShaders() const { return (int)vsCache_.size(); }
 	int GetNumFragmentShaders() const { return (int)fsCache_.size(); }
@@ -207,8 +207,8 @@ private:
 
 	bool lastVShaderSame_ = false;
 
-	FShaderID lastFSID_;
-	VShaderID lastVSID_;
+	FShaderID lastFSID_{};
+	VShaderID lastVSID_{};
 
 	LinkedShader *lastShader_ = nullptr;
 	u64 shaderSwitchDirtyUniforms_ = 0;

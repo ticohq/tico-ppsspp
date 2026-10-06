@@ -8,7 +8,6 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.AlertDialog;
 import android.app.ApplicationExitInfo;
 import android.app.UiModeManager;
 import android.content.ClipData;
@@ -31,12 +30,10 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
-import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.text.InputType;
 import android.util.Log;
-import android.database.Cursor;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
@@ -56,6 +53,7 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.DisplayCutoutCompat;
@@ -63,9 +61,7 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
-import androidx.documentfile.provider.DocumentFile;
 
-import java.lang.reflect.Field;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -143,11 +139,15 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 	private static final String[] permissionsForMicrophone = {
 		Manifest.permission.RECORD_AUDIO
 	};
+	private static final String[] permissionsForLocalNetwork = {
+		"android.permission.ACCESS_LOCAL_NETWORK"
+	};
 
 	public static final int REQUEST_CODE_STORAGE_PERMISSION = 1;
 	public static final int REQUEST_CODE_LOCATION_PERMISSION = 2;
 	public static final int REQUEST_CODE_CAMERA_PERMISSION = 3;
 	public static final int REQUEST_CODE_MICROPHONE_PERMISSION = 4;
+	public static final int REQUEST_CODE_LOCAL_NETWORK_PERMISSION = 5;
 
 	// Once we received a "modern" mouse event, we stop listening to old style mouse
 	// button events.
@@ -171,6 +171,22 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 	private static boolean m_hasNoNativeBinary = false;
 
 	public static boolean libraryLoaded = false;
+
+	public static void applyAchievementsHostOverride(String host) {
+		if (!initialized || !libraryLoaded || host == null || host.isEmpty()) {
+			return;
+		}
+
+		NativeApp.setAchievementsHostOverride(host);
+	}
+
+	public static void clearAchievementsHostOverride() {
+		if (!initialized || !libraryLoaded) {
+			return;
+		}
+
+		NativeApp.clearAchievementsHostOverride();
+	}
 
 	public static void CheckABIAndLoadLibrary() {
 		try {
@@ -199,23 +215,6 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		}
 	}
 
-	String getApplicationLibraryDir(ApplicationInfo application) {
-		String libdir = null;
-		try {
-			// Starting from Android 2.3, nativeLibraryDir is available:
-			Field field = ApplicationInfo.class.getField("nativeLibraryDir");
-			libdir = (String) field.get(application);
-		} catch (SecurityException | NoSuchFieldException | IllegalArgumentException |
-				 IllegalAccessException e1) {
-			Log.e(TAG, e1.toString());
-		}
-		if (libdir == null) {
-			// Fallback for Android < 2.3:
-			libdir = application.dataDir + "/lib";
-		}
-		return libdir;
-	}
-
 	boolean askForPermissions(String[] permissions, int requestCode) {
 		boolean shouldAsk = false;
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -238,6 +237,16 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 				NativeApp.sendMessageFromJava("permission_granted", "storage");
 			} else {
 				NativeApp.sendMessageFromJava("permission_denied", "storage");
+			}
+
+			if (Build.VERSION.SDK_INT >= 35) {
+				if (this.checkSelfPermission("android.permission.ACCESS_LOCAL_NETWORK") == PackageManager.PERMISSION_GRANTED) {
+					NativeApp.sendMessageFromJava("permission_granted", "local_network");
+				} else {
+					NativeApp.sendMessageFromJava("permission_denied", "local_network");
+				}
+			} else {
+				NativeApp.sendMessageFromJava("permission_granted", "local_network");
 			}
 		}
 	}
@@ -276,6 +285,13 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 					NativeApp.audioRecording_Start();
 				}
 				break;
+			case REQUEST_CODE_LOCAL_NETWORK_PERMISSION:
+				if (permissionsGranted(permissions, grantResults)) {
+					NativeApp.sendMessageFromJava("permission_granted", "local_network");
+				} else {
+					NativeApp.sendMessageFromJava("permission_denied", "local_network");
+				}
+				break;
 			default:
 		}
 	}
@@ -286,81 +302,38 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 
 	// Unofficial hacks to get a list of SD cards that are not the main "external storage".
 	private static ArrayList<String> getSdCardPaths(final Context context) {
-		// Q is the last version that will support normal file access.
-		ArrayList<String> list = null;
-		if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
-			Log.i(TAG, "getSdCardPaths: Trying KitKat method");
-			list = getSdCardPaths19(context);
-		}
+		ArrayList<String> result = new ArrayList<>();
+		File[] externalFilesDirs = context.getExternalFilesDirs(null);
+		String primaryRoot = Environment.getExternalStorageDirectory().getAbsolutePath();
 
-		if (list == null) {
-			Log.i(TAG, "getSdCardPaths: Attempting fallback");
-			// Try another method.
-			File[] fileList = new File("/storage/").listFiles();
-			if (fileList != null) {
-				list = new ArrayList<>();
-				for (File file : fileList) {
-					if (!file.getAbsolutePath().equalsIgnoreCase(Environment.getExternalStorageDirectory().getAbsolutePath()) && file.isDirectory() && file.canRead()) {
-						list.add(file.getAbsolutePath());
+		if (externalFilesDirs != null) {
+			for (File dir : externalFilesDirs) {
+				// getExternalFilesDirs() can return a non-null path for a card slot with no
+				// media inserted, so make sure it's actually mounted before trusting it.
+				if (dir != null && Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState(dir))) {
+					String root = getRootOfInnerSdCardFolder(dir);
+					if (root != null && !root.equalsIgnoreCase(primaryRoot)) {
+						if (!result.contains(root)) {
+							Log.i(TAG, "SD card found: " + root);
+							result.add(root);
+						}
 					}
-				}
-				if (list.isEmpty()) {
-					list = null;
 				}
 			}
 		}
 
-		if (list == null) {
+		if (result.isEmpty()) {
+			// Fallback for some very old or unusual devices.
 			String[] varNames = { "EXTERNAL_SDCARD_STORAGE", "SECONDARY_STORAGE" };
 			for (String var : varNames) {
-				Log.i(TAG, "getSdCardPaths: Checking env " + var);
 				String secStore = System.getenv(var);
 				if (secStore != null && !secStore.isEmpty()) {
-					list = new ArrayList<>();
-					list.add(secStore);
+					result.add(secStore);
 					break;
 				}
 			}
 		}
 
-		if (list == null) {
-			return new ArrayList<>();
-		} else {
-			return list;
-		}
-	}
-
-	private static ArrayList<String> getSdCardPaths19(final Context context) {
-		final File[] externalCacheDirs = context.getExternalCacheDirs();
-		if (externalCacheDirs == null || externalCacheDirs.length==0)
-			return null;
-		if (externalCacheDirs.length == 1) {
-			if (externalCacheDirs[0] == null)
-				return null;
-			final String storageState = Environment.getStorageState(externalCacheDirs[0]);
-			if (!Environment.MEDIA_MOUNTED.equals(storageState))
-				return null;
-			if (Environment.isExternalStorageEmulated())
-				return null;
-		}
-		final ArrayList<String> result = new ArrayList<>();
-		if (externalCacheDirs.length == 1)
-			result.add(getRootOfInnerSdCardFolder(externalCacheDirs[0]));
-		for (int i = 1; i < externalCacheDirs.length; ++i)
-		{
-			final File file = externalCacheDirs[i];
-			if (file == null)
-				continue;
-			final String storageState = Environment.getStorageState(file);
-			if (Environment.MEDIA_MOUNTED.equals(storageState)) {
-				String root = getRootOfInnerSdCardFolder(externalCacheDirs[i]);
-				if (root != null) {
-					result.add(root);
-				}
-			}
-		}
-		if (result.isEmpty())
-			return null;
 		return result;
 	}
 
@@ -368,21 +341,22 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 	private static String getRootOfInnerSdCardFolder(File file) {
 		if (file == null)
 			return null;
-		final long totalSpace = file.getTotalSpace();
+		File current = file;
+		final long totalSpace = current.getTotalSpace();
 		if (totalSpace <= 0) {
 			return null;
 		}
 		while (true) {
-			final File parentFile = file.getParentFile();
+			final File parentFile = current.getParentFile();
 			if (parentFile == null || !parentFile.canRead()) {
 				break;
 			}
 			if (parentFile.getTotalSpace() != totalSpace) {
 				break;
 			}
-			file = parentFile;
+			current = parentFile;
 		}
-		return file.getAbsolutePath();
+		return current.getAbsolutePath();
 	}
 
 	private boolean detectOpenGLES20() {
@@ -401,7 +375,11 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		// Initialize audio classes. Do this here since detectOptimalAudioSettings()
 		// needs audioManager
 		this.audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-		this.audioFocusChangeListener = new AudioFocusChangeListener();
+		if (this.audioManager != null) {
+			this.audioFocusChangeListener = new AudioFocusChangeListener();
+		} else {
+			Log.e(TAG, "Failed to get audio manager, likely not supported on this device.");
+		}
 
 		// Get the optimal buffer sz
 		detectOptimalAudioSettings();
@@ -417,17 +395,7 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		boolean landscape = NativeApp.isLandscape();
 		Log.d(TAG, "Landscape: " + landscape);
 
-		// Get system information
-		PackageManager packMgmr = getPackageManager();
-		String packageName = getPackageName();
-
-		ApplicationInfo appInfo;
-		try {
-			appInfo = packMgmr.getApplicationInfo(packageName, 0);
-		} catch (PackageManager.NameNotFoundException e) {
-			e.printStackTrace();
-			throw new RuntimeException("Unable to locate assets, aborting...");
-		}
+		ApplicationInfo appInfo = getApplicationInfo();
 
 		int deviceType = NativeApp.DEVICE_TYPE_MOBILE;
 		if (isVRDevice()) {
@@ -450,7 +418,7 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		String extStorageDir = Environment.getExternalStorageDirectory().getAbsolutePath();
 		File externalFiles = this.getExternalFilesDir(null);
 		String externalFilesDir = externalFiles == null ? "" : externalFiles.getAbsolutePath();
-		String nativeLibDir = getApplicationLibraryDir(appInfo);
+		String nativeLibDir = appInfo.nativeLibraryDir;
 
 		Log.i(TAG, "Ext storage: " + extStorageState + " " + extStorageDir);
 		Log.i(TAG, "Ext files dir: " + externalFilesDir);
@@ -496,8 +464,9 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		PackageManager packageManager = getPackageManager();
 		String installerName = getInstallerName(packageManager);
 
+		int smallestScreenWidthDp = getResources().getConfiguration().smallestScreenWidthDp;
 		NativeApp.audioConfig(optimalFramesPerBuffer, optimalSampleRate);
-		NativeApp.init(model, deviceType, languageRegion, apkFilePath, dataDir, extStorageDir, externalFilesDir, nativeLibDir, additionalStorageDirs, cacheDir, shortcut, installerName, Build.VERSION.SDK_INT, Build.BOARD);
+		NativeApp.init(model, deviceType, languageRegion, apkFilePath, dataDir, extStorageDir, externalFilesDir, nativeLibDir, additionalStorageDirs, cacheDir, shortcut, installerName, Build.VERSION.SDK_INT, Build.BOARD, smallestScreenWidthDp);
 
 		// Allow C++ to tell us to use JavaGL or not.
 		javaGL = "true".equalsIgnoreCase(NativeApp.queryConfig("androidJavaGL"));
@@ -535,13 +504,14 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 	}
 
 	@NonNull
-	private static String getInstallerName(PackageManager packageManager) {
+	private String getInstallerName(PackageManager packageManager) {
 		String installerName;
+		String packageName = getPackageName();
 		try {
 			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-				installerName = packageManager.getInstallSourceInfo("package name").getInstallingPackageName();
+				installerName = packageManager.getInstallSourceInfo(packageName).getInstallingPackageName();
 			else {
-				installerName = packageManager.getInstallerPackageName("package name");
+				installerName = packageManager.getInstallerPackageName(packageName);
 			}
 			if (installerName == null || installerName.isEmpty()) {
 				installerName = "unknown";
@@ -568,6 +538,11 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 
 	@SuppressLint("SourceLockedOrientationActivity")
 	private void updateScreenRotation(String cause) {
+		if (Build.VERSION.SDK_INT >= 37 && getResources().getConfiguration().smallestScreenWidthDp >= 600) {
+			// Android 17+ on large screens (sw600dp+) ignores orientation requests to push for adaptive apps.
+			// If we try anyway, it's just a waste of time and might cause weirdness.
+			return;
+		}
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
 			if (isInMultiWindowMode()) {
 				// Do not try to enforce rotation! This can result in re-init loops.
@@ -675,24 +650,12 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		super.onCreate(savedInstanceState);
 
 		if (m_hasNoNativeBinary) {
-			new Thread() {
-				@Override
-				public void run() {
-					Looper.prepare();
-					AlertDialog.Builder builder = new AlertDialog.Builder(PpssppActivity.this);
-					builder.setMessage("The native part of PPSSPP for ABI " + Build.CPU_ABI + " is missing. Try downloading an official build?").setTitle("Error starting PPSSPP").create().show();
-					Looper.loop();
-				}
-			}.start();
-
-			try {
-				Thread.sleep(3000);
-			} catch (InterruptedException e) {
-				e.printStackTrace();
-			}
-
-			// We don't call super.onCreate, we just bail in an ugly way.
-			System.exit(-1);
+			AlertDialog.Builder builder = new AlertDialog.Builder(this);
+			builder.setMessage("The native part of PPSSPP for ABI " + Build.CPU_ABI + " is missing. Try downloading an official build?")
+				.setTitle("Error starting PPSSPP")
+				.setPositiveButton("OK", (dialog, which) -> finish())
+				.setOnCancelListener(dialog -> finish())
+				.show();
 			return;
 		}
 
@@ -705,6 +668,12 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		if (shortcutParam != null) {
 			Log.i(TAG, "Found Shortcut Parameter in data, passing on: " + shortcutParam);
 			setShortcutParam(shortcutParam);
+		}
+
+		String achievementsHostOverride = AchievementsHostOverrideReceiver.getAchievementsHostOverride(this);
+		if (achievementsHostOverride != null && !achievementsHostOverride.isEmpty()) {
+			NativeApp.setAchievementsHostOverride(achievementsHostOverride);
+			Log.i(TAG, "Found achievements host override");
 		}
 
 		lifeCycle.onCreate();
@@ -737,7 +706,7 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 
 		setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
-		gainAudioFocus(this.audioManager, this.audioFocusChangeListener);
+		updateAudioFocus(this.audioManager, this.audioFocusChangeListener);
 		NativeApp.audioInit();
 
 		if (javaGL) {
@@ -947,6 +916,8 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			}
 		} else if (mSurface != null) {
 			// JavaGL path.
+			// TODO: This might not be the best place to do this. Seems to cause a surface recreation
+			// unnecessarily.
 			Log.i(TAG, "notifySurface: Applying framerate.");
 			applyFrameRate(mSurface, 60.0f);
 		}
@@ -1062,15 +1033,19 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			joinRenderLoopThread();
 			Log.i(TAG, "Joined render thread");
 		} else if (mGLSurfaceView != null) {
+			Log.i(TAG, "mGLSurfaceView.onPause...");
 			mGLSurfaceView.onPause();
 		}
 
+		Log.i(TAG, "mSensorManager.unregisterListener...");
 		mSensorManager.unregisterListener(this);
 
 		loseAudioFocus(this.audioManager, this.audioFocusChangeListener);
 		sizeManager.onPause();
+		Log.i(TAG, "Calling NativeApp.pause...");
 		NativeApp.pause();
 		if (mCameraHelper != null) {
+			Log.i(TAG, "Calling mCameraHelper.pause");
 			mCameraHelper.pause();
 		}
 		Log.i(TAG, "onPause end");
@@ -1092,7 +1067,7 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			mCameraHelper.resume();
 		}
 
-		gainAudioFocus(this.audioManager, this.audioFocusChangeListener);
+		updateAudioFocus(this.audioManager, this.audioFocusChangeListener);
 		NativeApp.resume();
 		mSensorManager.registerListener(this, mAccelerometer, SensorManager.SENSOR_DELAY_GAME);
 
@@ -1147,9 +1122,19 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 
 	// keep this static so we can call this even if we don't
 	// instantiate NativeAudioPlayer
-	public static void gainAudioFocus(AudioManager audioManager, AudioFocusChangeListener focusChangeListener) {
-		if (audioManager != null) {
+	public static void updateAudioFocus(AudioManager audioManager, AudioFocusChangeListener focusChangeListener) {
+		if (audioManager == null) {
+			// Not supported on this device, we logged in init.
+			return;
+		}
+		if (NativeApp.queryConfig("audioMixWithOthers").equals("0")) {
+			// Shouldn't mix with others - take over.
+			Log.i(TAG, "Taking audio focus");
 			audioManager.requestAudioFocus(focusChangeListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+		} else {
+			// Mix with others - abandon focus so we don't kick others out.
+			Log.i(TAG, "Abandoning audio focus");
+			audioManager.abandonAudioFocus(focusChangeListener);
 		}
 	}
 
@@ -1157,6 +1142,7 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 	// instantiate NativeAudioPlayer
 	public static void loseAudioFocus(AudioManager audioManager, AudioFocusChangeListener focusChangeListener) {
 		if (audioManager != null) {
+			Log.i(TAG, "Abandoning audio focus");
 			audioManager.abandonAudioFocus(focusChangeListener);
 		}
 	}
@@ -1419,21 +1405,8 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		Log.i(TAG, "onActivityResult: packedRequest=" + packedRequest + " resultCode=" + resultCode);
 	}
 
-	private AlertDialog.Builder createDialogBuilderWithDeviceThemeAndUiVisibility() {
-		return new AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK);
-	}
-
-	@RequiresApi(Build.VERSION_CODES.M)
-	private AlertDialog.Builder createDialogBuilderNew() {
-		return new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert);
-	}
-
 	private AlertDialog.Builder createDialogBuilder() {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-			return createDialogBuilderNew();
-		} else {
-			return createDialogBuilderWithDeviceThemeAndUiVisibility();
-		}
+		return new AlertDialog.Builder(this);
 	}
 
 	// The return value is sent to C++ via requestID.
@@ -1514,6 +1487,9 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 					return false;
 				}
 			} else {
+				// Don't need a separate launchMarket, can just use launchBrowser with a market:
+				// http://stackoverflow.com/questions/3442366/android-link-to-market-from-inside-another-app
+				// http://developer.android.com/guide/publishing/publishing.html#marketintent
 				try {
 					Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(params));
 					startActivity(i);
@@ -1618,11 +1594,6 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 				Log.e(TAG, e.toString());
 				return false;
 			}
-		} else if (command.equals("launchMarket")) {
-			// Don't need this, can just use launchBrowser with a market:
-			// http://stackoverflow.com/questions/3442366/android-link-to-market-from-inside-another-app
-			// http://developer.android.com/guide/publishing/publishing.html#marketintent
-			return false;
 		} else if (command.equals("toast")) {
 			Toast toast = Toast.makeText(this, params, Toast.LENGTH_LONG);
 			toast.show();
@@ -1630,8 +1601,6 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			return true;
 		} else if (command.equals("showKeyboard") && surfView != null) {
 			InputMethodManager inputMethodManager = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-			// No idea what the point of the ApplicationWindowToken is or if it
-			// matters where we get it from...
 			inputMethodManager.showSoftInput(surfView, InputMethodManager.SHOW_IMPLICIT);
 			return true;
 		} else if (command.equals("hideKeyboard") && surfView != null) {
@@ -1650,6 +1619,7 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			// Workaround for issue #13363 to fix Split/Second game start - it requires text input
 			// but we don't support it on VR devices.
 			if (isVRDevice()) {
+				Log.w(TAG, "VR: Missing UI, supplying default string for text input request");
 				NativeApp.sendRequestResult(requestID, false, defString, 0);
 				return true;
 			}
@@ -1709,6 +1679,9 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		} else if (command.equals("immersive")) {
 			updateSystemUiVisibility();
 			return true;
+		} else if (command.equals("audio_mode_changed")) {
+			updateAudioFocus(this.audioManager, this.audioFocusChangeListener);
+			return true;
 		} else if (command.equals("recreate")) {
 			recreate();
 			return true;
@@ -1725,6 +1698,17 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 				NativeApp.sendMessageFromJava("permission_pending", "storage");
 			} else {
 				NativeApp.sendMessageFromJava("permission_granted", "storage");
+			}
+			return true;
+		} else if (command.equals("ask_permission") && params.equals("local_network")) {
+			if (Build.VERSION.SDK_INT >= 35) {
+				if (askForPermissions(permissionsForLocalNetwork, REQUEST_CODE_LOCAL_NETWORK_PERMISSION)) {
+					NativeApp.sendMessageFromJava("permission_pending", "local_network");
+				} else {
+					NativeApp.sendMessageFromJava("permission_granted", "local_network");
+				}
+			} else {
+				NativeApp.sendMessageFromJava("permission_granted", "local_network");
 			}
 			return true;
 		} else if (command.equals("gps_command")) {
@@ -1909,11 +1893,9 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 	@Keep
 	@SuppressWarnings("unused")
 	public void postCommand(String command, String parameter) {
-		final String cmd = command;
-		final String param = parameter;
 		runOnUiThread(() -> {
-			if (!processCommand(cmd, param)) {
-				Log.e(TAG, "processCommand failed: cmd: '" + cmd + "' param: '" + param + "'");
+			if (!processCommand(command, parameter)) {
+				Log.e(TAG, "processCommand failed: cmd: '" + command + "' param: '" + parameter + "'");
 			}
 		});
 	}

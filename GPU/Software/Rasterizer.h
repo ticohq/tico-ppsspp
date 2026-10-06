@@ -75,8 +75,12 @@ struct RasterizerState {
 	uint16_t texbufw[8]{};
 	const u8 *texptr[8]{};
 	float textureLodSlope;
+	// TEXFLUSHes before this state (BinManager::SelfTextureSnapshot).
+	uint32_t texFlushGen = 0;
 	RasterizerStateFlags flags = RasterizerStateFlags::NONE;
 	RasterizerStateFlags lastFlags = RasterizerStateFlags::INVALID;
+	// The binner's tile generation in which threads may be drawing with it (BinManager::DistributeItems).
+	uint32_t liveGen = 0;
 
 	struct {
 		uint8_t maxTexLevel : 3;
@@ -90,6 +94,8 @@ struct RasterizerState {
 		bool magFilt : 1;
 		bool antialiasLines : 1;
 		bool textureProj : 1;
+		// Textures from the buffer it draws to (BinManager::SelfTextureSnapshot).
+		bool selfTexture : 1;
 	};
 
 #if defined(SOFTGPU_MEMORY_TAGGING_DETAILED) || defined(SOFTGPU_MEMORY_TAGGING_BASIC)

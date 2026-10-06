@@ -57,10 +57,17 @@ class RingbufferLog {
 public:
 	void Log(const LogMessage &msg);
 	int GetCount() const { return count_ < MAX_LOGS ? count_ : MAX_LOGS; }
-	std::string_view TextAt(int i) const { return messages_[(curMessage_ - i - 1) & (MAX_LOGS - 1)].msg; }
-	LogLevel LevelAt(int i) const { return messages_[(curMessage_ - i - 1) & (MAX_LOGS - 1)].level; }
+	std::string TextAt(int i) const {
+		std::lock_guard<std::mutex> lock(ringLock_);
+		return messages_[(curMessage_ - i - 1) & (MAX_LOGS - 1)].msg;
+	}
+	LogLevel LevelAt(int i) const {
+		std::lock_guard<std::mutex> lock(ringLock_);
+		return messages_[(curMessage_ - i - 1) & (MAX_LOGS - 1)].level;
+	}
 
 	void Clear() {
+		std::lock_guard<std::mutex> lock(ringLock_);
 		curMessage_ = 0;
 		count_ = 0;
 	}
@@ -70,6 +77,7 @@ private:
 	LogMessage messages_[MAX_LOGS];
 	int curMessage_ = 0;
 	int count_ = 0;
+	mutable std::mutex ringLock_;
 };
 
 class Section;
@@ -150,16 +158,26 @@ public:
 	void Init(bool *enabledSetting, bool headless = false);
 	void Shutdown();
 
-	void SetExternalLogCallback(LogCallback callback, void *userdata) {
-		externalCallback_ = callback;
-		externalUserData_ = userdata;
-	}
+	// A list rather than a single slot, because the WebSocket debugger registers one callback per
+	// *connection* (LogBroadcaster is a local in the per-connection handler) and more than one
+	// client can be attached at once - the bundled JS debugger in a browser alongside Tools/wsdbg,
+	// say. With a single slot the second connection silently took the log stream away from the
+	// first, and then the first one to disconnect cleared the slot and stopped delivery to the
+	// other as well.
+	// Returns a handle to hand back to RemoveExternalLogCallback(), or -1 if it wasn't added.
+	int AddExternalLogCallback(LogCallback callback, void *userdata);
+	void RemoveExternalLogCallback(int handle);
 
 	void SetFileLogPath(const Path &filename);
 	const Path &GetLogFilePath() const { return logFilename_; }
 
 	void SaveConfig(Section *section);
 	void LoadConfig(const Section *section);
+
+	// Channel level/enabled changes made through the WebSocket debugger (log.channel.set) are
+	// meant as temporary, session-only diagnostic tweaks - call this so SaveConfig() skips
+	// writing (and thus permanently overwriting) the user's real saved settings with them.
+	void NotifyChannelsChangedByDebugger() { channelsChangedByDebugger_ = true; }
 
 	static const char *GetLogTypeName(Log type);
 
@@ -181,6 +199,7 @@ private:
 	void operator=(const LogManager &) = delete;
 
 	bool initialized_ = false;
+	bool channelsChangedByDebugger_ = false;
 
 #if PPSSPP_PLATFORM(WINDOWS)
 	ConsoleListener *consoleLog_ = nullptr;
@@ -201,9 +220,15 @@ private:
 	// Ring buffer
 	RingbufferLog ringLog_;
 
-	// Callback
-	LogCallback externalCallback_ = nullptr;
-	void *externalUserData_ = nullptr;
+	// Callbacks
+	struct ExternalCallbackEntry {
+		int handle;
+		LogCallback callback;
+		void *userdata;
+	};
+	std::mutex externalLock_;
+	std::vector<ExternalCallbackEntry> externalCallbacks_;
+	int nextExternalHandle_ = 1;
 };
 
 extern LogManager g_logManager;
