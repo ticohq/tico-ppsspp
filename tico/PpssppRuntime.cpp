@@ -9,6 +9,7 @@
 #endif
 
 #include "tico/TicoGraphicsHost.h"
+#include "Common/Net/Resolve.h"
 #include "Common/GPU/Vulkan/SwitchLSFG.h"
 #include "Core/HW/Display.h"
 #include "tico/PpssppTicoConfig.h"
@@ -1090,6 +1091,9 @@ bool PpssppRuntime::Initialize(const LaunchInfo &) {
 	}
 	g_threadManager.Init(cpu_info.num_cores, cpu_info.logical_cpu_count);
 	Log("thread manager cores=%d logical=%d", cpu_info.num_cores, cpu_info.logical_cpu_count);
+	// sockets and HTTPS (libcurl), before anything downloads
+	net::Init();
+	Log("network https=%d", net::HTTPSAvailable() ? 1 : 0);
 	RetroAchievements().Initialize(g_state.log);
 
 	// before Vulkan starts: with Lossless.dll installed, the device and the
