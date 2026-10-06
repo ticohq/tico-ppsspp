@@ -364,6 +364,15 @@ if(IOS)
 endif()
 
 target_link_libraries(Common Ext::Snappy cpu_features)
+if(USE_LIBNX)
+	# Frame generation (LSFG), Vulkan presentation side
+	target_sources(Common PRIVATE GPU/Vulkan/SwitchLSFG.cpp GPU/Vulkan/SwitchLSFG.h)
+	target_link_libraries(Common SwitchLsfgBackend)
+endif()
+if(USE_LIBNX AND NOT HTTPS_NOT_AVAILABLE)
+	# HTTPS through libcurl (HTTPNaettRequest.cpp)
+	target_link_libraries(Common SwitchCurl)
+endif()
 
 if(SDL_LIB_TARGET AND TARGET SDL3::Headers)
 	target_link_libraries(Common SDL3::Headers)

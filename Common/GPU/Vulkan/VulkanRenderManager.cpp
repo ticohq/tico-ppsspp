@@ -381,6 +381,10 @@ bool VulkanRenderManager::CreateSwapchainViewsAndDepth(VkCommandBuffer cmdInit, 
 	} else {
 		VkResult res = vkGetSwapchainImagesKHR(vulkan_->GetDevice(), vulkan_->GetSwapchain(), &frameDataShared.swapchainImageCount_, nullptr);
 		_dbg_assert_(res == VK_SUCCESS);
+		if (res != VK_SUCCESS) {
+			ERROR_LOG(Log::G3D, "vkGetSwapchainImagesKHR failed: %s", VulkanResultToString(res));
+			return false;
+		}
 
 		swapchainImages.resize(frameDataShared.swapchainImageCount_);
 		res = vkGetSwapchainImagesKHR(vulkan_->GetDevice(), vulkan_->GetSwapchain(), &frameDataShared.swapchainImageCount_, swapchainImages.data());
@@ -396,6 +400,10 @@ bool VulkanRenderManager::CreateSwapchainViewsAndDepth(VkCommandBuffer cmdInit, 
 		sc_buffer.image = swapchainImages[i];
 		VkResult res = vkCreateSemaphore(vulkan_->GetDevice(), &semaphoreCreateInfo, nullptr, &sc_buffer.renderingCompleteSemaphore);
 		_dbg_assert_(res == VK_SUCCESS);
+		if (res != VK_SUCCESS) {
+			ERROR_LOG(Log::G3D, "vkCreateSemaphore failed: %s", VulkanResultToString(res));
+			return false;
+		}
 
 		VkImageViewCreateInfo color_image_view = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 		color_image_view.format = vulkan_->GetSwapchainFormat();
@@ -420,13 +428,14 @@ bool VulkanRenderManager::CreateSwapchainViewsAndDepth(VkCommandBuffer cmdInit, 
 		// Also, turns out it's illegal to transition un-acquired images, thanks Hans-Kristian. See #11417.
 
 		res = vkCreateImageView(vulkan_->GetDevice(), &color_image_view, nullptr, &sc_buffer.view);
-		vulkan_->SetDebugName(sc_buffer.view, VK_OBJECT_TYPE_IMAGE_VIEW, "swapchain_view");
-		frameDataShared.swapchainImages_.push_back(sc_buffer);
 		_dbg_assert_(res == VK_SUCCESS);
 		if (res != VK_SUCCESS) {
-			ERROR_LOG(Log::G3D, "vkCreateImageView for swapchain image %u failed: %s", i, VulkanResultToString(res));
+			vkDestroySemaphore(vulkan_->GetDevice(), sc_buffer.renderingCompleteSemaphore, nullptr);
+			ERROR_LOG(Log::G3D, "Swapchain image view creation failed: %s", VulkanResultToString(res));
 			return false;
 		}
+		vulkan_->SetDebugName(sc_buffer.view, VK_OBJECT_TYPE_IMAGE_VIEW, "swapchain_view");
+		frameDataShared.swapchainImages_.push_back(sc_buffer);
 	}
 
 	// Must be before InitBackbufferRenderPass.
@@ -592,6 +601,7 @@ VulkanRenderManager::~VulkanRenderManager() {
 }
 
 void VulkanRenderManager::CompileThreadFunc() {
+	SetCurrentThreadAffinity(ThreadAffinityRole::SHADER_COMPILER);
 	SetCurrentThreadName("ShaderCompile");
 #if PPSSPP_PLATFORM(SWITCH)
 	SetSwitchThreadCore(1);
@@ -670,6 +680,7 @@ void VulkanRenderManager::CompileThreadFunc() {
 }
 
 void VulkanRenderManager::RenderThreadFunc() {
+	SetCurrentThreadAffinity(ThreadAffinityRole::RENDER);
 	SetCurrentThreadName("VulkanRenderMan");
 #if PPSSPP_PLATFORM(SWITCH)
 	SetSwitchThreadCore(2);
@@ -708,6 +719,7 @@ void VulkanRenderManager::RenderThreadFunc() {
 }
 
 void VulkanRenderManager::PresentWaitThreadFunc() {
+	SetCurrentThreadAffinity(ThreadAffinityRole::PRESENT);
 	SetCurrentThreadName("PresentWait");
 #if PPSSPP_PLATFORM(SWITCH)
 	SetSwitchThreadCore(2);
