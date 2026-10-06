@@ -741,6 +741,7 @@ bool PSP_InitStart(const CoreParameter &coreParam) {
 	Core_NotifyLifecycle(CoreLifecycle::STARTING);
 
 	g_loadingThread = std::thread([errorString]() {
+		SetCurrentThreadAffinity(ThreadAffinityRole::IO);
 		SetCurrentThreadName("ExecLoader");
 
 		AndroidJNIThreadContext jniContext;

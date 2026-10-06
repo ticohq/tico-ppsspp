@@ -72,17 +72,26 @@ public:
 		region_size = size;
 #if PPSSPP_PLATFORM(SWITCH)
 		Result rc = jitCreate(&jitController, size);
-		if(R_FAILED(rc)) {
+		if (R_FAILED(rc)) {
 			printf("Failed to create Jitbuffer of size 0x%x err: 0x%x\n", size, rc);
+			region_size = 0;
+			region = nullptr;
+			writableRegion = nullptr;
+			T::SetCodePointer(nullptr, nullptr);
+			return;
 		}
+		// Writes go through the RW alias (needed when the JIT falls back to
+		// changing the memory's permissions instead of code memory).
 		rc = jitTransitionToWritable(&jitController);
-		if(R_FAILED(rc)) {
+		if (R_FAILED(rc)) {
 			printf("Failed to transition Jitbuffer to writable err: 0x%x\n", rc);
 			jitClose(&jitController);
 			region_size = 0;
+			region = nullptr;
+			writableRegion = nullptr;
+			T::SetCodePointer(nullptr, nullptr);
 			return;
 		}
-		printf("[NXJIT]: Initialized RX: %p RW: %p\n", jitController.rx_addr, jitController.rw_addr);
 
 		region = (u8 *)jitController.rx_addr;
 		writableRegion = (u8 *)jitController.rw_addr;
