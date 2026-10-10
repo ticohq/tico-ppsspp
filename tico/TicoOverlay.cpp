@@ -4,6 +4,8 @@
 #include "TicoRetroAchievements.h"
 #include "TicoTranslationManager.h"
 #include "TicoUtils.h"
+#include "dep/nlohmann/json.hpp"
+#include "tico/TicoSession.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/Math/lin/matrix4x4.h"
 #include "Common/Render/ManagedTexture.h"
@@ -107,6 +109,9 @@ bool ReadFileBytes(const char *path, std::vector<unsigned char> *data) {
 
 #ifdef __SWITCH__
 bool FindAccountUid(AccountUid *uid) {
+	if (tico::CurrentSession().AccountId(*uid)) { // Who tico says plays
+		return true;
+	}
 	if (R_SUCCEEDED(accountGetPreselectedUser(uid)) && accountUidIsValid(uid)) {
 		return true;
 	}
@@ -565,7 +570,7 @@ bool Overlay::LoadAvatarTextureFromFile(Draw::DrawContext *draw, const char *pat
 void Overlay::LoadSocial(Draw::DrawContext *draw) {
 	nickname_ = "Player 1";
 
-	for (const char *path : kCustomAvatarPaths) {
+	for (const char *path : tico::AvatarCandidates(kCustomAvatarPaths)) {
 		if (LoadAvatarTextureFromFile(draw, path)) {
 			LogMessage(log_, "tico overlay avatar custom path=%s size=%dx%d", path, avatarWidth_, avatarHeight_);
 			return;
@@ -1633,11 +1638,14 @@ void Overlay::DrawRAAlerts(Draw::DrawContext *draw, ImDrawList *drawList, ImVec2
 		drawList->AddRect(min, max, IM_COL32(70, 70, 80, (int)(180.0f * slideProgress)), cornerRadius, 1.5f * scale);
 
 		Draw::Texture *badgeTexture = nullptr;
-		const bool isRAIcon = notification.badgeName == "ra_icon";
+		bool isRAIcon = notification.badgeName == "ra_icon";
+		if (!isRAIcon) {
+			badgeTexture = RetroAchievements().GetBadgeTexture(draw, notification.badgeName);
+			// tico has not cached this badge (or fetching is off): placeholder
+			isRAIcon = badgeTexture == nullptr;
+		}
 		if (isRAIcon) {
 			badgeTexture = LoadRAIconTexture(draw);
-		} else {
-			badgeTexture = RetroAchievements().GetBadgeTexture(draw, notification.badgeName);
 		}
 
 		float textX = min.x + padding;

@@ -57,13 +57,9 @@ public:
 
 private:
 	void LoadConfig();
-	void SaveToken(const std::string &token);
 	void LoginWithPassword();
 	void IdentifyGame();
-	void PreloadBadges();
 	void PushNotification(const std::string &title, const std::string &description, const std::string &badgeName = "ra_icon", float delaySeconds = 0.0f);
-	void DownloadBadge(const std::string &badgeName);
-	void PumpBadgeDownloads();
 	void ReleaseBadgeTextures();
 
 	LogCallback log_;
@@ -74,14 +70,12 @@ private:
 	bool identifying_ = false;
 	std::string username_;
 	std::string password_;
+	bool badges_ = true; // tico fetched badges; false: placeholder
 	std::string token_;
 	std::string gamePath_;
 	RAAlertPosition alertPosition_ = RAAlertPosition::TopRight;
 	std::vector<RANotification> notifications_;
 	std::map<std::string, Draw::Texture *> badgeTextures_;
-	std::set<std::string> badgeDownloads_;
-	std::vector<std::string> badgeDownloadQueue_;
-	int activeBadgeDownloads_ = 0;
 	uint32_t requestGeneration_ = 0;
 };
 

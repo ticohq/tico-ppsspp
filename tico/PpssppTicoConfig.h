@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "tico/TicoConfig.h"
 #include "tico/TicoCoreConfig.h"
 
@@ -8,6 +10,11 @@ namespace Tico {
 constexpr const char *kPpssppDataRoot = Paths::PpssppDataRoot;
 constexpr const char *kPpssppSaveDataRoot = Paths::PpssppSaveDataRoot;
 constexpr const char *kPpssppCoreConfigPath = Paths::PpssppCoreConfig;
+
+/// The current user's PSP saves and states (tico's folders, or theirs in
+/// them), from tico's session.
+std::string UserSaveDataRoot();
+std::string UserSaveStates();
 
 enum class DisplayMode {
 	Integer = 0,

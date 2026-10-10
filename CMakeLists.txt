@@ -1489,6 +1489,8 @@ if(USE_LIBNX)
 		tico/TicoUtils.h
 		tico/deps/minimp3/minimp3.cpp
 	)
+	# libsodium: TicoSecure opens the session tico seals for each launch
+	target_link_libraries(tico-ppsspp "$ENV{DEVKITPRO}/portlibs/switch/lib/libsodium.a")
 	target_link_libraries(tico-ppsspp ${CMAKE_THREAD_LIBS_INIT} Core)
 	target_include_directories(tico-ppsspp PRIVATE "${CMAKE_SOURCE_DIR}/rcheevos/include")
 	target_compile_definitions(tico-ppsspp PRIVATE RC_CLIENT_SUPPORTS_HASH)

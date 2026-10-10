@@ -1097,7 +1097,7 @@ Path GetLegacySaveStatePath(int slot) {
 	}
 
 	const int safeSlot = std::clamp(slot, 0, Ppsspp::SaveStateSlotCount - 1);
-	return Path(Paths::PpssppSaveStates) / (romName + ".state" + std::to_string(safeSlot));
+	return Path(Tico::UserSaveStates()) / (romName + ".state" + std::to_string(safeSlot));
 }
 
 u64 GetSystemMs() {
@@ -1112,7 +1112,7 @@ void RefreshSaveStateSlots(bool force) {
 		return;
 	}
 
-	File::CreateFullPath(Path(Paths::PpssppSaveStates));
+	File::CreateFullPath(Path(Tico::UserSaveStates()));
 	for (int i = 0; i < Ppsspp::SaveStateSlotCount; ++i) {
 		const Path statePath = GetLegacySaveStatePath(i);
 		g_state.saveStateSlots[i] = !statePath.empty() && File::Exists(statePath);
@@ -1212,7 +1212,7 @@ void ExecuteOverlayCommand(OverlayCommand command) {
 		return;
 	}
 
-	File::CreateFullPath(Path(Paths::PpssppSaveStates));
+	File::CreateFullPath(Path(Tico::UserSaveStates()));
 
 	if (command.action == OverlayAction::SaveState) {
 		Log("tico save state slot=%d path=%s", slot, statePathString.c_str());
