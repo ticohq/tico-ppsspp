@@ -13,6 +13,7 @@
 #include "Core/MemMap.h"
 
 #include "dep/nlohmann/json.hpp"
+#include "tico/TicoSession.h"
 #include "rc_client.h"
 #include "rc_error.h"
 
@@ -28,9 +29,7 @@
 namespace Tico {
 namespace {
 
-constexpr const char *kAccountsPath = "sdmc:/tico/config/accounts.jsonc";
 constexpr const char *kBadgeCacheDir = "sdmc:/tico/assets/ra";
-constexpr const char *kBadgeMediaBaseUrl = "http://media.retroachievements.org/Badge/";
 constexpr uint32_t kPspConsoleId = 41;
 constexpr uint32_t kPspMemoryOffset = 0x08000000;
 constexpr float kStartupAlertDelaySeconds = 2.5f;
@@ -234,81 +233,24 @@ void TicoRetroAchievements::Initialize(LogCallback log) {
 		Log(log_, "RA: login with password user=%s", username_.c_str());
 		LoginWithPassword();
 	} else {
-		Log(log_, "RA: missing credentials in %s", kAccountsPath);
+		Log(log_, "RA: no RetroAchievements token in tico's session");
 		PushNotification(tr("ra_title"), tr("ra_missing_credentials"), "ra_icon");
 	}
 }
 
 void TicoRetroAchievements::LoadConfig() {
-	enabled_ = false;
-	hardcore_ = false;
-	username_.clear();
+	// tico hands over only a token, in the sealed session (TicoSession.h); the
+	// password stays with tico.
+	const tico::Session &session = tico::CurrentSession();
+	username_ = TrimCopy(session.raUsername);
+	token_ = TrimCopy(session.raToken);
 	password_.clear();
-	token_.clear();
+	enabled_ = session.valid && session.raEnabled && !username_.empty() && !token_.empty();
+	hardcore_ = session.raHardcore;
+	badges_ = session.raBadges;
 	alertPosition_ = RAAlertPosition::TopRight;
-
-	std::ifstream file(kAccountsPath);
-	if (!file.is_open()) {
-		Log(log_, "RA: accounts.jsonc not found at %s", kAccountsPath);
-		return;
-	}
-
-	nlohmann::json json = nlohmann::json::parse(file, nullptr, false, true);
-	if (json.is_discarded() || !json.is_object()) {
-		Log(log_, "RA: accounts.jsonc parse failed");
-		return;
-	}
-
-	enabled_ = json.value("ra_enabled", false);
-	username_ = TrimCopy(json.value("ra_username", std::string()));
-	password_ = json.value("ra_password", std::string());
-	token_ = TrimCopy(json.value("ra_token", std::string()));
-	hardcore_ = json.value("ra_hardcore_mode", false);
-
-	const std::string position = LowerCopy(TrimCopy(json.value("ra_alert_position", std::string("top_right"))));
-	if (position == "top_left") {
-		alertPosition_ = RAAlertPosition::TopLeft;
-	} else if (position == "bottom_left") {
-		alertPosition_ = RAAlertPosition::BottomLeft;
-	} else if (position == "bottom_right") {
-		alertPosition_ = RAAlertPosition::BottomRight;
-	} else {
-		alertPosition_ = RAAlertPosition::TopRight;
-	}
-
-	Log(log_, "RA: config enabled=%d user=%s hardcore=%d", enabled_ ? 1 : 0, username_.c_str(), hardcore_ ? 1 : 0);
-}
-
-void TicoRetroAchievements::SaveToken(const std::string &token) {
-	if (token.empty()) {
-		return;
-	}
-
-	EnsureRADirectories();
-	nlohmann::json json = nlohmann::json::object();
-	std::ifstream in(kAccountsPath);
-	if (in.is_open()) {
-		nlohmann::json parsed = nlohmann::json::parse(in, nullptr, false, true);
-		if (!parsed.is_discarded() && parsed.is_object()) {
-			json = std::move(parsed);
-		}
-	}
-
-	json["ra_enabled"] = enabled_;
-	if (!username_.empty()) {
-		json["ra_username"] = username_;
-	}
-	json["ra_token"] = token;
-	json["ra_hardcore_mode"] = hardcore_;
-
-	std::ofstream out(kAccountsPath, std::ios::binary);
-	if (!out.good()) {
-		Log(log_, "RA: failed writing token to %s", kAccountsPath);
-		return;
-	}
-	out << json.dump(4) << "\n";
-	token_ = token;
-	Log(log_, "RA: token saved");
+	Log(log_, "RA: session %s enabled=%d user=%s hardcore=%d", session.valid ? "opened" : "missing",
+		enabled_ ? 1 : 0, username_.c_str(), hardcore_ ? 1 : 0);
 }
 
 void TicoRetroAchievements::LoginWithPassword() {
@@ -324,10 +266,6 @@ void TicoRetroAchievements::LoginWithPassword() {
 			}
 			if (result == RC_OK) {
 				self->LogRCMessage("RA: password login succeeded");
-				const rc_client_user_t *user = rc_client_get_user_info(client);
-				if (user && user->token) {
-					self->SaveToken(user->token);
-				}
 				self->IdentifyGame();
 			} else {
 				self->LogRCMessage(errorMessage ? errorMessage : "RA: password login failed");
@@ -377,7 +315,6 @@ void TicoRetroAchievements::IdentifyGame() {
 				} else {
 					self->PushNotification(tr("ra_title"), tr("ra_game_identified"), "ra_icon", kStartupAlertDelaySeconds);
 				}
-				self->PreloadBadges();
 			} else {
 				self->LogRCMessage(errorMessage ? errorMessage : "RA: game identification failed");
 				self->PushNotification(tr("ra_title"), tr("ra_game_unsupported"), "ra_icon");
@@ -409,7 +346,6 @@ void TicoRetroAchievements::FrameUpdate() {
 
 void TicoRetroAchievements::Idle() {
 	g_DownloadManager.Update();
-	PumpBadgeDownloads();
 	if (enabled_ && client_) {
 		rc_client_idle(client_);
 	}
@@ -420,9 +356,6 @@ void TicoRetroAchievements::Shutdown() {
 	UnloadGame();
 	ReleaseBadgeTextures();
 	notifications_.clear();
-	badgeDownloads_.clear();
-	badgeDownloadQueue_.clear();
-	activeBadgeDownloads_ = 0;
 
 	if (client_) {
 		rc_client_destroy(client_);
@@ -449,30 +382,6 @@ bool TicoRetroAchievements::WarnIfHardcoreModeActive(bool isSaveStateAction) {
 	return true;
 }
 
-void TicoRetroAchievements::PreloadBadges() {
-	if (!client_) {
-		return;
-	}
-
-	rc_client_achievement_list_t *list = rc_client_create_achievement_list(client_,
-		RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL, RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
-	if (!list) {
-		return;
-	}
-
-	for (uint32_t bucket = 0; bucket < list->num_buckets; ++bucket) {
-		const rc_client_achievement_bucket_t &achievementBucket = list->buckets[bucket];
-		for (uint32_t i = 0; i < achievementBucket.num_achievements; ++i) {
-			const rc_client_achievement_t *achievement = achievementBucket.achievements[i];
-			if (achievement && achievement->badge_name[0]) {
-				DownloadBadge(achievement->badge_name);
-			}
-		}
-	}
-
-	rc_client_destroy_achievement_list(list);
-}
-
 void TicoRetroAchievements::PushNotification(const std::string &title, const std::string &description, const std::string &badgeName, float delaySeconds) {
 	RANotification notification;
 	notification.title = title;
@@ -483,55 +392,6 @@ void TicoRetroAchievements::PushNotification(const std::string &title, const std
 		notifications_.erase(notifications_.begin());
 	}
 	notifications_.push_back(std::move(notification));
-}
-
-void TicoRetroAchievements::DownloadBadge(const std::string &badgeName) {
-	const std::string cleanBadgeName = CleanBadgeName(badgeName);
-	if (cleanBadgeName.empty() || cleanBadgeName == "ra_icon") {
-		return;
-	}
-
-	EnsureRADirectories();
-	const std::string cachePath = BadgeCachePath(cleanBadgeName);
-	if (FileExists(cachePath) || badgeDownloads_.find(cleanBadgeName) != badgeDownloads_.end()) {
-		return;
-	}
-
-	badgeDownloads_.insert(cleanBadgeName);
-	badgeDownloadQueue_.push_back(cleanBadgeName);
-}
-
-void TicoRetroAchievements::PumpBadgeDownloads() {
-	constexpr int kMaxActiveBadgeDownloads = 1;
-	if (activeBadgeDownloads_ >= kMaxActiveBadgeDownloads) {
-		return;
-	}
-
-	while (activeBadgeDownloads_ < kMaxActiveBadgeDownloads && !badgeDownloadQueue_.empty()) {
-		const std::string cleanBadgeName = badgeDownloadQueue_.front();
-		badgeDownloadQueue_.erase(badgeDownloadQueue_.begin());
-		const std::string cachePath = BadgeCachePath(cleanBadgeName);
-		if (FileExists(cachePath)) {
-			continue;
-		}
-
-		activeBadgeDownloads_++;
-		const std::string url = std::string(kBadgeMediaBaseUrl) + cleanBadgeName + ".png";
-		const uint32_t generation = requestGeneration_;
-		g_DownloadManager.StartDownload(url, ::Path(cachePath), http::RequestFlags::Default, "image/png",
-			"RetroAchievements badge",
-			[this, generation, cleanBadgeName](http::Request &request) {
-				if (activeBadgeDownloads_ > 0) {
-					activeBadgeDownloads_--;
-				}
-				if (generation != requestGeneration_) {
-					return;
-				}
-				if (request.ResultCode() != 200) {
-					Log(log_, "RA: badge download failed badge=%s status=%d", cleanBadgeName.c_str(), request.ResultCode());
-				}
-			});
-	}
 }
 
 Draw::Texture *TicoRetroAchievements::GetBadgeTexture(Draw::DrawContext *draw, const std::string &badgeName) {
@@ -548,9 +408,9 @@ Draw::Texture *TicoRetroAchievements::GetBadgeTexture(Draw::DrawContext *draw, c
 		return existing->second;
 	}
 
+	// tico fetches a game's badges before it launches; the core only reads them.
 	const std::string path = BadgeCachePath(cleanBadgeName);
-	if (!FileExists(path)) {
-		DownloadBadge(cleanBadgeName);
+	if (!badges_ || !FileExists(path)) {
 		return nullptr;
 	}
 
@@ -619,7 +479,6 @@ void TicoRetroAchievements::HandleEvent(const rc_client_event_t *event) {
 			TrophySfx().PlayTrophy();
 			PushNotification(SafeString(event->achievement->title), SafeString(event->achievement->description),
 				event->achievement->badge_name);
-			DownloadBadge(event->achievement->badge_name);
 		}
 		break;
 	case RC_CLIENT_EVENT_GAME_COMPLETED:
@@ -649,7 +508,6 @@ void TicoRetroAchievements::HandleEvent(const rc_client_event_t *event) {
 		if (event->achievement && event->achievement->measured_progress[0]) {
 			PushNotification(SafeString(event->achievement->title), event->achievement->measured_progress,
 				event->achievement->badge_name);
-			DownloadBadge(event->achievement->badge_name);
 		}
 		break;
 	case RC_CLIENT_EVENT_SERVER_ERROR:

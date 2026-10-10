@@ -1,4 +1,6 @@
 #include "TicoTranslationManager.h"
+#include "dep/nlohmann/json.hpp"
+#include "tico/TicoSession.h"
 
 #include "tico/TicoConfig.h"
 
@@ -100,7 +102,7 @@ std::string TranslationManager::ReadConfiguredLanguage() const {
 	};
 
 	for (const char *path : configPaths) {
-		std::ifstream file(path);
+		tico::ConfigFileStream file(path); // tico\'s settings come from its session
 		if (!file.good()) {
 			continue;
 		}

@@ -161,3 +161,6 @@ build_switch_minimal
 
 # tico module bundle
 build_tico
+
+# TicoSecure build secret (shared with tico)
+/tico/TicoSecret.h

@@ -1,5 +1,8 @@
 #include "PpssppTicoConfig.h"
+#include "dep/nlohmann/json.hpp"
+#include "tico/TicoSession.h"
 
+#include "Common/File/FileUtil.h"
 #include "Common/File/Path.h"
 #include "Common/System/Display.h"
 #include "Core/Config.h"
@@ -18,6 +21,15 @@
 #endif
 
 namespace Tico {
+
+std::string UserSaveDataRoot() {
+	return tico::UserContentRoot(std::string(Paths::SavesRoot), true) + "psp";
+}
+
+std::string UserSaveStates() {
+	return tico::UserContentRoot(std::string(Paths::StatesRoot), false) + "psp";
+}
+
 namespace {
 
 constexpr float kPspNativeWidth = 480.0f;
@@ -130,7 +142,9 @@ std::string SwitchProfileNickname() {
 		return {};
 	std::string nickname;
 	AccountUid uid = {};
-	bool found = R_SUCCEEDED(accountGetPreselectedUser(&uid)) && accountUidIsValid(&uid);
+	bool found = tico::CurrentSession().AccountId(uid); // Who tico says plays
+	if (!found)
+		found = R_SUCCEEDED(accountGetPreselectedUser(&uid)) && accountUidIsValid(&uid);
 	if (!found)
 		found = R_SUCCEEDED(accountGetLastOpenedUser(&uid)) && accountUidIsValid(&uid);
 	if (!found) {
@@ -536,8 +550,10 @@ void ApplySwitchRequiredConfig(bool audioReady) {
 	g_Config.sReportHost.clear();
 	g_Config.internalDataDirectory = Path(kPpssppDataRoot);
 	g_Config.memStickDirectory = Path(kPpssppDataRoot);
-	g_Config.memStickSavedataDirectory = Path(kPpssppSaveDataRoot);
-	g_Config.saveStateDirectory = Path(Paths::PpssppSaveStates);
+	g_Config.memStickSavedataDirectory = Path(UserSaveDataRoot());
+	g_Config.saveStateDirectory = Path(UserSaveStates());
+	File::CreateFullPath(g_Config.memStickSavedataDirectory);
+	File::CreateFullPath(g_Config.saveStateDirectory);
 	g_Config.iSaveStateSlotCount = Ppsspp::SaveStateSlotCount;
 	g_Config.iCurrentStateSlot = std::clamp(g_Config.iCurrentStateSlot, 0, Ppsspp::SaveStateSlotCount - 1);
 	// flash0 (and flash1) are mounted from <nand root>/flash0, where the asset installer puts them
