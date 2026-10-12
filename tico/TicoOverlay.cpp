@@ -10,6 +10,7 @@
 #include "Common/Math/lin/matrix4x4.h"
 #include "Common/Render/ManagedTexture.h"
 #include "Common/System/Display.h"
+#include "Core/HW/Display.h"
 #include "ext/imgui/imgui.h"
 #include "ext/imgui/imgui_impl_thin3d.h"
 #define NANOSVG_IMPLEMENTATION
@@ -20,6 +21,7 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -1722,13 +1724,41 @@ void Overlay::DrawUI(float width, float height, float deltaTime) {
 	DrawStatus(drawList, displaySize, scale, ease, deltaTime);
 }
 
+// The FPS counter in its corner, drawn like the other tico cores' one.
+void Overlay::DrawFpsCounter(ImDrawList *drawList, ImVec2 displaySize, float scale) {
+	const int position = PpssppFpsCounterPosition();
+	if (position <= 0 || position > 4) {
+		return;
+	}
+	float fps = 0.0f;
+	__DisplayGetFPS(nullptr, &fps, nullptr);
+	char text[32];
+	std::snprintf(text, sizeof(text), "%.0f FPS", fps);
+
+	ImFont *font = ImGui::GetFont();
+	const float fontSize = ImGui::GetFontSize() * 0.6f;
+	const float margin = 12.0f * scale;
+	const float padX = 10.0f * scale;
+	const float padY = 4.0f * scale;
+	const ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text);
+	const float boxW = textSize.x + padX * 2.0f;
+	const float boxH = textSize.y + padY * 2.0f;
+	const bool right = position == 2 || position == 4;
+	const bool bottom = position == 3 || position == 4;
+	const ImVec2 p0(right ? displaySize.x - margin - boxW : margin,
+	                bottom ? displaySize.y - margin - boxH : margin);
+	drawList->AddRectFilled(p0, ImVec2(p0.x + boxW, p0.y + boxH), IM_COL32(0, 0, 0, 140), 8.0f * scale);
+	drawList->AddText(font, fontSize, ImVec2(p0.x + padX, p0.y + padY), IM_COL32(255, 255, 255, 230), text);
+}
+
 void Overlay::Render(Draw::DrawContext *draw) {
 	if (!ready_ || !context_ || !draw) {
 		return;
 	}
 
 	const bool hasRAAlerts = !RetroAchievements().Notifications().empty();
-	if (!visible_ && !hasRAAlerts) {
+	const bool showFps = PpssppFpsCounterPosition() > 0;
+	if (!visible_ && !hasRAAlerts && !showFps) {
 		return;
 	}
 
@@ -1754,6 +1784,8 @@ void Overlay::Render(Draw::DrawContext *draw) {
 			LoadLoaderTexture(draw);
 		}
 		DrawUI(width, height, io.DeltaTime);
+	} else {
+		DrawFpsCounter(ImGui::GetForegroundDrawList(), ImVec2(width, height), scale);
 	}
 	DrawRAAlerts(draw, ImGui::GetForegroundDrawList(), ImVec2(width, height), scale, io.DeltaTime);
 	ImGui::Render();

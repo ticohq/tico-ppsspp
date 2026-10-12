@@ -86,6 +86,7 @@ private:
 	void DrawSocialArea(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
 	void DrawHelpers(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
 	void DrawStatus(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease, float deltaTime);
+	void DrawFpsCounter(::ImDrawList *drawList, ::ImVec2 displaySize, float scale);
 	void DrawRAAlerts(Draw::DrawContext *draw, ::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
 	void CycleSetting(int direction);
 	void ApplyDisplaySettings(bool save);

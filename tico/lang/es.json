@@ -123,5 +123,7 @@
     "settings_ppsspp_texture_replacement": "Reemplazo de Texturas",
     "settings_ppsspp_texture_scaling_level": "Nivel de Escala de Textura",
     "settings_ppsspp_texture_scaling_type": "Tipo de Escala de Textura",
-    "settings_ppsspp_texture_shader": "Shader de Textura"
+    "settings_ppsspp_texture_shader": "Shader de Textura",
+    "settings_ppsspp_section_hud": "Información en pantalla",
+    "settings_ppsspp_fps_counter": "Contador de FPS"
 }

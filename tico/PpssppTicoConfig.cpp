@@ -110,6 +110,7 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
 })json";
 
 LsfgSettings g_lsfgSettings;
+int g_fpsCounterPosition = 0;
 
 constexpr const char *kMacAddressPath = "sdmc:/tico/system/psp/mac.txt";
 
@@ -182,6 +183,15 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 			lsfg.performanceMode = OptionEnabled(*value);
 		}
 		g_lsfgSettings = lsfg;
+	}
+
+	if (const std::string *value = FindOption(options, "fps_counter_position")) {
+		static constexpr const char *kPositions[] = { "hidden", "top_left", "top_right", "bottom_left", "bottom_right" };
+		g_fpsCounterPosition = 0;
+		for (int i = 1; i < 5; ++i) {
+			if (*value == kPositions[i])
+				g_fpsCounterPosition = i;
+		}
 	}
 
 	auto applyBool = [&](const char *key, bool &setting) {
@@ -568,6 +578,10 @@ PpssppCoreConfig::PpssppCoreConfig(LogCallback log)
 
 const LsfgSettings &PpssppLsfgSettings() {
 	return g_lsfgSettings;
+}
+
+int PpssppFpsCounterPosition() {
+	return g_fpsCounterPosition;
 }
 
 void PpssppCoreConfig::Load() {

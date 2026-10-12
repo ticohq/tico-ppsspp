@@ -123,5 +123,7 @@
     "settings_ppsspp_texture_replacement": "纹理替换",
     "settings_ppsspp_texture_scaling_level": "纹理缩放级别",
     "settings_ppsspp_texture_scaling_type": "纹理缩放类型",
-    "settings_ppsspp_texture_shader": "纹理着色器"
+    "settings_ppsspp_texture_shader": "纹理着色器",
+    "settings_ppsspp_section_hud": "屏幕信息",
+    "settings_ppsspp_fps_counter": "帧率计数器"
 }
