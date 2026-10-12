@@ -17,6 +17,8 @@
 #include "tico/TicoAssetInstaller.h"
 #include "tico/TicoAudioSfx.h"
 #include "tico/TicoOverlay.h"
+#include "dep/nlohmann/json.hpp"
+#include "tico/TicoSession.h"
 #include "tico/TicoRetroAchievements.h"
 
 #include "Common/CPUDetect.h"
@@ -1411,6 +1413,7 @@ void PpssppRuntime::RunFrame() {
 	} else {
 		RetroAchievements().FrameUpdate();
 		PSP_RunLoopWhileState();
+		tico::PlaytimeFrame(); // the game ran: to the player's playtime
 		UpdateFrameGeneration();
 	}
 
@@ -1478,6 +1481,7 @@ void PpssppRuntime::Shutdown() {
 		g_state.draw->EndFrame();
 		g_state.frameOpen = false;
 	}
+	tico::PlaytimeFlush(); // the game's last seconds
 	RetroAchievements().Shutdown();
 	SwitchLSFG_ResetSession();
 	if (PSP_IsInited() && !g_state.ppssppShutdown) {
