@@ -123,5 +123,7 @@
     "settings_ppsspp_texture_replacement": "Замена текстур",
     "settings_ppsspp_texture_scaling_level": "Уровень масштабирования текстур",
     "settings_ppsspp_texture_scaling_type": "Тип масштабирования текстур",
-    "settings_ppsspp_texture_shader": "Шейдер текстур"
+    "settings_ppsspp_texture_shader": "Шейдер текстур",
+    "settings_ppsspp_section_hud": "Экранная информация",
+    "settings_ppsspp_fps_counter": "Счётчик FPS"
 }

@@ -64,6 +64,10 @@ struct LsfgSettings {
 };
 const LsfgSettings &PpssppLsfgSettings();
 
+// fps_counter_position, as applied at launch: 0 hidden, then top left,
+// top right, bottom left, bottom right.
+int PpssppFpsCounterPosition();
+
 DisplaySettings LoadPpssppDisplaySettings(LogCallback log = {});
 void SavePpssppDisplaySettings(const DisplaySettings &settings, LogCallback log = {});
 DisplaySettings NormalizePpssppDisplaySettingsForCurrentMode(const DisplaySettings &settings);

@@ -123,5 +123,7 @@
     "settings_ppsspp_texture_replacement": "テクスチャ置換",
     "settings_ppsspp_texture_scaling_level": "テクスチャスケールレベル",
     "settings_ppsspp_texture_scaling_type": "テクスチャスケールタイプ",
-    "settings_ppsspp_texture_shader": "テクスチャシェーダー"
+    "settings_ppsspp_texture_shader": "テクスチャシェーダー",
+    "settings_ppsspp_section_hud": "画面表示",
+    "settings_ppsspp_fps_counter": "FPSカウンター"
 }

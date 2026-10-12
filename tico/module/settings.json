@@ -327,6 +327,39 @@
           ]
         },
         {
+          "title": "settings_ppsspp_section_hud",
+          "options": [
+            {
+              "key": "fps_counter_position",
+              "label": "settings_ppsspp_fps_counter",
+              "type": "enum",
+              "default": "hidden",
+              "choices": [
+                {
+                  "label": "Hidden",
+                  "value": "hidden"
+                },
+                {
+                  "label": "Top left",
+                  "value": "top_left"
+                },
+                {
+                  "label": "Top right",
+                  "value": "top_right"
+                },
+                {
+                  "label": "Bottom left",
+                  "value": "bottom_left"
+                },
+                {
+                  "label": "Bottom right",
+                  "value": "bottom_right"
+                }
+              ]
+            }
+          ]
+        },
+        {
           "title": "settings_ppsspp_section_frame_generation",
           "options": [
             {
