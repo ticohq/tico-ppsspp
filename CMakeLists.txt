@@ -1512,11 +1512,11 @@ if(USE_LIBNX)
 	file(COPY "${CMAKE_SOURCE_DIR}/tico/lang" DESTINATION "${tico-ppsspp_ROMFS_DIR}")
 
 	nx_generate_nacp(tico-ppsspp.nacp
-		NAME "tico PPSSPP"
-		AUTHOR "ticoverse.com"
+		NAME "tico-ppsspp"
+		AUTHOR "hrydgard/ticoverse.com"
 		VERSION "3.0.0"
 	)
-	nx_create_nro(tico-ppsspp NACP tico-ppsspp.nacp ROMFS "${tico-ppsspp_ROMFS_DIR}")
+	nx_create_nro(tico-ppsspp NACP tico-ppsspp.nacp ICON "${CMAKE_SOURCE_DIR}/tico/icon.jpg" ROMFS "${tico-ppsspp_ROMFS_DIR}")
 endif()
 
 if(UNITTEST)
