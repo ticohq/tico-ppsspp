@@ -112,7 +112,7 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
 LsfgSettings g_lsfgSettings;
 int g_fpsCounterPosition = 0;
 
-constexpr const char *kMacAddressPath = "sdmc:/tico/system/psp/mac.txt";
+constexpr const char *kMacAddressPath = "sdmc:/tico/system/ppsspp/mac.txt";
 
 // A MAC address made once and kept beside the core's data: tico's settings
 // screen writes ppsspp.jsonc from its own definitions and can drop

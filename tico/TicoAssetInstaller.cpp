@@ -17,7 +17,7 @@ namespace Tico {
 namespace {
 
 constexpr const char *kSourceAssetsRoot = "romfs:/assets";
-constexpr const char *kAssetInstallMarker = "sdmc:/tico/system/psp/.tico_assets_version";
+constexpr const char *kAssetInstallMarker = "sdmc:/tico/system/ppsspp/.tico_assets_version";
 constexpr const char *kAssetInstallVersion = "ppsspp-tico-assets-v4";
 constexpr size_t kCopyBufferSize = 64 * 1024;
 
@@ -31,11 +31,11 @@ constexpr std::array<const char *, 4> kRomfsOnlyTicoAssets = {{
 // Sentinel files only: these make startup validation cheap. The installer still
 // copies the whole PPSSPP asset tree recursively when this check fails.
 constexpr std::array<const char *, 5> kRequiredAssetSentinelFiles = {{
-	"sdmc:/tico/system/psp/flash0/font/ltn0.pgf",
-	"sdmc:/tico/system/psp/vfpu/vfpu_sqrt_lut.dat",
-	"sdmc:/tico/system/psp/lang/en_US.ini",
-	"sdmc:/tico/system/psp/ppge_atlas.zim",
-	"sdmc:/tico/system/psp/compat.ini",
+	"sdmc:/tico/system/ppsspp/flash0/font/ltn0.pgf",
+	"sdmc:/tico/system/ppsspp/vfpu/vfpu_sqrt_lut.dat",
+	"sdmc:/tico/system/ppsspp/lang/en_US.ini",
+	"sdmc:/tico/system/ppsspp/ppge_atlas.zim",
+	"sdmc:/tico/system/ppsspp/compat.ini",
 }};
 
 bool StatPath(const std::string &path, struct stat *out) {
