@@ -580,7 +580,10 @@ void Overlay::LoadSocial(Draw::DrawContext *draw) {
 	}
 
 #ifdef __SWITCH__
-	const Result initRc = accountInitialize(AccountServiceType_Application);
+	// The System account service, not Application: opening Application registers
+	// the process with ns each time, and in tico's chain of NROs in one process
+	// (tico, a game, tico, a game) the fourth registration makes ns abort.
+	const Result initRc = (R_SUCCEEDED(accountInitialize(AccountServiceType_System)) ? 0 : accountInitialize(AccountServiceType_Application));
 	if (R_FAILED(initRc)) {
 		LogMessage(log_, "tico overlay account init failed rc=0x%x", (unsigned)initRc);
 		return;
