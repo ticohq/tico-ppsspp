@@ -21,7 +21,7 @@
       ],
       "disc_based": true,
       "naming": "redump",
-      "games_file": "psp.json",
+      "games_file": "psp.dat",
       "retroachievements_id": 41,
       "colors": {
         "start": "E65FC8",
