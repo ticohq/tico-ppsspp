@@ -10,7 +10,9 @@ constexpr const char *Lang = "sdmc:/tico/lang";
 constexpr const char *System = "sdmc:/tico/system";
 constexpr const char *CoreConfigDir = "sdmc:/tico/config/cores";
 constexpr const char *PpssppCoreConfig = "sdmc:/tico/config/cores/ppsspp.jsonc";
-constexpr const char *PpssppDataRoot = "sdmc:/tico/system/psp";
+constexpr const char *PpssppDataRoot = "sdmc:/tico/system/ppsspp";
+// Before 3.0.1 the emulator's folder was named after the console
+constexpr const char *LegacyPpssppDataRoot = "sdmc:/tico/system/psp";
 constexpr const char *SavesRoot = "sdmc:/tico/saves";
 constexpr const char *PpssppSaveDataRoot = "sdmc:/tico/saves/psp";
 constexpr const char *StatesRoot = "sdmc:/tico/states";

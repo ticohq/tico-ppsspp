@@ -87,6 +87,9 @@ bool Main::InitPlatform() {
 	mkdir(Paths::Assets, 0777);
 	mkdir(Paths::Lang, 0777);
 	mkdir(Paths::System, 0777);
+	struct stat st;
+	if (stat(Paths::PpssppDataRoot, &st) != 0 && stat(Paths::LegacyPpssppDataRoot, &st) == 0)
+		rename(Paths::LegacyPpssppDataRoot, Paths::PpssppDataRoot); // tico moves it too; this may start without tico
 	mkdir(Paths::PpssppDataRoot, 0777);
 	mkdir(Paths::SavesRoot, 0777);
 	mkdir(Paths::PpssppSaveDataRoot, 0777);

@@ -5,6 +5,7 @@
   "launch": "\"{nro}\" \"{rom}\" \"{title}\"",
   "settings": "config/modules/ppsspp/settings.json",
   "config_file": "ppsspp.jsonc",
+  "system_dir": "ppsspp",
   "is_libretro": true,
   "systems": [
     {
