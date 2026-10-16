@@ -125,5 +125,6 @@
     "settings_ppsspp_texture_scaling_type": "Texture Scaling Type",
     "settings_ppsspp_texture_shader": "Texture Shader",
     "settings_ppsspp_section_hud": "On-screen info",
-    "settings_ppsspp_fps_counter": "FPS counter"
+    "settings_ppsspp_fps_counter": "FPS counter",
+    "emulator_quick_menu_tip": "Press {plus} and {minus} together to open the quick menu"
 }

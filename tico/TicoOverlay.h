@@ -6,6 +6,7 @@
 #include "tico/TicoCoreConfig.h"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -88,6 +89,7 @@ private:
 	void DrawStatus(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease, float deltaTime);
 	void DrawFpsCounter(::ImDrawList *drawList, ::ImVec2 displaySize, float scale);
 	void DrawRAAlerts(Draw::DrawContext *draw, ::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
+	void UpdateQuickMenuTip(::ImDrawList *drawList, ::ImVec2 displaySize, float scale);
 	void CycleSetting(int direction);
 	void ApplyDisplaySettings(bool save);
 	void LoadSocial(Draw::DrawContext *draw);
@@ -126,6 +128,13 @@ private:
 	int cheatVerticalNavDir_ = 0;
 	int cheatHorizontalNavDir_ = 0;
 	float animTimer_ = 0.0f;
+	// tico's General > Quick Menu Tip: waiting for smooth play, then shown
+	enum class TipState { Off, Waiting, Showing };
+	TipState tipState_ = TipState::Off;
+	float tipSteady_ = 0.0f;
+	float tipTimer_ = 0.0f;
+	std::chrono::steady_clock::time_point tipLastFrame_;
+	bool tipHasLastFrame_ = false;
 	float loaderTimer_ = 0.0f;
 	std::string title_;
 	std::string nickname_ = "Player 1";

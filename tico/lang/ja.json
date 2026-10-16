@@ -125,5 +125,6 @@
     "settings_ppsspp_texture_scaling_type": "テクスチャスケールタイプ",
     "settings_ppsspp_texture_shader": "テクスチャシェーダー",
     "settings_ppsspp_section_hud": "画面表示",
-    "settings_ppsspp_fps_counter": "FPSカウンター"
+    "settings_ppsspp_fps_counter": "FPSカウンター",
+    "emulator_quick_menu_tip": "{plus}と{minus}を同時に押すとクイックメニューが開きます"
 }
