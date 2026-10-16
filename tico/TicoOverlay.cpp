@@ -212,6 +212,84 @@ void DrawSwitchButtonPrompt(ImDrawList *drawList, ImFont *font, float fontSize, 
 	drawList->AddText(font, symbolSize, ImVec2(center.x - textSize.x * 0.5f, center.y - textSize.y * 0.5f), textColor, symbol);
 }
 
+// tico's General > Quick Menu Tip (quick_menu_tip in general.jsonc), on unless turned off.
+bool QuickMenuTipEnabled() {
+	std::string text;
+	if (!tico::ReadSettings("general", text)) {
+		return true;
+	}
+	const nlohmann::json root = nlohmann::json::parse(text, nullptr, false);
+	if (!root.is_object() || !root.contains("quick_menu_tip") || !root["quick_menu_tip"].is_boolean()) {
+		return true;
+	}
+	return root["quick_menu_tip"].get<bool>();
+}
+
+// Many players never find out that Plus and Minus together open the menu: once
+// the game runs smoothly after its start, a pill rises from the bottom edge.
+constexpr float kTipSteadySeconds = 1.5f;  // smooth play before it rises
+constexpr float kTipFrameGap = 0.1f;       // a longer gap between frames is not smooth
+constexpr float kTipSlideDuration = 0.35f;
+constexpr float kTipHoldDuration = 5.0f;
+
+// The pill, shown of the way up from below the bottom edge (0..1). The
+// translation marks where the buttons go with {plus} and {minus}.
+void DrawQuickMenuTip(ImDrawList *drawList, ImVec2 displaySize, float scale, float shown) {
+	const std::string text = tr("emulator_quick_menu_tip");
+	struct Piece {
+		std::string text;
+		const char *button;  // nullptr for text
+	};
+	std::vector<Piece> pieces;
+	for (size_t at = 0; at < text.size();) {
+		const size_t plus = text.find("{plus}", at);
+		const size_t minus = text.find("{minus}", at);
+		const size_t next = std::min(plus, minus);
+		if (next == std::string::npos) {
+			pieces.push_back({text.substr(at), nullptr});
+			break;
+		}
+		if (next > at) {
+			pieces.push_back({text.substr(at, next - at), nullptr});
+		}
+		pieces.push_back({std::string(), next == plus ? "+" : "-"});
+		at = next + (next == plus ? 6 : 7);
+	}
+
+	ImFont *font = ImGui::GetFont();
+	const float fontSize = ImGui::GetFontSize() * 0.8f;
+	const float buttonSize = fontSize * 1.2f;
+	const float buttonGap = 4.0f * scale;
+	const float padX = 22.0f * scale;
+	const float padY = 10.0f * scale;
+	float contentW = 0.0f;
+	for (const Piece &piece : pieces) {
+		contentW += piece.button ? buttonSize + buttonGap * 2.0f
+		                         : font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, piece.text.c_str()).x;
+	}
+	const float pillH = std::max(fontSize, buttonSize) + padY * 2.0f;
+	const float pillW = contentW + padX * 2.0f;
+	const float pillX = (displaySize.x - pillW) * 0.5f;
+	const float shownY = displaySize.y - 28.0f * scale - pillH;
+	const float hiddenY = displaySize.y + 4.0f * scale;
+	const float pillY = hiddenY + (shownY - hiddenY) * shown;
+	const float alpha = std::clamp(shown, 0.0f, 1.0f);
+
+	drawList->AddRectFilled(ImVec2(pillX, pillY), ImVec2(pillX + pillW, pillY + pillH),
+		IM_COL32(0, 0, 0, (int)(175.0f * alpha)), pillH * 0.5f);
+	const float midY = pillY + pillH * 0.5f;
+	float x = pillX + padX;
+	for (const Piece &piece : pieces) {
+		if (piece.button) {
+			DrawSwitchButtonPrompt(drawList, font, fontSize * 1.3f, ImVec2(x + buttonGap + buttonSize * 0.5f, midY), buttonSize, piece.button, alpha);
+			x += buttonSize + buttonGap * 2.0f;
+		} else {
+			drawList->AddText(font, fontSize, ImVec2(x, midY - fontSize * 0.5f), IM_COL32(255, 255, 255, (int)(240.0f * alpha)), piece.text.c_str());
+			x += font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, piece.text.c_str()).x;
+		}
+	}
+}
+
 void DrawRotatingImage(ImDrawList *drawList, ImTextureID textureId, ImVec2 center, float size, float angle, ImU32 color) {
 	const float half = size * 0.5f;
 	const float cosA = std::cos(angle);
@@ -473,6 +551,11 @@ bool Overlay::Init(Draw::DrawContext *draw, const char *gamePath, LogCallback lo
 		return true;
 	}
 	TranslationManager::Instance().Init(log_);
+	if (QuickMenuTipEnabled()) {
+		tipState_ = TipState::Waiting;
+		tipSteady_ = 0.0f;
+		tipHasLastFrame_ = false;
+	}
 
 	IMGUI_CHECKVERSION();
 	context_ = ImGui::CreateContext();
@@ -1754,6 +1837,49 @@ void Overlay::DrawFpsCounter(ImDrawList *drawList, ImVec2 displaySize, float sca
 	drawList->AddText(font, fontSize, ImVec2(p0.x + padX, p0.y + padY), IM_COL32(255, 255, 255, 230), text);
 }
 
+// Every frame the overlay draws: waits for smooth play, then shows the pill.
+// Opening the menu first drops it (they found it).
+void Overlay::UpdateQuickMenuTip(ImDrawList *drawList, ImVec2 displaySize, float scale) {
+	if (tipState_ == TipState::Off) {
+		return;
+	}
+	if (visible_) {
+		tipState_ = TipState::Off;
+		return;
+	}
+	// Real time between frames: the frame's delta is fixed here
+	const auto now = std::chrono::steady_clock::now();
+	const float gap = tipHasLastFrame_ ? std::chrono::duration<float>(now - tipLastFrame_).count() : kTipFrameGap * 2.0f;
+	tipLastFrame_ = now;
+	tipHasLastFrame_ = true;
+
+	if (tipState_ == TipState::Waiting) {
+		if (gap > kTipFrameGap) {
+			tipSteady_ = 0.0f;
+			return;
+		}
+		tipSteady_ += gap;
+		if (tipSteady_ < kTipSteadySeconds) {
+			return;
+		}
+		tipState_ = TipState::Showing;
+		tipTimer_ = 0.0f;
+	}
+
+	tipTimer_ += std::min(gap, kTipFrameGap);
+	if (tipTimer_ >= kTipSlideDuration * 2.0f + kTipHoldDuration) {
+		tipState_ = TipState::Off;
+		return;
+	}
+	float shown = 1.0f;
+	if (tipTimer_ < kTipSlideDuration) {
+		shown = EaseOutCubic(tipTimer_ / kTipSlideDuration);
+	} else if (tipTimer_ > kTipSlideDuration + kTipHoldDuration) {
+		shown = 1.0f - EaseOutCubic((tipTimer_ - kTipSlideDuration - kTipHoldDuration) / kTipSlideDuration);
+	}
+	DrawQuickMenuTip(drawList, displaySize, scale, shown);
+}
+
 void Overlay::Render(Draw::DrawContext *draw) {
 	if (!ready_ || !context_ || !draw) {
 		return;
@@ -1761,7 +1887,9 @@ void Overlay::Render(Draw::DrawContext *draw) {
 
 	const bool hasRAAlerts = !RetroAchievements().Notifications().empty();
 	const bool showFps = PpssppFpsCounterPosition() > 0;
-	if (!visible_ && !hasRAAlerts && !showFps) {
+	// Waiting for smooth play needs the frames drawn too
+	const bool tipActive = tipState_ != TipState::Off;
+	if (!visible_ && !hasRAAlerts && !showFps && !tipActive) {
 		return;
 	}
 
@@ -1790,6 +1918,7 @@ void Overlay::Render(Draw::DrawContext *draw) {
 	} else {
 		DrawFpsCounter(ImGui::GetForegroundDrawList(), ImVec2(width, height), scale);
 	}
+	UpdateQuickMenuTip(ImGui::GetForegroundDrawList(), ImVec2(width, height), scale);
 	DrawRAAlerts(draw, ImGui::GetForegroundDrawList(), ImVec2(width, height), scale, io.DeltaTime);
 	ImGui::Render();
 
