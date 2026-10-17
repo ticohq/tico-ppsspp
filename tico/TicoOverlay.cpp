@@ -212,6 +212,25 @@ void DrawSwitchButtonPrompt(ImDrawList *drawList, ImFont *font, float fontSize, 
 	drawList->AddText(font, symbolSize, ImVec2(center.x - textSize.x * 0.5f, center.y - textSize.y * 0.5f), textColor, symbol);
 }
 
+// tico's theme (dark_mode in display.jsonc): tico starts in the light one.
+// Read each time the menu opens, as the other cores' overlay does.
+bool s_dark = false;
+
+bool DarkMode() {
+	std::string text;
+	if (!tico::ReadSettings("display", text)) {
+		return false;
+	}
+	const nlohmann::json root = nlohmann::json::parse(text, nullptr, false, true);
+	return root.is_object() && root.contains("dark_mode") && root["dark_mode"].is_boolean() &&
+		root["dark_mode"].get<bool>();
+}
+
+// The dark colour or the light one, as in the other cores' overlay.
+ImU32 Themed(int dr, int dg, int db, int lr, int lg, int lb, int a) {
+	return s_dark ? IM_COL32(dr, dg, db, a) : IM_COL32(lr, lg, lb, a);
+}
+
 // tico's General > Quick Menu Tip (quick_menu_tip in general.jsonc), on unless turned off.
 bool QuickMenuTipEnabled() {
 	std::string text;
@@ -315,7 +334,7 @@ void DrawFallbackSpinner(ImDrawList *drawList, ImVec2 center, float radius, floa
 		const float lineAlpha = alpha * (0.25f + 0.75f * ((float)i / 7.0f));
 		const ImVec2 p0(center.x + std::cos(t) * radius * 0.45f, center.y + std::sin(t) * radius * 0.45f);
 		const ImVec2 p1(center.x + std::cos(t) * radius, center.y + std::sin(t) * radius);
-		drawList->AddLine(p0, p1, IM_COL32(235, 235, 235, (int)(255.0f * lineAlpha)), 2.0f * scale);
+		drawList->AddLine(p0, p1, Themed(235, 235, 235, 60, 60, 70, (int)(255.0f * lineAlpha)), 2.0f * scale);
 	}
 }
 
@@ -900,6 +919,9 @@ void Overlay::SetVisible(bool visible) {
 	}
 
 	visible_ = visible;
+	if (visible) {
+		s_dark = DarkMode(); // tico's theme may have changed since
+	}
 	menu_ = Menu::Quick;
 	selection_ = 0;
 	settingsSelection_ = 0;
@@ -1363,7 +1385,7 @@ void Overlay::DrawMenu(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 	const ImVec2 menuMax(menuPos.x + menuSize.x, menuPos.y + menuSize.y);
 	const float cornerRadius = 16.0f * scale;
 
-	drawList->AddRectFilled(menuPos, menuMax, IM_COL32(45, 45, 45, (int)(255.0f * ease)), cornerRadius);
+	drawList->AddRectFilled(menuPos, menuMax, Themed(45, 45, 45, 242, 245, 248, (int)(255.0f * ease)), cornerRadius);
 
 	ImFont *font = ImGui::GetFont();
 	const float labelSize = ImGui::GetFontSize() * (menu_ == Menu::Cheats ? kCheatTextScale : 0.85f);
@@ -1386,7 +1408,7 @@ void Overlay::DrawMenu(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 				corners = ImDrawFlags_RoundCornersBottom;
 				itemRadius = cornerRadius;
 			}
-			drawList->AddRectFilled(itemMin, itemMax, IM_COL32(60, 60, 60, (int)(255.0f * ease)), itemRadius, corners);
+			drawList->AddRectFilled(itemMin, itemMax, Themed(60, 60, 60, 220, 224, 230, (int)(255.0f * ease)), itemRadius, corners);
 		}
 
 		char slotLabel[128];
@@ -1454,20 +1476,20 @@ void Overlay::DrawMenu(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 		const float textAreaHeight = std::max(1.0f, rowHeight - rowTopPadding);
 		const float textY = itemMin.y + rowTopPadding + (textAreaHeight - textSize.y) * 0.5f;
 		const ImU32 textColor = metadataRow
-			? IM_COL32(165, 165, 165, (int)(235.0f * ease))
-			: (selected ? IM_COL32(255, 255, 255, (int)(255.0f * ease)) : IM_COL32(200, 200, 200, (int)(255.0f * ease)));
+			? Themed(165, 165, 165, 130, 130, 140, (int)(235.0f * ease))
+			: (selected ? Themed(255, 255, 255, 60, 60, 70, (int)(255.0f * ease)) : Themed(200, 200, 200, 90, 90, 100, (int)(255.0f * ease)));
 		if (drawCheckbox) {
 			const float boxSize = 18.0f * scale;
 			const float boxX = itemMin.x + 20.0f * scale;
 			const float boxY = itemMin.y + (rowHeight - boxSize) * 0.5f;
 			const ImVec2 boxMin(boxX, boxY);
 			const ImVec2 boxMax(boxX + boxSize, boxY + boxSize);
-			const ImU32 borderColor = selected ? IM_COL32(255, 255, 255, (int)(230.0f * ease)) : IM_COL32(180, 180, 180, (int)(210.0f * ease));
-			const ImU32 fillColor = checkboxChecked ? IM_COL32(230, 230, 230, (int)(245.0f * ease)) : IM_COL32(30, 30, 30, (int)(130.0f * ease));
+			const ImU32 borderColor = selected ? Themed(255, 255, 255, 60, 60, 70, (int)(230.0f * ease)) : Themed(180, 180, 180, 110, 110, 120, (int)(210.0f * ease));
+			const ImU32 fillColor = checkboxChecked ? Themed(230, 230, 230, 60, 60, 70, (int)(245.0f * ease)) : Themed(30, 30, 30, 205, 210, 216, (int)(130.0f * ease));
 			drawList->AddRectFilled(boxMin, boxMax, fillColor, 4.0f * scale);
 			drawList->AddRect(boxMin, boxMax, borderColor, 4.0f * scale, 1.5f * scale);
 			if (checkboxChecked) {
-				const ImU32 checkColor = IM_COL32(40, 40, 40, (int)(255.0f * ease));
+				const ImU32 checkColor = Themed(40, 40, 40, 245, 245, 248, (int)(255.0f * ease));
 				drawList->AddLine(
 					ImVec2(boxX + 4.0f * scale, boxY + 9.5f * scale),
 					ImVec2(boxX + 7.5f * scale, boxY + 13.0f * scale),
@@ -1486,7 +1508,7 @@ void Overlay::DrawMenu(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 			if (loaderTexture_) {
 				const ImTextureID textureId = ImGui_ImplThin3d_AddTextureTemp(loaderTexture_);
 				DrawRotatingImage(drawList, textureId, loaderCenter, loaderSize, angle,
-					IM_COL32(255, 255, 255, (int)(230.0f * ease)));
+					Themed(255, 255, 255, 60, 60, 70, (int)(230.0f * ease)));
 			} else {
 				DrawFallbackSpinner(drawList, loaderCenter, loaderSize * 0.48f, angle, scale, ease);
 			}
@@ -1524,12 +1546,12 @@ void Overlay::DrawMenu(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 		const float trackY = menuPos.y + trackMargin;
 		const float trackHeight = menuSize.y - trackMargin * 2.0f;
 		drawList->AddRectFilled(ImVec2(trackX, trackY), ImVec2(trackX + trackWidth, trackY + trackHeight),
-			IM_COL32(80, 80, 80, (int)(180.0f * ease)), trackWidth * 0.5f);
+			Themed(80, 80, 80, 205, 210, 216, (int)(180.0f * ease)), trackWidth * 0.5f);
 		const float thumbHeight = std::max(24.0f * scale, trackHeight * ((float)visibleItemCount / (float)totalItemCount));
 		const float scrollRange = std::max(1.0f, (float)(totalItemCount - visibleItemCount));
 		const float thumbY = trackY + (trackHeight - thumbHeight) * ((float)firstItem / scrollRange);
 		drawList->AddRectFilled(ImVec2(trackX, thumbY), ImVec2(trackX + trackWidth, thumbY + thumbHeight),
-			IM_COL32(190, 190, 190, (int)(220.0f * ease)), trackWidth * 0.5f);
+			Themed(190, 190, 190, 100, 100, 110, (int)(220.0f * ease)), trackWidth * 0.5f);
 	}
 }
 
